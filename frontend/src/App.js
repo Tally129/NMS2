@@ -50,6 +50,9 @@ import ImportClients from "./pages/portal/ImportClients";
 import Analytics from "./pages/portal/Analytics";
 import AppointmentsEHR from "./pages/provider/AppointmentsEHR";
 import TelehealthHub from "./pages/portal/TelehealthHub";
+import Tasks from "./pages/portal/Tasks";
+import LabReviewQueue from "./pages/portal/LabReviewQueue";
+import CampaignCenter from "./pages/portal/CampaignCenter";
 import StaffLogin from "./pages/StaffLogin";
 import OAuthComplete from "./pages/OAuthComplete";
 import StaffDashboard from "./pages/staff/StaffDashboard";
@@ -85,6 +88,9 @@ function App() {
             <Route path="/portal/patient/telehealth" element={<Protected roles={["client"]}><TelehealthHub /></Protected>} />
             <Route path="/portal/provider/telehealth" element={<Protected roles={["practitioner", "admin"]}><TelehealthHub /></Protected>} />
             <Route path="/portal/staff/telehealth" element={<Protected roles={["staff", "admin"]}><TelehealthHub /></Protected>} />
+            <Route path="/portal/staff/tasks" element={<Protected roles={["staff", "admin", "medical_assistant", "practitioner"]}><Tasks /></Protected>} />
+            <Route path="/portal/staff/lab-review" element={<Protected roles={["staff", "admin", "medical_assistant", "practitioner"]}><LabReviewQueue /></Protected>} />
+            <Route path="/portal/staff/campaigns" element={<Protected roles={["staff", "admin", "practitioner"]}><CampaignCenter /></Protected>} />
             <Route path="/portal/admin/telehealth" element={<Protected roles={["admin"]}><TelehealthHub /></Protected>} />
 
             {/* Staff portal (front-desk-first) */}

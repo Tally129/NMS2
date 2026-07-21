@@ -234,3 +234,64 @@ _Last updated: Feb 27, 2026 (Final Security Closure Release — deps, malware, c
 - 3 delegation assertions: MA without delegation 403s on note create, admin cannot finalize even own drafts, granted MA can create + edit + audit trail carries authorizing_provider_id + revoke returns MA to read-only
 
 _Last updated: Feb 20, 2026 (Telehealth Waiting Room + Delegated Clinical Editing)_
+
+## Feb 21, 2026 — Task Manager · Lab Review Queue · Campaign Center
+
+Three lean internal-workflow modules, all reusing existing infrastructure
+(audit log, notifiers, delegations, clients collection). No new
+communication systems, no CRM, no drip automation.
+
+### 1. Internal Task Manager (`routers/tasks.py`, `pages/portal/Tasks.jsx`)
+- New collection `internal_tasks` with title, patient link (optional),
+  assigned_staff, assigned_provider, due_date, priority (low/normal/high/
+  urgent), status (new/in_progress/waiting/completed), category
+  (review_labs, call_patient, follow_up_appointment, collect_payment,
+  review_intake, upload_documents, insurance_followup, telehealth_followup,
+  other), internal_notes, created_by, completed_by, history log
+- Endpoints: `POST/GET/PATCH/DELETE /api/tasks`, `GET /api/tasks/dashboard/summary`
+- Filters: mine, status, priority, due_before, client_id, category, search
+- **Dashboard widget** (`components/TasksWidget.jsx`) — My Tasks · Overdue ·
+  Due Today · Waiting; red overdue notification badge (badge-only, no email/SMS)
+- History records every status change, reassignment, and note
+
+### 2. Lab Review Queue (`routers/lab_review.py`, `pages/portal/LabReviewQueue.jsx`)
+- **Reuses existing `lab_values` collection** — no second lab module
+- Adds `review_status` (new / waiting_for_review / reviewed /
+  patient_notified / follow_up_needed), `reviewed_by`, `notified_by`,
+  `review_history` audit trail on the existing lab document
+- Endpoints: `GET /api/labs/review-queue`, `PATCH /api/labs/{id}/review-status`,
+  `POST /api/labs/{id}/create-task`
+- Providers transition freely; Admins/Medical Assistants must have an active
+  delegation for the client (reuses `delegations.has_active_delegation`)
+- One-click "To task" button converts any lab into a linked internal task
+  (auto-fills category=review_labs, linked_lab_id set)
+- Every status change audit-logged with `lab.review_status` action
+
+### 3. Campaign Center (`routers/campaigns.py`, `pages/portal/CampaignCenter.jsx`)
+- New collection `campaigns` — title, subject, message, channel (email/sms),
+  filter_type, filter_params, schedule_at, delivery_log, stats
+- **Reuses existing SendGrid + Twilio notifiers** — no duplicate senders
+- Endpoints: `POST /api/campaigns/estimate` (dry-run recipient count with
+  exclusion breakdown), `POST /api/campaigns` (send-now or schedule),
+  `GET /api/campaigns`, `GET /api/campaigns/{id}`, `POST /api/campaigns/{id}/run`
+- Audience filters: all_marketing · inactive · upcoming_appointments ·
+  due_for_followup · membership · treatment_group
+- **Automatic exclusions**: `consent_marketing == false` → marketing_opt_out;
+  invalid email regex → invalid_email; invalid phone → invalid_phone.
+  Every exclusion recorded in delivery_log with structured reason.
+- Estimator shows candidates / eligible / skipped-by-reason before sending
+- Scheduled campaigns are stored with `status=scheduled` (no cron in this
+  build — admin runs manually via `/campaigns/{id}/run`)
+
+**Tests** — `backend/tests/test_tasks_labs_campaigns.py`, **18/18 passing**
+- Task Manager: create, list-filter, status transition + history, reassign,
+  complete, dashboard summary shape, invalid priority rejected, client-role
+  forbidden
+- Lab Review: default queue excludes notified, provider transitions, MA
+  denied without delegation, create-task-from-lab links correctly
+- Campaigns: estimate excludes opt-outs, email requires subject, send-now
+  writes delivery_log + stats with skipped reasons, schedule stores
+  correctly, list + get, invalid filter type rejected
+
+_Last updated: Feb 21, 2026 (Task Manager · Lab Review · Campaign Center)_
+

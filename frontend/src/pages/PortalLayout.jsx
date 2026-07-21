@@ -9,6 +9,9 @@ import {
   FileText,
   FolderOpen,
   ClipboardList,
+  ClipboardCheck,
+  FlaskConical,
+  Megaphone,
   ShieldCheck,
   LogOut,
   UserCog,
@@ -122,6 +125,9 @@ const NAV = {
       group: "Clients",
       items: [
         { to: "/portal/staff/patients", label: "Clients", icon: Users },
+        { to: "/portal/staff/tasks", label: "Tasks", icon: ClipboardCheck },
+        { to: "/portal/staff/lab-review", label: "Lab Review", icon: FlaskConical },
+        { to: "/portal/staff/campaigns", label: "Campaigns", icon: Megaphone },
       ],
     },
     {
