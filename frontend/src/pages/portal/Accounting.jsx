@@ -120,8 +120,8 @@ function SalesSection() {
   const navigate = useNavigate();
   // Sales pages already live under other routes. Show a directory to open them.
   const cards = [
-    { title: "Point of Sale",   subtitle: "Ring up invoices, take payments, apply memberships & gift cards.", to: "/portal/pos", icon: ShoppingBag },
-    { title: "Front Desk",      subtitle: "Check-ins, memberships, and daily patient flow.", to: "/portal/front-desk", icon: RcpIcon },
+    { title: "Point of Sale",   subtitle: "Ring up invoices, take payments, apply memberships & gift cards.", to: "/portal/admin/pos", icon: ShoppingBag },
+    { title: "Front Desk",      subtitle: "Check-ins, memberships, and daily patient flow.", to: "/portal/admin/front-desk", icon: RcpIcon },
     { title: "Sales report (MTD)", subtitle: "Detailed revenue-by-category report.", to: null, icon: BarChart3 },
   ];
   return (
@@ -619,13 +619,36 @@ function BillsPane() {
   const { toast } = useToast();
   const bills = useAsyncGet("/accounting/bills", null, "bills");
   const vendors = useAsyncGet("/accounting/vendors", null, "vendors");
+  const [showNew, setShowNew] = React.useState(false);
+  const [bf, setBf] = React.useState({ vendor_id: "", amount: "", memo: "" });
   const payBill = async (b) => {
     await api.post(`/accounting/bills/${b.id}/pay`, null, { params: { payment_method: "check" } });
     toast({ title: "Bill paid" });
     bills.refetch();
   };
+  const submitBill = async () => {
+    if (!bf.vendor_id || !bf.amount) {
+      return toast({ title: "Choose a vendor and amount" });
+    }
+    try {
+      await api.post("/accounting/bills", {
+        vendor_id: bf.vendor_id,
+        amount_cents: Math.round(Number(bf.amount) * 100),
+        memo: bf.memo,
+      });
+      toast({ title: "Bill added" });
+      setShowNew(false);
+      setBf({ vendor_id: "", amount: "", memo: "" });
+      bills.refetch();
+    } catch (e) { toast({ title: "Failed", description: getErrorMessage(e) || "" }); }
+  };
   return (
     <div className="mt-4" data-testid="bills-pane">
+      <div className="flex justify-end mb-3">
+        <Button onClick={() => setShowNew(true)} className="bg-[#2f6a4a] hover:bg-[#265739] text-white rounded-full" data-testid="new-bill-btn">
+          New bill
+        </Button>
+      </div>
       <AsyncPanel {...bills} onRetry={bills.refetch} errorMessage="Couldn't load bills" emptyMessage="No open bills.">
         <div className="rounded-2xl border border-[#e2ebe4] bg-white overflow-x-auto">
           <table className="w-full text-sm min-w-[520px]">
@@ -636,23 +659,65 @@ function BillsPane() {
                   <td className="p-3">{(vendors.data || []).find((v) => v.id === b.vendor_id)?.name || "—"}</td>
                   <td className="p-3 text-right">{fmt(b.amount_cents)}</td>
                   <td className="p-3 text-xs">{b.status}</td>
-                  <td className="p-3 text-right">{b.status !== "paid" && <Button size="sm" onClick={() => payBill(b)} className="h-7 bg-[#2f6a4a] text-white rounded-full">Pay</Button>}</td>
+                  <td className="p-3 text-right">{b.status !== "paid" && <Button size="sm" onClick={() => payBill(b)} className="h-7 bg-[#2f6a4a] text-white rounded-full" data-testid={`pay-bill-${b.id}`}>Pay</Button>}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       </AsyncPanel>
+      <Dialog open={showNew} onOpenChange={setShowNew}>
+        <DialogContent className="bg-white" data-testid="new-bill-dialog">
+          <DialogHeader><DialogTitle className="font-display text-2xl">New bill</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div><Label>Vendor</Label>
+              <Select value={bf.vendor_id} onValueChange={(v) => setBf({ ...bf, vendor_id: v })}>
+                <SelectTrigger data-testid="new-bill-vendor"><SelectValue placeholder="Choose vendor" /></SelectTrigger>
+                <SelectContent>{(vendors.data || []).map((v) => <SelectItem key={v.id} value={v.id}>{v.name}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+            <div><Label>Amount</Label><Input type="number" value={bf.amount} onChange={(e) => setBf({ ...bf, amount: e.target.value })} data-testid="new-bill-amount" /></div>
+            <div><Label>Memo</Label><Textarea rows={2} value={bf.memo} onChange={(e) => setBf({ ...bf, memo: e.target.value })} /></div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowNew(false)}>Cancel</Button>
+            <Button onClick={submitBill} className="bg-[#2f6a4a] hover:bg-[#265739] text-white rounded-full" data-testid="new-bill-submit">Add bill</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
 
 /* ------ Payroll ------ */
 function PayrollTab() {
+  const { toast } = useToast();
   const employees = useAsyncGet("/accounting/employees", null, "employees");
   const runs = useAsyncGet("/accounting/payroll/runs", null, "payroll-runs");
+  const [showRun, setShowRun] = React.useState(false);
+  const [rf, setRf] = React.useState({ period_start: "", period_end: "" });
+  const submitRun = async () => {
+    if (!rf.period_start || !rf.period_end) {
+      return toast({ title: "Enter start and end dates" });
+    }
+    try {
+      await api.post("/accounting/payroll/runs", {
+        period_start: new Date(rf.period_start).toISOString(),
+        period_end: new Date(rf.period_end).toISOString(),
+      });
+      toast({ title: "Payroll run created" });
+      setShowRun(false);
+      setRf({ period_start: "", period_end: "" });
+      runs.refetch();
+    } catch (e) { toast({ title: "Failed", description: getErrorMessage(e) || "" }); }
+  };
   return (
     <div className="mt-5 space-y-5" data-testid="payroll-tab">
+      <div className="flex justify-end">
+        <Button onClick={() => setShowRun(true)} className="bg-[#2f6a4a] hover:bg-[#265739] text-white rounded-full" data-testid="new-payroll-run-btn">
+          New payroll run
+        </Button>
+      </div>
       <AsyncPanel {...employees} onRetry={employees.refetch} errorMessage="Couldn't load employees" emptyMessage="No employees yet.">
         <div className="rounded-2xl border border-[#e2ebe4] bg-white p-5 overflow-x-auto">
           <h3 className="font-display text-xl mb-3">Employees &amp; contractors</h3>
@@ -690,6 +755,19 @@ function PayrollTab() {
           </table>
         </div>
       </AsyncPanel>
+      <Dialog open={showRun} onOpenChange={setShowRun}>
+        <DialogContent className="bg-white" data-testid="payroll-run-dialog">
+          <DialogHeader><DialogTitle className="font-display text-2xl">New payroll run</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div><Label>Period start</Label><Input type="date" value={rf.period_start} onChange={(e) => setRf({ ...rf, period_start: e.target.value })} data-testid="payroll-start" /></div>
+            <div><Label>Period end</Label><Input type="date" value={rf.period_end} onChange={(e) => setRf({ ...rf, period_end: e.target.value })} data-testid="payroll-end" /></div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowRun(false)}>Cancel</Button>
+            <Button onClick={submitRun} className="bg-[#2f6a4a] hover:bg-[#265739] text-white rounded-full" data-testid="payroll-submit">Create run</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

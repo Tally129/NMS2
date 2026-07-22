@@ -12,9 +12,16 @@ import { getErrorMessage } from "../../../lib/errors";
  * Prevents the infinite-render loop caused by inline `new Date().toISOString()`.
  */
 export function useAsyncGet(url, params, key) {
-  const [state, setState] = React.useState({ data: null, loading: true, error: null });
+  const [state, setState] = React.useState({ data: null, loading: !!url, error: null });
   const stableKey = typeof key === "string" ? key : JSON.stringify(key ?? params ?? url);
   const run = React.useCallback(async () => {
+    // Passing url=null means "not ready to fetch yet" (e.g. before the user
+    // picks an account for GL). Show empty/loading gracefully without
+    // hitting the network.
+    if (!url) {
+      setState({ data: null, loading: false, error: null });
+      return;
+    }
     setState((s) => ({ ...s, loading: true, error: null }));
     try {
       const r = await api.get(url, params ? { params } : undefined);

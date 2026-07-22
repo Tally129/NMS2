@@ -12,10 +12,14 @@ import {
  */
 export function QuickActions({ onNewExpense, onNewTransfer, onNewJournal, onPayVendor, onRunPayroll }) {
   const navigate = useNavigate();
+  // Accounting is admin-only, so navigate to the admin-prefixed POS route
+  // (the real invoice/payment surface).  /portal/pos does NOT exist and
+  // navigating there produces a blank page.
+  const openPOS = () => navigate("/portal/admin/pos");
   const items = [
     { key: "new-expense",     label: "New expense",     Icon: Receipt,        onClick: onNewExpense },
-    { key: "new-invoice",     label: "New invoice",     Icon: FileText,       onClick: () => navigate("/portal/pos") },
-    { key: "receive-payment", label: "Receive payment", Icon: Wallet,         onClick: () => navigate("/portal/pos") },
+    { key: "new-invoice",     label: "New invoice",     Icon: FileText,       onClick: openPOS },
+    { key: "receive-payment", label: "Receive payment", Icon: Wallet,         onClick: openPOS },
     { key: "new-transfer",    label: "Transfer funds",  Icon: ArrowRightLeft, onClick: onNewTransfer },
     { key: "record-deposit",  label: "Record deposit",  Icon: PlusCircle,     onClick: onNewJournal },
     { key: "pay-vendor",      label: "Pay vendor",      Icon: Users,          onClick: onPayVendor },
