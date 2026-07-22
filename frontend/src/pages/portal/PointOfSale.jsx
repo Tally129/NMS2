@@ -48,6 +48,7 @@ export default function PointOfSale() {
       toast({ title: "Failed to load catalog", description: getErrorMessage(e) || "" });
     }
   };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   React.useEffect(() => { load(); }, []);
 
   const addTreatment = (t) => {

@@ -26,6 +26,7 @@ export default function AdminNotesList() {
   React.useEffect(() => {
     api.get("/practitioners").then((r) => setProviders(r.data || [])).catch(() => {});
   }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   React.useEffect(() => { const t = setTimeout(load, 250); return () => clearTimeout(t); }, [providerFilter, search]);
 
   return (

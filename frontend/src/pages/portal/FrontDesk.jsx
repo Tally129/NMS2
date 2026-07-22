@@ -49,6 +49,7 @@ export default function FrontDesk() {
     load();
     const t = setInterval(load, 30_000);
     return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const checkIn = async () => {

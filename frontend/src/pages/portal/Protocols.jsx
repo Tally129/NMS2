@@ -62,6 +62,7 @@ export default function Protocols() {
       toast({ title: "Failed to load", description: getErrorMessage(e) || "" });
     }
   };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   React.useEffect(() => { loadAll(); }, [showInactive]);
 
   const filteredEnr = enrollments.filter((e) => {

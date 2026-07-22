@@ -51,6 +51,7 @@ export default function TimeClock() {
     }
   };
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   React.useEffect(() => { load(); }, []);
   React.useEffect(() => {
     const t = setInterval(() => setTick((x) => x + 1), 30_000);

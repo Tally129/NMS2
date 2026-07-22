@@ -24,6 +24,7 @@ export default function AdminCompliance() {
     try { const r = await api.get("/compliance/baa-checklist"); setRows(r.data || []); }
     catch (e) { toast({ title: "Failed to load", description: getErrorMessage(e) || "" }); }
   };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   React.useEffect(() => { load(); }, []);
 
   const update = async (key, patch) => {

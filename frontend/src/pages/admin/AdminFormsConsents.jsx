@@ -66,6 +66,7 @@ export default function AdminFormsConsents() {
       toast({ title: "Failed to load", description: getErrorMessage(e) || "" });
     }
   };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   React.useEffect(() => { load(); }, [includeInactive]);
 
   const filteredTpls = templates.filter((t) => {
