@@ -24,8 +24,11 @@ const fmt = (cents) => {
   return `${sign}$${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
 
-export default function BankingTab() {
-  const [subtab, setSubtab] = React.useState("dashboard");
+export default function BankingTab({ initialSubtab }) {
+  const [subtab, setSubtab] = React.useState(initialSubtab || "dashboard");
+  React.useEffect(() => {
+    if (initialSubtab) setSubtab(initialSubtab);
+  }, [initialSubtab]);
   return (
     <div className="mt-5" data-testid="banking-tab">
       <div className="flex flex-wrap gap-2 mb-4 border-b border-[#e2ebe4] pb-3">

@@ -1,4 +1,5 @@
 import React from "react";
+import { useNavigate } from "react-router-dom";
 import PortalLayout, { PortalHeader } from "../PortalLayout";
 import api from "../../lib/api";
 import { Button } from "../../components/ui/button";
@@ -40,6 +41,8 @@ export default function Accounting() {
     try { return localStorage.getItem("acct.section") || "overview"; }
     catch { return "overview"; }
   });
+  const [expensesSubtab, setExpensesSubtab] = React.useState("expenses");
+  const [advancedSubtab, setAdvancedSubtab] = React.useState("journal");
   const [newExpenseOpen, setNewExpenseOpen] = React.useState(false);
   const [newJournalOpen, setNewJournalOpen] = React.useState(false);
   const [newTransferOpen, setNewTransferOpen] = React.useState(false);
@@ -49,6 +52,15 @@ export default function Accounting() {
     try { localStorage.setItem("acct.section", k); } catch {}
   };
 
+  // Quick-action handlers force the correct sub-tab BEFORE opening dialog so
+  // the dialog's parent is guaranteed to be mounted (e.g. Record deposit
+  // requires Advanced/Journal, Pay vendor requires Expenses/Bills).
+  const qaNewExpense = () => { goto("expenses"); setExpensesSubtab("expenses"); setNewExpenseOpen(true); };
+  const qaNewTransfer = () => { goto("money"); setNewTransferOpen(true); };
+  const qaNewJournal = () => { goto("advanced"); setAdvancedSubtab("journal"); setNewJournalOpen(true); };
+  const qaPayVendor = () => { goto("expenses"); setExpensesSubtab("bills"); };
+  const qaRunPayroll = () => { goto("advanced"); setAdvancedSubtab("payroll"); };
+
   return (
     <PortalLayout>
       <PortalHeader
@@ -57,9 +69,11 @@ export default function Accounting() {
       />
 
       <QuickActions
-        onOpenNewExpense={() => { goto("expenses"); setNewExpenseOpen(true); }}
-        onOpenNewTransfer={() => { goto("money"); setNewTransferOpen(true); }}
-        onOpenNewJournal={() => { goto("advanced"); setNewJournalOpen(true); }}
+        onNewExpense={qaNewExpense}
+        onNewTransfer={qaNewTransfer}
+        onNewJournal={qaNewJournal}
+        onPayVendor={qaPayVendor}
+        onRunPayroll={qaRunPayroll}
       />
 
       {/* Top-level section nav — only ONE section renders at a time */}
@@ -83,39 +97,41 @@ export default function Accounting() {
       {section === "overview" && <OverviewSection onGoTo={goto} />}
       {section === "money"    && <MoneySection openTransfer={newTransferOpen} setOpenTransfer={setNewTransferOpen} />}
       {section === "sales"    && <SalesSection />}
-      {section === "expenses" && <ExpensesSection openNew={newExpenseOpen} setOpenNew={setNewExpenseOpen} />}
+      {section === "expenses" && <ExpensesSection tab={expensesSubtab} setTab={setExpensesSubtab} openNew={newExpenseOpen} setOpenNew={setNewExpenseOpen} />}
       {section === "reports"  && <ReportsSection />}
-      {section === "advanced" && <AdvancedSection openJournal={newJournalOpen} setOpenJournal={setNewJournalOpen} />}
+      {section === "advanced" && <AdvancedSection tab={advancedSubtab} setTab={setAdvancedSubtab} openJournal={newJournalOpen} setOpenJournal={setNewJournalOpen} />}
     </PortalLayout>
   );
 }
 
 /* ================================================================= MONEY */
-function MoneySection() {
+function MoneySection({ openTransfer }) {
   // Banking already covers accounts, transactions, reconciliation, exceptions,
-  // transfers, and cash reports. Reuse it wholesale.
+  // transfers, and cash reports. Jump to Transfers when Quick Action fires.
   return (
     <div data-testid="money-section">
-      <BankingTab />
+      <BankingTab initialSubtab={openTransfer ? "transfers" : undefined} />
     </div>
   );
 }
 
 /* ================================================================= SALES */
 function SalesSection() {
+  const navigate = useNavigate();
   // Sales pages already live under other routes. Show a directory to open them.
   const cards = [
     { title: "Point of Sale",   subtitle: "Ring up invoices, take payments, apply memberships & gift cards.", to: "/portal/pos", icon: ShoppingBag },
     { title: "Front Desk",      subtitle: "Check-ins, memberships, and daily patient flow.", to: "/portal/front-desk", icon: RcpIcon },
-    { title: "Sales report (MTD)", subtitle: "Detailed revenue-by-category report.", to: null, icon: BarChart3, section: "reports" },
+    { title: "Sales report (MTD)", subtitle: "Detailed revenue-by-category report.", to: null, icon: BarChart3 },
   ];
   return (
     <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4" data-testid="sales-section">
       {cards.map((c) => (
-        <a
+        <button
           key={c.title}
-          href={c.to || "#"}
-          className="rounded-2xl border border-[#e2ebe4] bg-white p-5 hover:shadow-sm transition block"
+          type="button"
+          onClick={() => c.to && navigate(c.to)}
+          className="rounded-2xl border border-[#e2ebe4] bg-white p-5 hover:shadow-sm transition text-left"
           data-testid={`sales-card-${c.title.toLowerCase().replace(/\W+/g, "-")}`}
         >
           <div className="flex items-center gap-2 text-[#3d6b52] mb-2">
@@ -123,7 +139,7 @@ function SalesSection() {
             <div className="eyebrow">{c.title}</div>
           </div>
           <p className="text-sm text-slate-500">{c.subtitle}</p>
-        </a>
+        </button>
       ))}
       <div className="rounded-2xl border border-dashed border-[#e2ebe4] bg-white p-5 text-sm text-slate-500 md:col-span-2 lg:col-span-3" data-testid="sales-note">
         Gift cards, packages, and store-credit ledgers post to the same accounting engine.
@@ -134,8 +150,7 @@ function SalesSection() {
 }
 
 /* ============================================================== EXPENSES */
-function ExpensesSection({ openNew, setOpenNew }) {
-  const [tab, setTab] = React.useState("expenses");
+function ExpensesSection({ tab, setTab, openNew, setOpenNew }) {
   const tabs = [
     { k: "expenses", label: "Expenses" },
     { k: "vendors",  label: "Vendors" },
@@ -266,8 +281,7 @@ function ReportsSection() {
 }
 
 /* =============================================================== ADVANCED */
-function AdvancedSection({ openJournal, setOpenJournal }) {
-  const [tab, setTab] = React.useState("journal");
+function AdvancedSection({ tab, setTab, openJournal, setOpenJournal }) {
   const tabs = [
     { k: "journal",  label: "Transaction history",   subtitle: "Journal Entries" },
     { k: "gl",       label: "Account activity",      subtitle: "General Ledger" },

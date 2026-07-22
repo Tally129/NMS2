@@ -10,16 +10,16 @@ import {
  * Reusable Quick Actions bar. Every button either dispatches an event other
  * components listen to, or opens an existing page. NO new backend calls.
  */
-export function QuickActions({ onOpenNewExpense, onOpenNewTransfer, onOpenNewJournal }) {
+export function QuickActions({ onNewExpense, onNewTransfer, onNewJournal, onPayVendor, onRunPayroll }) {
   const navigate = useNavigate();
   const items = [
-    { key: "new-expense",   label: "New expense",      Icon: Receipt,       onClick: onOpenNewExpense },
-    { key: "new-invoice",   label: "New invoice",      Icon: FileText,      onClick: () => navigate("/portal/pos") },
-    { key: "receive-payment", label: "Receive payment", Icon: Wallet,        onClick: () => navigate("/portal/pos") },
-    { key: "new-transfer",  label: "Transfer funds",   Icon: ArrowRightLeft, onClick: onOpenNewTransfer },
-    { key: "record-deposit", label: "Record deposit",  Icon: PlusCircle,    onClick: onOpenNewJournal },
-    { key: "pay-vendor",    label: "Pay vendor",       Icon: Users,         onClick: onOpenNewJournal },
-    { key: "run-payroll",   label: "Run payroll",      Icon: ShoppingCart,  onClick: onOpenNewJournal },
+    { key: "new-expense",     label: "New expense",     Icon: Receipt,        onClick: onNewExpense },
+    { key: "new-invoice",     label: "New invoice",     Icon: FileText,       onClick: () => navigate("/portal/pos") },
+    { key: "receive-payment", label: "Receive payment", Icon: Wallet,         onClick: () => navigate("/portal/pos") },
+    { key: "new-transfer",    label: "Transfer funds",  Icon: ArrowRightLeft, onClick: onNewTransfer },
+    { key: "record-deposit",  label: "Record deposit",  Icon: PlusCircle,     onClick: onNewJournal },
+    { key: "pay-vendor",      label: "Pay vendor",      Icon: Users,          onClick: onPayVendor },
+    { key: "run-payroll",     label: "Run payroll",     Icon: ShoppingCart,   onClick: onRunPayroll },
   ];
   return (
     <div className="rounded-2xl border border-[#e2ebe4] bg-[#f4f7f2] p-3 mb-5" data-testid="quick-actions">
