@@ -61,10 +61,11 @@ export default function BankingTab() {
 /* ------------------------------------------------------------------ dashboard */
 function CashDashboardPane() {
   const [data, setData] = React.useState(null);
-  const load = () => api.get("/accounting/cash/dashboard").then((r) => setData(r.data));
+  const load = () => api.get("/accounting/cash/dashboard").then((r) => setData(r.data || null)).catch(() => {});
   React.useEffect(() => { load(); }, []);
-  if (!data) return <div className="text-slate-500 text-sm">Loading…</div>;
+  if (!data || !data.totals) return <div className="text-slate-500 text-sm">Loading…</div>;
   const t = data.totals;
+  const accounts = Array.isArray(data.accounts) ? data.accounts : [];
   return (
     <div className="space-y-5" data-testid="cash-dashboard">
       <div className="grid md:grid-cols-4 gap-4">
@@ -89,7 +90,7 @@ function CashDashboardPane() {
             </tr>
           </thead>
           <tbody>
-            {data.accounts.map((a) => (
+            {accounts.map((a) => (
               <tr key={a.id} className="border-t border-[#e2ebe4]" data-testid={`cash-row-${a.id}`}>
                 <td className="p-3">{a.name} <span className="text-xs text-slate-400 font-mono">· {a.gl_code}</span></td>
                 <td className="p-3 text-xs uppercase text-slate-500">{a.kind}</td>
@@ -116,8 +117,8 @@ function BankAccountsPane() {
   const [coa, setCoa] = React.useState([]);
   const [showNew, setShowNew] = React.useState(false);
   const [form, setForm] = React.useState({ name: "", kind: "checking", gl_account_code: "", institution: "", last_four: "" });
-  const load = () => api.get("/accounting/bank-accounts", { params: { include_inactive: true } }).then((r) => setRows(r.data));
-  React.useEffect(() => { load(); api.get("/accounting/accounts").then((r) => setCoa(r.data)); }, []);
+  const load = () => api.get("/accounting/bank-accounts", { params: { include_inactive: true } }).then((r) => setRows(Array.isArray(r.data) ? r.data : [])).catch(() => {});
+  React.useEffect(() => { load(); api.get("/accounting/accounts").then((r) => setCoa(Array.isArray(r.data) ? r.data : [])).catch(() => {}); }, []);
   const save = async () => {
     try {
       await api.post("/accounting/bank-accounts", form);
@@ -221,14 +222,15 @@ function ReconciliationPane() {
 
   React.useEffect(() => {
     api.get("/accounting/bank-accounts").then((r) => {
-      setAccounts(r.data);
-      if (r.data[0]) setSelected(r.data[0].id);
-    });
+      const list = Array.isArray(r.data) ? r.data : [];
+      setAccounts(list);
+      if (list[0]) setSelected(list[0].id);
+    }).catch(() => {});
   }, []);
 
   const loadWs = React.useCallback(() => {
     if (!selected) return;
-    api.get(`/accounting/reconciliation/${selected}/workspace`).then((r) => setWs(r.data));
+    api.get(`/accounting/reconciliation/${selected}/workspace`).then((r) => setWs(r.data)).catch(() => {});
   }, [selected]);
   React.useEffect(loadWs, [loadWs]);
 
@@ -335,7 +337,7 @@ function ReconciliationPane() {
         </div>
       )}
 
-      {ws && (
+      {ws && ws.counts && (
         <div className="grid md:grid-cols-2 gap-4">
           <div className="rounded-2xl border border-[#e2ebe4] bg-white p-4" data-testid="recon-bank-side">
             <div className="flex justify-between mb-2">
@@ -345,7 +347,7 @@ function ReconciliationPane() {
             <div className="max-h-[400px] overflow-y-auto">
               <table className="w-full text-xs">
                 <tbody>
-                  {ws.bank_transactions.slice(0, 100).map((bt) => (
+                  {(ws.bank_transactions || []).slice(0, 100).map((bt) => (
                     <tr key={bt.id} className="border-t border-[#eef1eb]" data-testid={`bt-${bt.id}`}>
                       <td className="py-1">{new Date(bt.posted_at).toLocaleDateString()}</td>
                       <td className="truncate max-w-[200px]" title={bt.description}>{bt.description}</td>
@@ -377,7 +379,7 @@ function ReconciliationPane() {
             <div className="max-h-[400px] overflow-y-auto">
               <table className="w-full text-xs">
                 <tbody>
-                  {ws.journal_entries.slice(0, 100).map((je) => (
+                  {(ws.journal_entries || []).slice(0, 100).map((je) => (
                     <tr key={je.id} className="border-t border-[#eef1eb]" data-testid={`je-${je.id}`}>
                       <td className="py-1">{new Date(je.posted_at).toLocaleDateString()}</td>
                       <td className="truncate max-w-[220px]" title={je.memo}>{je.memo}</td>
@@ -413,8 +415,8 @@ function ReconciliationPane() {
 /* ------------------------------------------------------------------ exceptions */
 function ExceptionsPane() {
   const [data, setData] = React.useState(null);
-  React.useEffect(() => { api.get("/accounting/reconciliation/exceptions").then((r) => setData(r.data)); }, []);
-  if (!data) return <div className="text-slate-500 text-sm">Loading…</div>;
+  React.useEffect(() => { api.get("/accounting/reconciliation/exceptions").then((r) => setData(r.data || null)).catch(() => {}); }, []);
+  if (!data || !data.counts) return <div className="text-slate-500 text-sm">Loading…</div>;
   const c = data.counts;
   return (
     <div className="space-y-4" data-testid="exceptions-pane">
@@ -466,8 +468,8 @@ function TransfersPane() {
   const [rows, setRows] = React.useState([]);
   const [form, setForm] = React.useState({ from_bank_account_id: "", to_bank_account_id: "", amount: "", memo: "" });
   const load = () => {
-    api.get("/accounting/bank-accounts").then((r) => setAccts(r.data));
-    api.get("/accounting/transfers").then((r) => setRows(r.data));
+    api.get("/accounting/bank-accounts").then((r) => setAccts(Array.isArray(r.data) ? r.data : [])).catch(() => {});
+    api.get("/accounting/transfers").then((r) => setRows(Array.isArray(r.data) ? r.data : [])).catch(() => {});
   };
   React.useEffect(load, []);
   const submit = async () => {
@@ -539,14 +541,14 @@ function ReportsPane() {
   const start = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
   const end = now.toISOString();
   React.useEffect(() => {
-    api.get("/accounting/cash/outstanding-reconciliation").then((r) => setOutRec(r.data));
-    api.get("/accounting/cash/flow", { params: { start, end } }).then((r) => setFlow(r.data));
+    api.get("/accounting/cash/outstanding-reconciliation").then((r) => setOutRec(r.data || null)).catch(() => {});
+    api.get("/accounting/cash/flow", { params: { start, end } }).then((r) => setFlow(r.data || null)).catch(() => {});
   }, [start, end]);
   return (
     <div className="grid md:grid-cols-2 gap-4" data-testid="banking-reports">
       <div className="rounded-2xl border border-[#e2ebe4] bg-white p-4">
         <div className="eyebrow text-[#3d6b52] mb-2">Cash flow (MTD)</div>
-        {flow ? (
+        {flow && flow.totals ? (
           <>
             <Row label="Inflow" value={fmt(flow.totals.inflow_cents)} />
             <Row label="Outflow" value={fmt(flow.totals.outflow_cents)} />
@@ -556,7 +558,7 @@ function ReportsPane() {
       </div>
       <div className="rounded-2xl border border-[#e2ebe4] bg-white p-4">
         <div className="eyebrow text-[#3d6b52] mb-2">Outstanding reconciliation</div>
-        {outRec ? (
+        {outRec && outRec.totals ? (
           <>
             <Row label="Unmatched bank" value={fmt(outRec.totals.unmatched_bank_cents)} />
             <Row label="Unmatched ledger" value={fmt(outRec.totals.unmatched_ledger_cents)} />

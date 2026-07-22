@@ -38,10 +38,10 @@ export default function HealthTab() {
   const [loadingVal, setLoadingVal] = React.useState(false);
 
   const loadDashboard = React.useCallback(() => {
-    api.get("/accounting/dashboard").then((r) => setDashboard(r.data));
+    api.get("/accounting/dashboard").then((r) => setDashboard(r.data)).catch(() => {});
   }, []);
   const loadRuns = React.useCallback(() => {
-    api.get("/accounting/backfill/runs").then((r) => setRuns(r.data)).catch(() => {});
+    api.get("/accounting/backfill/runs").then((r) => setRuns(Array.isArray(r.data) ? r.data : [])).catch(() => {});
   }, []);
 
   React.useEffect(() => { loadDashboard(); loadRuns(); }, [loadDashboard, loadRuns]);
@@ -136,7 +136,7 @@ export default function HealthTab() {
       </div>
 
       {/* Validation report */}
-      {validation && (
+      {validation && validation.checks && (
         <section className="rounded-2xl border border-[#e2ebe4] bg-white p-5" data-testid="validation-report">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2 text-[#3d6b52]">
@@ -148,7 +148,7 @@ export default function HealthTab() {
             </Badge>
           </div>
           <div className="grid md:grid-cols-2 gap-3">
-            {Object.entries(validation.checks).map(([name, check]) => (
+            {Object.entries(validation.checks || {}).map(([name, check]) => (
               <div key={name} className="rounded-xl border border-[#eef1eb] p-3" data-testid={`check-${name}`}>
                 <div className="flex justify-between items-center">
                   <div className="text-sm capitalize">{name.replace(/_/g, " ")}</div>
