@@ -17,9 +17,12 @@ from audit import get_client_ip, log_audit
 from deps import _strip_id, api, db, require_roles
 from models import new_id
 
+from accounting import backfill as backfill_mod
 from accounting import chart_of_accounts as coa_mod
+from accounting import dashboard as dashboard_mod
 from accounting import journal as journal_mod
 from accounting import reports as reports_mod
+from accounting import validation as validation_mod
 from accounting.events import EVENT_TYPES, AccountingEvent, emit
 
 
@@ -577,3 +580,80 @@ async def stripe_reconciliation(user=Depends(require_roles("admin"))):
     rows = await db.integration_log.find({"service": "stripe"}).sort(
         "ts", -1).to_list(500)
     return [_strip_id(r) for r in rows]
+
+
+# =========================================================================== #
+# SPRINT 1.5 — DASHBOARD / VALIDATION / BACKFILL                                #
+# =========================================================================== #
+@api.get("/accounting/dashboard")
+async def accounting_dashboard(
+    user=Depends(require_roles("admin", "practitioner"))
+):
+    """Health widgets: cash, A/R, A/P, revenue windows, liabilities, ledger health."""
+    return await dashboard_mod.snapshot()
+
+
+@api.get("/accounting/validate")
+async def accounting_validate(
+    user=Depends(require_roles("admin", "practitioner"))
+):
+    """Run every ledger validation check and return a single health report."""
+    return await validation_mod.run_all()
+
+
+class BackfillIn(BaseModel):
+    sources: List[str] = Field(default_factory=list)   # empty = all supported
+
+
+@api.post("/accounting/backfill/dry-run")
+async def backfill_dry_run(payload: BackfillIn,
+                            user=Depends(require_roles("admin"))):
+    return await backfill_mod.preview(payload.sources)
+
+
+@api.post("/accounting/backfill/execute")
+async def backfill_execute(payload: BackfillIn, request: Request,
+                            user=Depends(require_roles("admin"))):
+    run = await backfill_mod.start_run(payload.sources, user)
+    # Run inline (small datasets) OR in background if you want to return early.
+    # For the medical practice sizes we're targeting we execute inline so the
+    # UI sees final counters. Background hook is available for very large sets.
+    result = await backfill_mod.execute_run(run["id"])
+    await log_audit(db, user["id"], user["email"], "accounting.backfill.execute",
+                    resource_type="backfill_run", resource_id=run["id"],
+                    metadata={"sources": result.get("sources"),
+                              "totals": result.get("totals")},
+                    ip=get_client_ip(request))
+    return _strip_id(result)
+
+
+@api.get("/accounting/backfill/runs")
+async def backfill_list_runs(limit: int = Query(50, le=200),
+                              user=Depends(require_roles("admin"))):
+    rows = await db.accounting_backfill_runs.find({}).sort(
+        "started_at", -1
+    ).to_list(limit)
+    return [_strip_id(r) for r in rows]
+
+
+@api.get("/accounting/backfill/runs/{run_id}")
+async def backfill_get_run(run_id: str,
+                            user=Depends(require_roles("admin"))):
+    row = await db.accounting_backfill_runs.find_one({"id": run_id})
+    if not row:
+        raise HTTPException(status_code=404)
+    return _strip_id(row)
+
+
+@api.post("/accounting/backfill/runs/{run_id}/resume")
+async def backfill_resume(run_id: str, request: Request,
+                           user=Depends(require_roles("admin"))):
+    try:
+        result = await backfill_mod.resume_run(run_id)
+    except ValueError:
+        raise HTTPException(status_code=404)
+    await log_audit(db, user["id"], user["email"], "accounting.backfill.resume",
+                    resource_type="backfill_run", resource_id=run_id,
+                    metadata={"totals": result.get("totals")},
+                    ip=get_client_ip(request))
+    return _strip_id(result)

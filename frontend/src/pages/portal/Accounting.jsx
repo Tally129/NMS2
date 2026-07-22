@@ -16,10 +16,11 @@ import {
 } from "../../components/ui/dialog";
 import {
   BookText, Receipt, Users, Wallet, Landmark, FileText, Download,
-  Percent, ClipboardList, ChevronRight,
+  Percent, ClipboardList, ChevronRight, Activity,
 } from "lucide-react";
 import { useToast } from "../../hooks/use-toast";
 import { getErrorMessage } from "../../lib/errors";
+import HealthTab from "./AccountingHealthTab";
 
 const fmt = (cents) => `$${(Number(cents || 0) / 100).toFixed(2)}`;
 
@@ -31,8 +32,9 @@ export default function Accounting() {
         title="Accounting"
         subtitle="Chart of Accounts · Journal · General Ledger · Reports · Vendors · Payroll · Tax · 1099"
       />
-      <Tabs defaultValue="reports" className="w-full">
+      <Tabs defaultValue="health" className="w-full">
         <TabsList className="bg-[#f4f7f2] border border-[#e2ebe4] flex flex-wrap gap-1 h-auto p-1" data-testid="accounting-tabs">
+          <TabsTrigger value="health" data-testid="tab-health">Health &amp; Backfill</TabsTrigger>
           <TabsTrigger value="reports" data-testid="tab-reports">Reports</TabsTrigger>
           <TabsTrigger value="journal" data-testid="tab-journal">Journal</TabsTrigger>
           <TabsTrigger value="gl" data-testid="tab-gl">General Ledger</TabsTrigger>
@@ -43,6 +45,7 @@ export default function Accounting() {
           <TabsTrigger value="tax" data-testid="tab-tax">Tax</TabsTrigger>
           <TabsTrigger value="1099" data-testid="tab-1099">1099</TabsTrigger>
         </TabsList>
+        <TabsContent value="health"><HealthTab /></TabsContent>
         <TabsContent value="reports"><ReportsTab /></TabsContent>
         <TabsContent value="journal"><JournalTab /></TabsContent>
         <TabsContent value="gl"><GeneralLedgerTab /></TabsContent>
