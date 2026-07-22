@@ -164,6 +164,23 @@ api.interceptors.response.use(
     // Backend RBAC is untouched — the network 403 still happens; we just stop
     // it from being a client-side crash source.
     if (status === 403) {
+      // Distinguish REAL RBAC denials from session-recoverable states.
+      // When the backend answers 403 with `code: mfa_reauth_required` or
+      // `code: must_enroll_mfa`, the user IS authorized but their SESSION
+      // is missing an MFA gate — force them back to /login rather than
+      // showing a misleading "You don't have access" everywhere.
+      const detail = error?.response?.data?.detail;
+      const code = (detail && typeof detail === "object") ? detail.code : null;
+      if (code === "mfa_reauth_required" || code === "must_enroll_mfa") {
+        _access_token = null;
+        localStorage.removeItem(LS.user);
+        broadcastAuth(code);
+        if (!window.location.pathname.startsWith("/login")
+            && !window.location.pathname.startsWith("/staff-login")) {
+          window.location.href = "/staff-login?reason=" + code;
+        }
+        return Promise.reject(error);
+      }
       // Log once per URL at debug so a real permission bug can be diagnosed.
       // eslint-disable-next-line no-console
       console.debug("[nms] 403 auth denial resolved as empty:", error?.config?.url);
@@ -174,9 +191,9 @@ api.interceptors.response.use(
         headers: error?.response?.headers || {},
         config: error?.config,
         __isAuthDenied: true,
-        __errorMessage: (typeof error?.response?.data?.detail === "string"
-          ? error.response.data.detail
-          : error?.response?.data?.detail?.message) || "You don't have access.",
+        __errorMessage: (typeof detail === "string"
+          ? detail
+          : detail?.message) || "You don't have access.",
       };
     }
     return Promise.reject(error);
