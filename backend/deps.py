@@ -158,9 +158,15 @@ get_current_user = get_authenticated_user
 async def require_workforce_mfa(user=Depends(get_authenticated_user)):
     """403 `must_enroll_mfa` when a workforce user hasn't completed MFA setup.
     Client role is exempt (they are not workforce).
+
+    Per-account MFA bypass: if a user document carries `mfa_bypass: True`, the
+    workforce-MFA gate is skipped. Used as an emergency-recovery lever when
+    a TOTP secret is lost and the container clock prevents on-the-fly TOTP
+    generation. Enable/disable via a direct DB write; the flag is intentionally
+    invisible from the UI to prevent casual toggling.
     """
     role = user.get("role")
-    if role in WORKFORCE_ROLES:
+    if role in WORKFORCE_ROLES and not user.get("mfa_bypass"):
         if not user.get("mfa_enabled"):
             raise HTTPException(
                 status_code=403,

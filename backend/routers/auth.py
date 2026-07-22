@@ -758,8 +758,11 @@ async def google_session_exchange(request: Request):
             {"$set": {"auth_provider": "google", "picture_url": data.get("picture")}},
         )
 
-    # Google users are always role=client here → session starts mfa-satisfied.
-    sid, family_id, raw_refresh = await _create_session(user, request, mfa_satisfied=(user["role"] not in WORKFORCE_ROLES))
+    # Google-authenticated workforce users can bypass the internal TOTP step
+    # when the user's account carries `mfa_bypass=True` — Google's own 2FA
+    # counts as the second factor. Non-workforce (clients) never need TOTP.
+    google_trusts_mfa = bool(user.get("mfa_bypass")) or (user["role"] not in WORKFORCE_ROLES)
+    sid, family_id, raw_refresh = await _create_session(user, request, mfa_satisfied=google_trusts_mfa)
     access = make_access_token(user["id"], user["role"], sid, session_version=user.get("session_version", 1))
     await log_audit(db, user["id"], user["email"], "auth.login_google",
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
