@@ -31,15 +31,19 @@ const channelIcon = (c) => (c === "sms" ? MessageSquare : Mail);
 const statusChip = (s) => ({
   scheduled: "bg-[#fdf3d0] text-[#8a6a3c]",
   sending: "bg-[#e0eaf3] text-[#3a5a7a]",
+  processing: "bg-[#e0eaf3] text-[#3a5a7a]",
   sent: "bg-[#eaf2ec] text-[#3d6b52]",
+  completed: "bg-[#eaf2ec] text-[#3d6b52]",
   sent_with_failures: "bg-[#fdf3d0] text-[#8a6a3c]",
   failed: "bg-[#fdecec] text-[#7a2a2a]",
+  cancelled: "bg-slate-100 text-slate-500",
   draft: "bg-slate-100 text-slate-500",
 }[s] || "bg-slate-100 text-slate-500");
 
 export default function CampaignCenter() {
   const { toast } = useToast();
   const [campaigns, setCampaigns] = React.useState([]);
+  const [config, setConfig] = React.useState(null);
   const [showNew, setShowNew] = React.useState(false);
   const [selected, setSelected] = React.useState(null);
 
@@ -53,6 +57,30 @@ export default function CampaignCenter() {
   }, [toast]);
 
   React.useEffect(() => { load(); }, [load]);
+  React.useEffect(() => {
+    api.get("/campaigns/config/delivery")
+      .then((r) => setConfig(r.data))
+      .catch(() => setConfig(null));
+  }, []);
+
+  const cancel = async (c) => {
+    try {
+      await api.post(`/campaigns/${c.id}/cancel`);
+      toast({ title: "Campaign cancelled" });
+      load();
+    } catch (e) {
+      toast({ title: "Cancel failed", description: getErrorMessage(e) || "" });
+    }
+  };
+  const retry = async (c) => {
+    try {
+      await api.post(`/campaigns/${c.id}/retry`);
+      toast({ title: "Campaign retrying" });
+      load();
+    } catch (e) {
+      toast({ title: "Retry failed", description: getErrorMessage(e) || "" });
+    }
+  };
 
   return (
     <PortalLayout>
@@ -69,6 +97,28 @@ export default function CampaignCenter() {
           </Button>
         }
       />
+
+      {config && config.simulated && (
+        <div
+          data-testid="campaign-simulated-banner"
+          className="mb-5 rounded-2xl border border-[#e6d38a] bg-[#fdf3d0] p-4 flex items-start gap-3"
+        >
+          <AlertTriangle size={16} className="mt-0.5 text-[#8a6a3c] flex-shrink-0" />
+          <div className="text-sm text-[#8a6a3c]">
+            <div className="font-medium">Simulated delivery — no live messages will be sent.</div>
+            <div className="text-xs mt-1">
+              Email: {config.email.mode === "live" ? "LIVE (SendGrid)" : "SIMULATED (sent_stub)"}
+              {" · "}
+              SMS: {config.sms.mode === "live" ? "LIVE (Twilio)" : "SIMULATED (sent_stub)"}
+              {!config.email.sendgrid_api_key && " · Missing SENDGRID_API_KEY"}
+              {!config.email.sendgrid_from_email && " · Missing SENDGRID_FROM_EMAIL"}
+              {!config.sms.twilio_account_sid && " · Missing TWILIO_ACCOUNT_SID"}
+              {!config.sms.twilio_auth_token && " · Missing TWILIO_AUTH_TOKEN"}
+              {!config.sms.twilio_from_number && " · Missing TWILIO_FROM_NUMBER"}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="rounded-2xl border border-[#e2ebe4] bg-white overflow-hidden" data-testid="campaign-list">
         {campaigns.length === 0 ? (
@@ -114,7 +164,7 @@ export default function CampaignCenter() {
                     <td className="p-3 text-xs text-slate-500">
                       {new Date(c.created_at).toLocaleDateString()}
                     </td>
-                    <td className="p-3 text-right">
+                    <td className="p-3 text-right space-x-1">
                       <Button
                         size="sm" variant="outline"
                         className="h-8 rounded-full border-[#cfe0d3] text-[#2f6a4a]"
@@ -123,6 +173,26 @@ export default function CampaignCenter() {
                       >
                         Details
                       </Button>
+                      {c.status === "scheduled" && (
+                        <Button
+                          size="sm" variant="outline"
+                          className="h-8 rounded-full border-[#f0b4b4] text-[#7a2a2a]"
+                          onClick={() => cancel(c)}
+                          data-testid={`campaign-cancel-${c.id}`}
+                        >
+                          Cancel
+                        </Button>
+                      )}
+                      {c.status === "failed" && (
+                        <Button
+                          size="sm" variant="outline"
+                          className="h-8 rounded-full border-[#e6d38a] text-[#8a6a3c]"
+                          onClick={() => retry(c)}
+                          data-testid={`campaign-retry-${c.id}`}
+                        >
+                          Retry
+                        </Button>
+                      )}
                     </td>
                   </tr>
                 );

@@ -295,3 +295,82 @@ communication systems, no CRM, no drip automation.
 
 _Last updated: Feb 21, 2026 (Task Manager · Lab Review · Campaign Center)_
 
+
+## Feb 22, 2026 — Final Operations Closeout (Scheduler + Controls + Badge)
+
+Feature freeze — no new modules, only production-safety wiring around the
+existing Campaign Center and Task Manager.
+
+### 1. Scheduled Campaign Worker (`server.py` startup, `routers/campaigns.py`)
+- **APScheduler `AsyncIOScheduler`** running in-process on the single-worker
+  uvicorn instance (`--workers 1` verified in `/etc/supervisor/conf.d`).
+  5-minute interval, `coalesce=True`, `max_instances=1`, `replace_existing=True`,
+  UTC-only.
+- Toggle via env: `CAMPAIGN_SCHEDULER_MODE=external|disabled` skips in-process
+  start-up so multi-worker deploys (if ever adopted) can rely on an external
+  cron hitting `POST /api/campaigns/scheduler/tick` (admin-only).
+- Graceful `shutdown_db_client()` calls `_stop_campaign_scheduler()`.
+- **Atomic claim**: `find_one_and_update({id, status: {$in: allowed_from}},
+  {$set: {status: "processing", started_at, worker_id}}, ReturnDocument.AFTER)`
+  prevents any double dispatch across restarts, reloads, or concurrent workers.
+- Status lifecycle: `scheduled → processing → completed | sent_with_failures | failed`
+  Terminal states cannot re-enter the queue.
+- Every claim records `started_at`, `completed_at`, `worker_id` (`apscheduler:<uuid>`
+  vs `manual:<user>:<uuid>` vs `retry:<user>:<uuid>` vs `web:<uuid>`) and
+  `failure_reason` on failure.
+- Manual `POST /api/campaigns/{id}/run` and the internal APScheduler tick both
+  funnel through the same `_run_campaign` — dispatch logic cannot diverge.
+
+### 2. Scheduled-Campaign Controls
+- **Cancel** — `POST /api/campaigns/{id}/cancel` — admin-only, requires
+  `status == scheduled`. 409 on already-processing / completed / cancelled.
+- **Retry** — `POST /api/campaigns/{id}/retry` — admin-only, requires
+  `status == failed`. Clears stale delivery_log via the same atomic-claim
+  helper. Completed campaigns **cannot** be retried.
+- Frontend inline row actions: "Cancel" button shown only for scheduled rows,
+  "Retry" shown only for failed rows.
+- Scheduled `schedule_at`, current status, and audit trail all surfaced in the
+  detail dialog.
+
+### 3. Tasks Sidebar Badge
+- Reuses `GET /api/tasks/dashboard/summary` (already existed) — no new
+  endpoint, no PHI in the badge itself.
+- `PortalLayout.jsx` polls at 60 s (per spec — not faster). Hides at zero.
+  Red pill (`bg-[#7a2a2a] text-white`) next to the "Tasks" nav item across
+  admin, practitioner, staff/MA sidebars.
+- No email / SMS / push wired.
+
+### 4. Delivery Configuration Guard
+- `GET /api/campaigns/config/delivery` — returns **booleans only** for
+  `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`, `TWILIO_ACCOUNT_SID`,
+  `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`, plus `email.mode`, `sms.mode`,
+  `simulated`. **No secret values ever returned.**
+- Frontend banner on `/portal/staff/campaigns` labels simulated delivery in
+  amber and lists exactly which env vars are missing.
+- Existing notifier `sent_stub` behavior preserved for dev; `mode: "live"`
+  when both keys and from-address are present.
+
+**Deployment method**
+- **Internal APScheduler** (single uvicorn worker); documented external cron
+  path via `POST /api/campaigns/scheduler/tick` if multi-worker deploy is
+  ever adopted. `CAMPAIGN_SCHEDULER_MODE=external` disables the in-process
+  scheduler cleanly.
+
+**Duplicate-execution protection**
+- Mongo `find_one_and_update({status: {$in: allowed_from}}, $set: {status: "processing", worker_id})`
+  — the storage engine guarantees the transition is atomic. Any second worker
+  matching the same doc gets `None` and increments `skipped_races`.
+
+**Tests** — `backend/tests/test_scheduler_closeout.py`, **10/10 passing**
+(regressions verified: `test_tasks_labs_campaigns.py` 18/18 still passing).
+
+**Environment variables still requiring configuration for LIVE delivery**
+- `SENDGRID_API_KEY`
+- `SENDGRID_FROM_EMAIL`
+- `TWILIO_ACCOUNT_SID`
+- `TWILIO_AUTH_TOKEN`
+- `TWILIO_FROM_NUMBER`
+- Optional: `CAMPAIGN_SCHEDULER_MODE=external` if scaling to multi-worker
+
+_Last updated: Feb 22, 2026 (Final Operations Closeout — Scheduler + Controls)_
+

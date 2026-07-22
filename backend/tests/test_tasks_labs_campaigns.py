@@ -273,7 +273,7 @@ class TestCampaigns:
         j = r.json()
         # Since keys aren't set, sent_stub returns 'sent'; either way the
         # campaign should have a delivery_log with entries.
-        assert j["status"] in ("sent", "sent_with_failures", "failed")
+        assert j["status"] in ("completed", "sent_with_failures", "failed")
         c = dbm.campaigns.find_one({"id": j["id"]})
         assert c is not None
         assert isinstance(c.get("delivery_log"), list)

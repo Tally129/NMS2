@@ -87,6 +87,9 @@ const NAV = {
       group: "Clients",
       items: [
         { to: "/portal/provider/patients", label: "Clients", icon: Users },
+        { to: "/portal/staff/tasks", label: "Tasks", icon: ClipboardCheck, badge: "tasks" },
+        { to: "/portal/staff/lab-review", label: "Lab Review", icon: FlaskConical },
+        { to: "/portal/staff/campaigns", label: "Campaigns", icon: Megaphone },
         { to: "/portal/provider/messages", label: "Messages", icon: MessageSquare, badge: "messages" },
       ],
     },
@@ -125,7 +128,7 @@ const NAV = {
       group: "Clients",
       items: [
         { to: "/portal/staff/patients", label: "Clients", icon: Users },
-        { to: "/portal/staff/tasks", label: "Tasks", icon: ClipboardCheck },
+        { to: "/portal/staff/tasks", label: "Tasks", icon: ClipboardCheck, badge: "tasks" },
         { to: "/portal/staff/lab-review", label: "Lab Review", icon: FlaskConical },
         { to: "/portal/staff/campaigns", label: "Campaigns", icon: Megaphone },
       ],
@@ -167,6 +170,9 @@ const NAV = {
       group: "Clients",
       items: [
         { to: "/portal/provider/patients", label: "Clients", icon: Users },
+        { to: "/portal/staff/tasks", label: "Tasks", icon: ClipboardCheck, badge: "tasks" },
+        { to: "/portal/staff/lab-review", label: "Lab Review", icon: FlaskConical },
+        { to: "/portal/staff/campaigns", label: "Campaigns", icon: Megaphone },
         { to: "/portal/admin/import-clients", label: "Import Clients", icon: Upload },
       ],
     },
@@ -206,6 +212,7 @@ export default function PortalLayout({ children }) {
   const navigate = useNavigate();
   const [open, setOpen] = React.useState(false);
   const [unread, setUnread] = React.useState(0);
+  const [overdueTasks, setOverdueTasks] = React.useState(0);
   const groups = NAV[user?.role] || [];
 
   React.useEffect(() => {
@@ -221,6 +228,23 @@ export default function PortalLayout({ children }) {
     const t = setInterval(fetchUnread, 30_000);
     // Best-effort PWA push subscription (silent failure)
     import("../lib/push").then(({ ensurePushSubscription }) => ensurePushSubscription()).catch(() => {});
+    return () => { active = false; clearInterval(t); };
+  }, [user]);
+
+  // Overdue-task badge — workforce only. Polls at 60s (not faster, per spec)
+  // and hides at zero. Does NOT surface patient info in the badge itself.
+  React.useEffect(() => {
+    const workforce = ["admin", "practitioner", "staff", "medical_assistant"];
+    if (!user || !workforce.includes(user.role)) return;
+    let active = true;
+    const fetchOverdue = async () => {
+      try {
+        const r = await (await import("../lib/api")).default.get("/tasks/dashboard/summary");
+        if (active) setOverdueTasks(r.data?.overdue || 0);
+      } catch {}
+    };
+    fetchOverdue();
+    const t = setInterval(fetchOverdue, 60_000);
     return () => { active = false; clearInterval(t); };
   }, [user]);
 
@@ -282,6 +306,15 @@ export default function PortalLayout({ children }) {
                         {it.badge === "messages" && unread > 0 && (
                           <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-[#c19a4b] text-[#1f2a22] text-[10px] font-semibold">
                             {unread}
+                          </span>
+                        )}
+                        {it.badge === "tasks" && overdueTasks > 0 && (
+                          <span
+                            className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-[#7a2a2a] text-white text-[10px] font-semibold"
+                            data-testid="nav-badge-tasks-overdue"
+                            title={`${overdueTasks} overdue`}
+                          >
+                            {overdueTasks}
                           </span>
                         )}
                       </NavLink>

@@ -14,17 +14,20 @@ Endpoints
 """
 from __future__ import annotations
 
+import os
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+from pymongo import ReturnDocument
 
 from audit import get_client_ip, log_audit
 from deps import _strip_id, api, db, require_roles
 from models import new_id
-from notifiers import send_email, send_sms
+from notifiers import email_status, send_email, send_sms, sms_status
 
 
 CHANNELS = ("email", "sms")
@@ -192,20 +195,41 @@ async def estimate(payload: EstimateIn,
     }
 
 
-async def _run_campaign(campaign: dict) -> dict:
-    """Actually dispatch to SendGrid / Twilio, appending delivery_log entries."""
-    now = datetime.now(timezone.utc)
-    candidates = await _resolve_recipients(campaign["filter_type"], campaign.get("filter_params") or {})
-    eligible, skipped = _partition(candidates, campaign["channel"])
+# Statuses that mean the campaign is finalised or in-flight and MUST NOT
+# be picked up again by the worker or manual retry.
+TERMINAL_STATUSES = ("completed", "sent_with_failures", "failed", "cancelled")
+IN_FLIGHT_STATUSES = ("processing", "sending")
+
+
+async def _run_campaign(campaign: dict, *, worker_id: Optional[str] = None) -> dict:
+    """Actually dispatch to SendGrid / Twilio, appending delivery_log entries.
+
+    Callers MUST have already claimed the campaign atomically (status set to
+    `processing` with a unique worker/lock id). This function is idempotent
+    within a claim — it writes final status once and does not re-check
+    scheduled_at.
+    """
+    started_at = datetime.now(timezone.utc)
+    try:
+        candidates = await _resolve_recipients(campaign["filter_type"], campaign.get("filter_params") or {})
+        eligible, skipped = _partition(candidates, campaign["channel"])
+    except Exception as e:
+        await db.campaigns.update_one({"id": campaign["id"]}, {"$set": {
+            "status": "failed",
+            "failure_reason": f"recipient_resolution_failed: {str(e)[:200]}",
+            "completed_at": datetime.now(timezone.utc),
+        }})
+        return {"campaign_id": campaign["id"], "status": "failed",
+                "failure_reason": str(e)[:200]}
+
     delivery_log = []
     success = 0
     failure = 0
 
-    # Log the skipped set first (do NOT surface PHI in reason strings).
     for s in skipped:
         delivery_log.append({
             "client_id": s["client_id"], "status": "skipped",
-            "reason": s["reason"], "ts": now,
+            "reason": s["reason"], "ts": started_at,
         })
 
     for c in eligible:
@@ -227,7 +251,7 @@ async def _run_campaign(campaign: dict) -> dict:
                     payload_metadata={"campaign_id": campaign["id"]},
                 )
             delivery_log.append({
-                "client_id": c.get("id"), "status": status, "ts": now,
+                "client_id": c.get("id"), "status": status, "ts": started_at,
                 "channel": campaign["channel"],
             })
             if status in ("sent", "sent_stub"):
@@ -236,18 +260,25 @@ async def _run_campaign(campaign: dict) -> dict:
                 failure += 1
         except Exception as e:  # notifier already writes to integration_log
             delivery_log.append({"client_id": c.get("id"), "status": "failed",
-                                  "error": str(e)[:200], "ts": now})
+                                  "error": str(e)[:200], "ts": started_at})
             failure += 1
 
-    final_status = "sent"
     if failure and not success:
         final_status = "failed"
+        failure_reason = f"{failure} of {failure + success} recipients failed to send"
     elif failure:
         final_status = "sent_with_failures"
+        failure_reason = f"{failure} of {failure + success} recipients failed"
+    else:
+        final_status = "completed"
+        failure_reason = None
 
+    completed_at = datetime.now(timezone.utc)
     await db.campaigns.update_one({"id": campaign["id"]}, {"$set": {
         "status": final_status,
-        "sent_at": now,
+        "sent_at": started_at,
+        "completed_at": completed_at,
+        "failure_reason": failure_reason,
         "delivery_log": delivery_log,
         "stats": {
             "candidates": len(candidates),
@@ -256,6 +287,8 @@ async def _run_campaign(campaign: dict) -> dict:
             "success": success,
             "failure": failure,
         },
+        # Preserve worker_id if it was set during atomic claim
+        **({"worker_id": worker_id} if worker_id else {}),
     }})
     return {
         "campaign_id": campaign["id"],
@@ -264,6 +297,34 @@ async def _run_campaign(campaign: dict) -> dict:
         "failure": failure,
         "skipped": len(skipped),
     }
+
+
+async def _try_claim(campaign_id: str, worker_id: str,
+                     allowed_from: tuple = ("scheduled",)) -> Optional[dict]:
+    """Atomically transition status → `processing` if the campaign is still
+    in an allowed prior state. Returns the claimed doc, or None if another
+    worker (or a manual run) has already grabbed it.
+    """
+    now = datetime.now(timezone.utc)
+    result = await db.campaigns.find_one_and_update(
+        {
+            "id": campaign_id,
+            "status": {"$in": list(allowed_from)},
+        },
+        {"$set": {
+            "status": "processing",
+            "started_at": now,
+            "worker_id": worker_id,
+            # Clear stale artefacts from any previous failed run so retries
+            # start with a fresh delivery_log.
+            "delivery_log": [],
+            "stats": None,
+            "failure_reason": None,
+            "completed_at": None,
+        }},
+        return_document=ReturnDocument.AFTER,
+    )
+    return result
 
 
 def _render_html(message: str, client: dict) -> str:
@@ -320,8 +381,12 @@ async def create_campaign(payload: CampaignIn, request: Request,
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     if payload.schedule_at:
         return _strip_id(doc)
-    # Send now.
-    await _run_campaign(doc)
+    # Send now — go through the same atomic-claim → dispatch path used by the
+    # worker so the two flows can never diverge.
+    worker_id = f"web:{uuid.uuid4()}"
+    claimed = await _try_claim(doc["id"], worker_id, allowed_from=("sending",))
+    if claimed:
+        await _run_campaign(claimed, worker_id=worker_id)
     doc = await db.campaigns.find_one({"id": doc["id"]})
     return _strip_id(doc)
 
@@ -351,15 +416,163 @@ async def get_campaign(campaign_id: str,
 @api.post("/campaigns/{campaign_id}/run")
 async def run_scheduled(campaign_id: str, request: Request,
                         user=Depends(require_roles("admin"))):
-    """Manual trigger for scheduled campaigns (no cron in this build)."""
+    """Manual trigger for scheduled campaigns. Uses the same atomic claim as
+    the background worker, so a scheduled campaign can never be dispatched
+    twice — even if an admin clicks Run at the exact moment the worker
+    processes it."""
     c = await db.campaigns.find_one({"id": campaign_id})
     if not c:
         raise HTTPException(status_code=404, detail="Campaign not found")
-    if c.get("status") not in ("scheduled", "sending"):
-        raise HTTPException(status_code=409, detail=f"Campaign is {c.get('status')}")
-    result = await _run_campaign(c)
+    if c.get("status") in TERMINAL_STATUSES + IN_FLIGHT_STATUSES:
+        raise HTTPException(status_code=409, detail={
+            "code": "campaign_not_dispatchable",
+            "current_status": c.get("status"),
+        })
+    worker_id = f"manual:{user['id']}:{uuid.uuid4()}"
+    claimed = await _try_claim(campaign_id, worker_id, allowed_from=("scheduled",))
+    if not claimed:
+        raise HTTPException(status_code=409, detail={
+            "code": "already_claimed",
+            "message": "This campaign is already being processed by another worker.",
+        })
+    result = await _run_campaign(claimed, worker_id=worker_id)
     await log_audit(db, user["id"], user["email"], "campaign.dispatch",
                     resource_type="campaign", resource_id=campaign_id,
-                    metadata=result,
+                    metadata={**result, "worker_id": worker_id},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return result
+
+
+@api.post("/campaigns/{campaign_id}/cancel")
+async def cancel_scheduled(campaign_id: str, request: Request,
+                           user=Depends(require_roles("admin"))):
+    """Cancel a scheduled campaign BEFORE it's picked up. In-flight or
+    finished campaigns cannot be cancelled."""
+    c = await db.campaigns.find_one({"id": campaign_id})
+    if not c:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if c.get("status") != "scheduled":
+        raise HTTPException(status_code=409, detail={
+            "code": "not_cancellable",
+            "current_status": c.get("status"),
+            "message": "Only campaigns in 'scheduled' state can be cancelled.",
+        })
+    now = datetime.now(timezone.utc)
+    result = await db.campaigns.find_one_and_update(
+        {"id": campaign_id, "status": "scheduled"},
+        {"$set": {
+            "status": "cancelled",
+            "cancelled_at": now,
+            "cancelled_by": user["id"],
+            "cancelled_by_name": user.get("full_name") or user.get("email"),
+        }},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not result:
+        raise HTTPException(status_code=409, detail={
+            "code": "race_lost",
+            "message": "Campaign transitioned out of 'scheduled' while cancelling.",
+        })
+    await log_audit(db, user["id"], user["email"], "campaign.cancel",
+                    resource_type="campaign", resource_id=campaign_id,
+                    metadata={"was_scheduled_at": c.get("schedule_at")},
+                    ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+    return _strip_id(result)
+
+
+@api.post("/campaigns/{campaign_id}/retry")
+async def retry_failed(campaign_id: str, request: Request,
+                       user=Depends(require_roles("admin"))):
+    """Retry a campaign that ended in `failed`. Completed campaigns cannot
+    be retried (per spec) — this is intentional to prevent duplicate sends."""
+    c = await db.campaigns.find_one({"id": campaign_id})
+    if not c:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if c.get("status") != "failed":
+        raise HTTPException(status_code=409, detail={
+            "code": "not_retryable",
+            "current_status": c.get("status"),
+            "message": "Only campaigns in 'failed' state can be retried.",
+        })
+    worker_id = f"retry:{user['id']}:{uuid.uuid4()}"
+    claimed = await _try_claim(campaign_id, worker_id, allowed_from=("failed",))
+    if not claimed:
+        raise HTTPException(status_code=409, detail={
+            "code": "already_claimed",
+            "message": "Campaign is currently in-flight.",
+        })
+    result = await _run_campaign(claimed, worker_id=worker_id)
+    await log_audit(db, user["id"], user["email"], "campaign.retry",
+                    resource_type="campaign", resource_id=campaign_id,
+                    metadata={**result, "worker_id": worker_id},
+                    ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+    return result
+
+
+@api.get("/campaigns/config/delivery")
+async def delivery_config(user=Depends(require_roles("admin", "practitioner", "staff", "medical_assistant"))):
+    """Boolean report of which delivery credentials are configured. Secret
+    values are NEVER returned. Frontend uses this to label simulated sends."""
+    return {
+        "email": {
+            "sendgrid_api_key": bool(os.environ.get("SENDGRID_API_KEY")),
+            "sendgrid_from_email": bool(os.environ.get("SENDGRID_FROM_EMAIL")),
+            "mode": email_status(),  # "live" | "sent_stub"
+        },
+        "sms": {
+            "twilio_account_sid": bool(os.environ.get("TWILIO_ACCOUNT_SID")),
+            "twilio_auth_token": bool(os.environ.get("TWILIO_AUTH_TOKEN")),
+            "twilio_from_number": bool(os.environ.get("TWILIO_FROM_NUMBER")),
+            "mode": sms_status(),
+        },
+        "hipaa_mode": bool(os.environ.get("HIPAA_MODE")),
+        "simulated": email_status() != "live" or sms_status() != "live",
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Scheduler tick — called by the APScheduler job (see server.py).             #
+# Also exposed as an authenticated admin endpoint so ops can trigger a sweep  #
+# manually or from an external cron/monitor if APScheduler is disabled.       #
+# --------------------------------------------------------------------------- #
+async def process_due_campaigns(worker_prefix: str = "scheduler") -> dict:
+    """Find scheduled campaigns whose `schedule_at` is <= now and dispatch
+    them via the atomic-claim path. Returns a summary dict.
+    """
+    now = datetime.now(timezone.utc)
+    processed = 0
+    failed = 0
+    skipped_races = 0
+    due_ids: List[str] = []
+    async for row in db.campaigns.find({
+        "status": "scheduled",
+        "schedule_at": {"$lte": now},
+    }, {"id": 1}).limit(50):
+        due_ids.append(row["id"])
+    for cid in due_ids:
+        worker_id = f"{worker_prefix}:{uuid.uuid4()}"
+        claimed = await _try_claim(cid, worker_id, allowed_from=("scheduled",))
+        if not claimed:
+            skipped_races += 1
+            continue
+        try:
+            result = await _run_campaign(claimed, worker_id=worker_id)
+            if result.get("status") == "failed":
+                failed += 1
+            else:
+                processed += 1
+        except Exception as e:  # pragma: no cover — safety net
+            await db.campaigns.update_one({"id": cid}, {"$set": {
+                "status": "failed",
+                "failure_reason": f"worker_exception: {str(e)[:200]}",
+                "completed_at": datetime.now(timezone.utc),
+            }})
+            failed += 1
+    return {"processed": processed, "failed": failed,
+            "skipped_races": skipped_races, "candidates": len(due_ids)}
+
+
+@api.post("/campaigns/scheduler/tick")
+async def scheduler_tick(user=Depends(require_roles("admin"))):
+    """Admin-only manual sweep of due scheduled campaigns."""
+    return await process_due_campaigns(worker_prefix="manual-tick")

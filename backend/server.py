@@ -752,7 +752,63 @@ async def seed_demo():
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    _stop_campaign_scheduler()
     close_mongo()
+
+
+# --------------------------------------------------------------------------- #
+# Scheduled Campaign Worker (APScheduler, in-process, single-worker deploy).  #
+# --------------------------------------------------------------------------- #
+# Deployment note: supervisor runs uvicorn with `--workers 1`. Running one
+# scheduler here is therefore safe. If the deployment ever changes to multi-
+# worker, disable in-process scheduling by exporting
+#     CAMPAIGN_SCHEDULER_MODE=external
+# and use an external cron/systemd unit that hits POST /api/campaigns/scheduler/tick
+# on the admin API — the atomic-claim guard in `_try_claim` already blocks any
+# duplicate delivery, so both modes coexist safely.
+_campaign_scheduler = None
+
+
+def _stop_campaign_scheduler() -> None:
+    global _campaign_scheduler
+    if _campaign_scheduler is not None:
+        try:
+            _campaign_scheduler.shutdown(wait=False)
+        except Exception:
+            pass
+        _campaign_scheduler = None
+
+
+@app.on_event("startup")
+async def _start_campaign_scheduler():
+    global _campaign_scheduler
+    mode = os.environ.get("CAMPAIGN_SCHEDULER_MODE", "internal").lower()
+    if mode == "external" or mode == "disabled":
+        logger.info("Campaign scheduler disabled (CAMPAIGN_SCHEDULER_MODE=%s)", mode)
+        return
+    if _campaign_scheduler is not None:
+        return  # idempotent — protects against reload double-registration
+    try:
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    except ImportError:
+        logger.warning("APScheduler not installed; scheduled campaigns will not auto-dispatch")
+        return
+    from routers.campaigns import process_due_campaigns
+    scheduler = AsyncIOScheduler(timezone="UTC")
+
+    async def _tick():
+        try:
+            summary = await process_due_campaigns(worker_prefix="apscheduler")
+            if summary.get("processed") or summary.get("failed"):
+                logger.info("Campaign scheduler tick: %s", summary)
+        except Exception as e:  # pragma: no cover
+            logger.exception("Campaign scheduler tick failed: %s", e)
+
+    scheduler.add_job(_tick, "interval", minutes=5, id="campaign_scheduler_tick",
+                      replace_existing=True, coalesce=True, max_instances=1)
+    scheduler.start()
+    _campaign_scheduler = scheduler
+    logger.info("Campaign scheduler started (interval=5min, mode=internal)")
 
 
 app.include_router(api)
