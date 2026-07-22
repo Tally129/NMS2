@@ -414,6 +414,20 @@ async def mark_paid(inv_id: str, payload: MarkPaidIn, request: Request,
     await log_audit(db, user["id"], user["email"], "invoice.mark_paid",
                     resource_type="invoice", resource_id=inv_id, metadata={"method": payload.method},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+    # Accounting event
+    try:
+        from accounting.events import AccountingEvent, emit
+        await emit(AccountingEvent(
+            event_type="InvoicePaid",
+            occurred_at=updates["paid_at"],
+            source_module="invoices", source_ref_type="invoice", source_ref_id=inv_id,
+            idempotency_key=f"invoice:{inv_id}:InvoicePaid",
+            amount_cents=int(round(float(inv.get("amount") or 0) * 100)),
+            context={"payment_method": payload.method},
+            actor_id=user["id"], actor_role=user["role"],
+        ))
+    except Exception:
+        pass
     inv = await db.invoices.find_one({"id": inv_id})
     return await _hydrate_invoice(inv)
 

@@ -229,6 +229,34 @@ async def pos_checkout(payload: PosCheckoutIn, request: Request,
                     resource_type="transaction", resource_id=txn["id"],
                     metadata={"total": total, "method": payload.payment_method},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+
+    # Accounting event — safe fire-and-forget (never blocks checkout)
+    try:
+        from accounting.events import AccountingEvent, emit
+        ctx_lines = [{
+            "line_type": ln["type"], "ref_id": ln.get("ref_id"),
+            "qty": ln.get("qty") or 1,
+            "unit_price_cents": int(round(float(ln.get("unit_price") or 0) * 100)),
+            "line_total_cents": int(round(float(ln.get("line_total") or 0) * 100)),
+        } for ln in out_lines]
+        await emit(AccountingEvent(
+            event_type="SaleCompleted",
+            occurred_at=txn["created_at"],
+            source_module="pos", source_ref_type="transaction", source_ref_id=txn["id"],
+            idempotency_key=f"transaction:{txn['id']}:SaleCompleted",
+            amount_cents=int(round(total * 100)),
+            context={
+                "payment_method": payload.payment_method,
+                "subtotal_cents": int(round(subtotal * 100)),
+                "discount_cents": int(round(discount * 100)),
+                "tip_cents": int(round(tip * 100)),
+                "tax_cents": int(round(tax * 100)),
+                "lines": ctx_lines,
+            },
+            actor_id=user["id"], actor_role=user["role"],
+        ))
+    except Exception:
+        logger.exception("accounting emit failed for txn %s", txn.get("id"))
     return await _hydrate_txn(txn)
 
 

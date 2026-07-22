@@ -80,6 +80,7 @@ from routers import delegations as _delegations_routes  # noqa: F401
 from routers import tasks as _tasks_routes  # noqa: F401
 from routers import lab_review as _lab_review_routes  # noqa: F401
 from routers import campaigns as _campaigns_routes  # noqa: F401
+from routers import accounting as _accounting_routes  # noqa: F401
 
 # Startup config safety validation (fail-fast in HIPAA_MODE)
 from security_config import enforce_production_config
@@ -603,6 +604,17 @@ async def seed_demo():
             "is_active": True, "created_at": datetime.now(timezone.utc), "last_login_at": None,
         })
         logger.info("Seeded demo medical assistant user.")
+
+    # Accounting: seed chart-of-accounts + ensure indexes.
+    try:
+        from accounting import chart_of_accounts as _coa
+        from accounting import journal as _journal
+        seeded = await _coa.seed_if_empty()
+        await _journal.ensure_indexes()
+        if seeded:
+            logger.info("Seeded chart of accounts (%d accounts).", seeded)
+    except Exception as _e:
+        logger.warning("Accounting startup skipped: %s", _e)
 
     # Idempotent: ensure 3 built-in form templates exist (Phase 10)
     builtins = [

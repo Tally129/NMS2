@@ -12,6 +12,7 @@ import {
   ClipboardCheck,
   FlaskConical,
   Megaphone,
+  BookText,
   ShieldCheck,
   LogOut,
   UserCog,
@@ -180,6 +181,7 @@ const NAV = {
       group: "Operations",
       items: [
         { to: "/portal/admin/pos", label: "Point of Sale", icon: ShoppingCart },
+        { to: "/portal/admin/accounting", label: "Accounting", icon: BookText },
         { to: "/portal/admin/transactions", label: "Transactions", icon: Wallet },
         { to: "/portal/admin/inventory", label: "Inventory", icon: Boxes },
         { to: "/portal/admin/treatments", label: "Treatments", icon: Stethoscope },

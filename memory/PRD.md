@@ -374,3 +374,82 @@ existing Campaign Center and Task Manager.
 
 _Last updated: Feb 22, 2026 (Final Operations Closeout — Scheduler + Controls)_
 
+
+## Feb 23, 2026 — Sprint 1: Accounting Foundation (event-driven)
+
+Practical double-entry accounting bolted onto the existing practice-management
+app. Every existing financial component (POS, invoices, memberships, Stripe,
+inventory, refunds, campaigns, dashboards, RBAC, audit log) reused as-is;
+zero rewrites of production financial code.
+
+### Architecture
+- **Accounting Event Bus** (`accounting/events.py`): single append-only feed
+  (`db.accounting_events`) with unique `idempotency_key` index. Operational
+  modules never touch the ledger — they emit standardized events.
+- **Posting Rules Engine** (`accounting/posting_engine.py`): the ONLY writer
+  to `db.journal_entries`. Balance enforced at write; failures go to
+  `db.posting_dead_letters` with structured reason.
+- **Journal** (`accounting/journal.py`): immutable double-entry entries;
+  corrections via `reverse_entry()` mirror; unique `event_id` (partial-filter)
+  index prevents duplicate posting.
+- **Chart of Accounts** (`accounting/chart_of_accounts.py`): 34-account
+  medical-practice seed; `system_locked` flag protects core accounts.
+- **Reports** (`accounting/reports.py`): P&L, Balance Sheet, Trial Balance,
+  A/R Aging — pure math on the ledger, with `balanced` invariant checks.
+
+### Adapters (minimal, safe touches to operational code)
+- `routers/ops.py` POS checkout — emits `SaleCompleted` on success (fire-and-
+  forget, wrapped in try/except; never blocks checkout)
+- `routers/appointments.py` invoice mark-paid — emits `InvoicePaid`
+- Manual expenses, vendor bills, payroll runs all emit their events from
+  within the new `routers/accounting.py`
+
+### Event catalog (initial)
+`SaleCompleted`, `SaleRefunded`, `InvoiceIssued`, `InvoicePaid`,
+`MembershipStarted`, `MembershipRenewed`, `InventoryConsumed`,
+`InventoryAdjusted`, `ManualExpenseRecorded`, `VendorBillCreated`,
+`VendorBillPaid`, `PayrollAccrued`, `PayrollPaid`, `StripeFeeCharged`,
+`ManualJournal` + reserved slots for insurance, HSA/FSA, ACH, bank moves.
+
+### Endpoints (`routers/accounting.py`)
+- **COA**: list, create, patch (system-locked accounts protected)
+- **Journal**: list, manual, reverse
+- **General Ledger**: `/gl/{account_code}` with running balance
+- **Events / dead-letters**: admin oversight
+- **Reports**: `/reports/profit-and-loss`, `/balance-sheet`, `/trial-balance`, `/ar-aging`
+- **Vendors + Expenses + Bills**: CRUD + pay
+- **Payroll**: employees, payroll runs (accrue + pay)
+- **Tax**: `/tax/sales-tax`, `/tax/payroll-tax`, `/tax/summary?year=` (quarterly)
+- **1099**: `/1099/vendors`, `/1099/csv` (IRS-ready CSV export)
+- **Stripe reconciliation**: read-only over `db.integration_log`
+
+### Frontend
+- New unified `/portal/admin/accounting` page (`pages/portal/Accounting.jsx`)
+  with 9 tabs: Reports · Journal · General Ledger · Chart of Accounts ·
+  Expenses · Vendors & Bills · Payroll · Tax · 1099
+- Sidebar entry in the admin NAV group
+
+### Tests — 14/14 passing (`test_accounting_sprint1.py`)
+- COA seeded correctly; system-locked accounts cannot change type
+- Manual journal balanced ✅ / unbalanced → dead-letter ✅
+- POS checkout emits event + posts 4-line balanced journal entry
+- Idempotency: duplicate `idempotency_key` insert rejected by unique index
+- Expense records + posts (DR expense / CR cash)
+- Vendor bill lifecycle (accrue DR 6400 CR 2000, pay DR 2000 CR 1100)
+- Payroll accrue posts 4-line balanced entry (6200 + 6210 / 2400 + 2410) + pay
+- All 4 report endpoints return; Trial Balance + Balance Sheet **balanced=True**
+- Reversal creates mirror entry with swapped debit/credit sides
+- 1099 CSV exports IRS-ready NEC format
+
+### Explicitly deferred to Phase 2
+- Bank reconciliation UI (statement import, matching)
+- Multi-currency, multi-company
+- Fixed asset depreciation schedules
+- Purchase-order workflow
+- Insurance-claim accounting
+- IRS e-file / state tax filing
+- Payroll direct deposit
+- Budgeting / forecasting
+
+_Last updated: Feb 23, 2026 (Sprint 1 — Accounting Foundation)_
+

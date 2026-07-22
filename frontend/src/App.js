@@ -53,6 +53,7 @@ import TelehealthHub from "./pages/portal/TelehealthHub";
 import Tasks from "./pages/portal/Tasks";
 import LabReviewQueue from "./pages/portal/LabReviewQueue";
 import CampaignCenter from "./pages/portal/CampaignCenter";
+import Accounting from "./pages/portal/Accounting";
 import StaffLogin from "./pages/StaffLogin";
 import OAuthComplete from "./pages/OAuthComplete";
 import StaffDashboard from "./pages/staff/StaffDashboard";
@@ -91,6 +92,7 @@ function App() {
             <Route path="/portal/staff/tasks" element={<Protected roles={["staff", "admin", "medical_assistant", "practitioner"]}><Tasks /></Protected>} />
             <Route path="/portal/staff/lab-review" element={<Protected roles={["staff", "admin", "medical_assistant", "practitioner"]}><LabReviewQueue /></Protected>} />
             <Route path="/portal/staff/campaigns" element={<Protected roles={["staff", "admin", "practitioner"]}><CampaignCenter /></Protected>} />
+            <Route path="/portal/admin/accounting" element={<Protected roles={["admin"]}><Accounting /></Protected>} />
             <Route path="/portal/admin/telehealth" element={<Protected roles={["admin"]}><TelehealthHub /></Protected>} />
 
             {/* Staff portal (front-desk-first) */}
