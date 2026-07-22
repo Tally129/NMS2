@@ -453,3 +453,107 @@ zero rewrites of production financial code.
 
 _Last updated: Feb 23, 2026 (Sprint 1 — Accounting Foundation)_
 
+
+---
+
+## Sprint 1.5 — Accounting Stabilization (Feb 24, 2026) ⭐
+
+### Backend modules
+- `accounting/backfill.py` — Historic replay for 6 sources (POS, invoices,
+  invoice_payments, memberships, inventory, expenses). Preview (dry-run) +
+  execute + resume. Idempotent through `accounting_events.idempotency_key`.
+- `accounting/validation.py` — 7 checks: trial balance, balance sheet, orphan
+  entries, missing sources, dead-letters, duplicate events, journal integrity.
+- `accounting/dashboard.py` — Snapshot: cash / A/R / A/P / revenue MTD & today /
+  sales tax / payroll liability / dead-letter / unposted-event counts + TB status.
+
+### New API endpoints
+- `GET  /api/accounting/dashboard`
+- `GET  /api/accounting/validate`
+- `POST /api/accounting/backfill/dry-run`
+- `POST /api/accounting/backfill/execute`
+- `GET  /api/accounting/backfill/runs`  ·  `.../{id}`  ·  `POST .../{id}/resume`
+
+### Frontend
+- New "Health & Backfill" tab on `/portal/admin/accounting`
+  (`pages/portal/AccountingHealthTab.jsx`)
+- 10 widgets (Cash · A/R · A/P · Revenue MTD/today · Sales tax liability ·
+  Payroll liability · Dead-letters · Unposted events · Trial balance)
+- Backfill panel with source checkboxes, Dry-run, Execute, run history + Resume.
+- Ledger validation report drops in below widgets.
+
+### Tests — 11/11 passing (`test_accounting_sprint1_5.py`)
+Backfill idempotency + resume + list/get; dashboard shape; validation shape +
+truth for TB / BS / duplicates / integrity.
+
+## Sprint 2 — Banking & Cash Management (Feb 24, 2026) ⭐ NEW
+
+### Backend modules
+- `accounting/banking.py` — Bank account registry (name, kind, gl_code,
+  institution, last_four, system_seeded, last_reconciled_at).
+  Seeds 5 defaults on first startup: Operating Checking (1100), Petty Cash (1000),
+  Cash Drawer (1050), Stripe Merchant Clearing (1200), Credit Card (2500).
+  System-seeded accounts editable (name/institution/last_four/active) but not
+  deletable. User-created accounts blocked from deletion while transactions exist.
+- `accounting/statements.py` — CSV import (permissive column detection:
+  date/description/amount, or debit/credit pair; case- and underscore-insensitive
+  header matching) + basic OFX via `ofxparse`. Auto-detect by file extension;
+  bad OFX raises 400. Dedupe within (bank_account_id, posted_at, amount, ref).
+- `accounting/reconciliation.py` — Workspace (bank + ledger side-by-side);
+  auto-match (exact amount, ±7 days, memo similarity 0-100 confidence);
+  manual match, unmatch, split (N-way against journal entries); finalize
+  reconciliation (immutable — writes reconciliation_id onto BOTH bank_txn and JE,
+  never mutates lines/totals). Exceptions panel groups: unmatched bank/ledger,
+  duplicate imports, amount mismatches, date mismatches, duplicate JEs.
+- `accounting/cash_reports.py` — Bank register (running balance),
+  outstanding deposits, outstanding checks, reconciliation report, outstanding
+  reconciliation (per-account, days outstanding, suggested confidence),
+  cash flow summary, Stripe settlement summary, cash dashboard aggregator.
+- **New event type**: `BankTransferMade` — DR destination account,
+  CR source account. Rule wired in `posting_engine.py`.
+
+### New API endpoints
+- Bank accounts: `GET/POST /accounting/bank-accounts` · `PATCH/DELETE .../{id}`
+- Statement import: `POST /accounting/bank-accounts/{id}/import` (multipart)
+  · `GET .../{id}/transactions` · `GET .../{id}/import-batches`
+- Reconciliation: `GET /accounting/reconciliation/{ba_id}/workspace` ·
+  `POST /accounting/reconciliation/{ba_id}/auto-match` ·
+  `POST /accounting/reconciliation/confirm-matches` ·
+  `POST /accounting/reconciliation/match` · `POST .../unmatch/{bt_id}` ·
+  `POST /accounting/reconciliation/split` · `POST .../finalize` ·
+  `GET /accounting/reconciliation/history` ·
+  `GET /accounting/reconciliation/{recon_id}/report` ·
+  `GET /accounting/reconciliation/exceptions`
+- Transfers: `POST /accounting/transfers` · `GET /accounting/transfers`
+- Cash: `GET /accounting/cash/dashboard` ·
+  `GET /accounting/cash/register/{ba_id}` · `.../flow` ·
+  `.../outstanding-deposits` · `.../outstanding-checks` ·
+  `.../outstanding-reconciliation`
+- Stripe: `GET /accounting/stripe/settlement`
+
+### Frontend
+- New "Banking" tab on `/portal/admin/accounting`
+  (`pages/portal/BankingTab.jsx`) with 6 sub-panes:
+  Cash Dashboard · Bank Accounts · Reconciliation · Exceptions · Transfers · Reports.
+- Reconciliation workspace has side-by-side bank/ledger panels, auto-match
+  proposal review, per-txn match/unmatch actions, finalize form.
+
+### Dependencies
+- Added `ofxparse==0.21` (+ `beautifulsoup4`, `soupsieve`) via pip/freeze.
+
+### Tests — 12/12 passing (`test_accounting_sprint2.py`)
+- Seeding, create bank account, CSV import + dedupe, bad OFX 400,
+  manual/auto/split matching (amount-mismatch rejected), finalize preserves
+  immutability, transfer creates balanced DR/CR journal, cash dashboard
+  shape, all 7 reports return 200.
+- **Regression: 14/14 Sprint 1 + 11/11 Sprint 1.5 + 12/12 Sprint 2 = 37/37 pass.**
+
+### Explicitly NOT built (deferred to later sprints per user brief)
+- Sprint 3: Insurance accounting (claims, ERA/EOB, adjustments)
+- Sprint 4: Fixed assets & period close (locking, depreciation)
+- Sprint 5: Tax filing integrations & payroll direct deposit
+- Sprint 6: Business intelligence & forecasting
+- Direct bank API / Plaid / Open Banking / ACH origination
+- Loan management, investments, treasury management
+
+_Last updated: Feb 24, 2026 (Sprints 1.5 & 2)_

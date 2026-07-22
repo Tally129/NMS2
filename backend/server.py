@@ -609,10 +609,15 @@ async def seed_demo():
     try:
         from accounting import chart_of_accounts as _coa
         from accounting import journal as _journal
+        from accounting import banking as _bank
         seeded = await _coa.seed_if_empty()
         await _journal.ensure_indexes()
+        await _bank.ensure_indexes()
+        seeded_banks = await _bank.seed_if_empty()
         if seeded:
             logger.info("Seeded chart of accounts (%d accounts).", seeded)
+        if seeded_banks:
+            logger.info("Seeded default bank accounts (%d).", seeded_banks)
     except Exception as _e:
         logger.warning("Accounting startup skipped: %s", _e)
 

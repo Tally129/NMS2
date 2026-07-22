@@ -201,6 +201,22 @@ def _rule_manual_journal(ev: dict) -> list[dict]:
     return ctx.get("lines") or []
 
 
+def _rule_bank_transfer(ev: dict) -> list[dict]:
+    ctx = ev.get("context", {}) or {}
+    amount = int(ev.get("amount_cents") or 0)
+    src = ctx.get("from_account_code")
+    dst = ctx.get("to_account_code")
+    if not src or not dst or src == dst:
+        return []
+    memo = ctx.get("memo") or "Bank transfer"
+    return [
+        {"account_code": dst, "debit_cents": amount, "credit_cents": 0,
+         "line_memo": f"Transfer in — {memo}"},
+        {"account_code": src, "debit_cents": 0, "credit_cents": amount,
+         "line_memo": f"Transfer out — {memo}"},
+    ]
+
+
 RULES: dict[str, Callable[[dict], list[dict]]] = {
     "SaleCompleted":       _rule_sale_completed,
     "InvoiceIssued":       _rule_invoice_issued,
@@ -214,6 +230,7 @@ RULES: dict[str, Callable[[dict], list[dict]]] = {
     "PayrollAccrued":      _rule_payroll_accrued,
     "PayrollPaid":         _rule_payroll_paid,
     "StripeFeeCharged":    _rule_stripe_fee,
+    "BankTransferMade":    _rule_bank_transfer,
     "ManualJournal":       _rule_manual_journal,
 }
 

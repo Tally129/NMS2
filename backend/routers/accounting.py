@@ -10,7 +10,7 @@ import io
 from datetime import datetime, timedelta, timezone
 from typing import List, Literal, Optional
 
-from fastapi import Depends, HTTPException, Query, Request, Response
+from fastapi import Depends, File, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from audit import get_client_ip, log_audit
@@ -18,10 +18,14 @@ from deps import _strip_id, api, db, require_roles
 from models import new_id
 
 from accounting import backfill as backfill_mod
+from accounting import banking as banking_mod
+from accounting import cash_reports as cash_mod
 from accounting import chart_of_accounts as coa_mod
 from accounting import dashboard as dashboard_mod
 from accounting import journal as journal_mod
+from accounting import reconciliation as recon_mod
 from accounting import reports as reports_mod
+from accounting import statements as statements_mod
 from accounting import validation as validation_mod
 from accounting.events import EVENT_TYPES, AccountingEvent, emit
 
@@ -657,3 +661,371 @@ async def backfill_resume(run_id: str, request: Request,
                     metadata={"totals": result.get("totals")},
                     ip=get_client_ip(request))
     return _strip_id(result)
+
+
+# =========================================================================== #
+# SPRINT 2 — BANKING & CASH MANAGEMENT                                          #
+# =========================================================================== #
+class BankAccountIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    kind: str
+    gl_account_code: str
+    institution: Optional[str] = None
+    last_four: Optional[str] = None
+
+
+class BankAccountPatch(BaseModel):
+    name: Optional[str] = None
+    institution: Optional[str] = None
+    last_four: Optional[str] = None
+    active: Optional[bool] = None
+
+
+@api.get("/accounting/bank-accounts")
+async def list_bank_accounts(
+    include_inactive: bool = False,
+    user=Depends(require_roles("admin", "practitioner", "staff"))
+):
+    rows = await banking_mod.list_accounts(include_inactive)
+    return [_strip_id(r) for r in rows]
+
+
+@api.post("/accounting/bank-accounts")
+async def create_bank_account(payload: BankAccountIn, request: Request,
+                              user=Depends(require_roles("admin"))):
+    try:
+        doc = await banking_mod.create(
+            name=payload.name, kind=payload.kind,
+            gl_account_code=payload.gl_account_code,
+            institution=payload.institution, last_four=payload.last_four,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await log_audit(db, user["id"], user["email"], "accounting.bank_account.create",
+                    resource_type="bank_account", resource_id=doc["id"],
+                    ip=get_client_ip(request))
+    return _strip_id(doc)
+
+
+@api.patch("/accounting/bank-accounts/{ba_id}")
+async def patch_bank_account(ba_id: str, payload: BankAccountPatch,
+                              user=Depends(require_roles("admin"))):
+    doc = await banking_mod.update(ba_id, payload.dict(exclude_unset=True))
+    if not doc:
+        raise HTTPException(status_code=404)
+    return _strip_id(doc)
+
+
+@api.delete("/accounting/bank-accounts/{ba_id}")
+async def delete_bank_account(ba_id: str,
+                              user=Depends(require_roles("admin"))):
+    try:
+        await banking_mod.delete(ba_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True}
+
+
+# ------------------------ Statement import ---------------------------------- #
+@api.post("/accounting/bank-accounts/{ba_id}/import")
+async def import_bank_statement(
+    ba_id: str, request: Request,
+    file: UploadFile = File(...),
+    user=Depends(require_roles("admin"))
+):
+    ba = await db.bank_accounts.find_one({"id": ba_id})
+    if not ba:
+        raise HTTPException(status_code=404, detail="bank account not found")
+    content = await file.read()
+    try:
+        batch = await statements_mod.import_statement(
+            bank_account_id=ba_id, filename=file.filename or "upload.csv",
+            content=content, actor=user,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"code": "import_failed",
+                                                       "message": str(e)})
+    await log_audit(db, user["id"], user["email"], "accounting.bank_statement.import",
+                    resource_type="bank_account", resource_id=ba_id,
+                    metadata={"batch_id": batch["id"],
+                              "new": batch["row_count_new"],
+                              "duplicate": batch["row_count_duplicate"]},
+                    ip=get_client_ip(request))
+    return _strip_id(batch)
+
+
+@api.get("/accounting/bank-accounts/{ba_id}/transactions")
+async def list_bank_transactions(
+    ba_id: str,
+    status: Optional[str] = None,
+    limit: int = Query(500, le=2000),
+    user=Depends(require_roles("admin", "practitioner", "staff"))
+):
+    q = {"bank_account_id": ba_id}
+    if status:
+        q["status"] = status
+    rows = await db.bank_transactions.find(q).sort("posted_at", -1).to_list(limit)
+    return [_strip_id(r) for r in rows]
+
+
+@api.get("/accounting/bank-accounts/{ba_id}/import-batches")
+async def list_import_batches(ba_id: str,
+                              user=Depends(require_roles("admin"))):
+    rows = await db.bank_import_batches.find({"bank_account_id": ba_id}).sort(
+        "imported_at", -1).to_list(100)
+    return [_strip_id(r) for r in rows]
+
+
+# ------------------------ Reconciliation workspace -------------------------- #
+@api.get("/accounting/reconciliation/{ba_id}/workspace")
+async def recon_workspace(ba_id: str, lookback_days: int = 90,
+                          user=Depends(require_roles("admin", "practitioner"))):
+    try:
+        ws = await recon_mod.workspace(ba_id, lookback_days)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    ws["bank_account"] = _strip_id(ws["bank_account"])
+    ws["bank_transactions"] = [_strip_id(r) for r in ws["bank_transactions"]]
+    ws["journal_entries"] = [_strip_id(r) for r in ws["journal_entries"]]
+    return ws
+
+
+@api.post("/accounting/reconciliation/{ba_id}/auto-match")
+async def recon_auto_match(ba_id: str,
+                            user=Depends(require_roles("admin"))):
+    return await recon_mod.auto_match(ba_id)
+
+
+class ConfirmMatchesIn(BaseModel):
+    proposals: List[dict]
+
+
+@api.post("/accounting/reconciliation/confirm-matches")
+async def recon_confirm(payload: ConfirmMatchesIn,
+                        user=Depends(require_roles("admin"))):
+    return await recon_mod.confirm_auto_matches(payload.proposals, user)
+
+
+class MatchIn(BaseModel):
+    bank_transaction_id: str
+    journal_entry_id: str
+
+
+@api.post("/accounting/reconciliation/match")
+async def recon_match(payload: MatchIn,
+                      user=Depends(require_roles("admin"))):
+    try:
+        return await recon_mod.match(
+            bank_transaction_id=payload.bank_transaction_id,
+            journal_entry_id=payload.journal_entry_id,
+            actor=user,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@api.post("/accounting/reconciliation/unmatch/{bank_transaction_id}")
+async def recon_unmatch(bank_transaction_id: str,
+                         user=Depends(require_roles("admin"))):
+    try:
+        return await recon_mod.unmatch(bank_transaction_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class SplitIn(BaseModel):
+    bank_transaction_id: str
+    journal_entry_ids: List[str]
+
+
+@api.post("/accounting/reconciliation/split")
+async def recon_split(payload: SplitIn,
+                      user=Depends(require_roles("admin"))):
+    try:
+        return await recon_mod.split_match(
+            bank_transaction_id=payload.bank_transaction_id,
+            journal_entry_ids=payload.journal_entry_ids,
+            actor=user,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class FinalizeIn(BaseModel):
+    bank_account_id: str
+    statement_end_date: datetime
+    ending_balance_cents: int
+    notes: Optional[str] = None
+
+
+@api.post("/accounting/reconciliation/finalize")
+async def recon_finalize(payload: FinalizeIn, request: Request,
+                          user=Depends(require_roles("admin"))):
+    try:
+        r = await recon_mod.finalize(
+            bank_account_id=payload.bank_account_id,
+            statement_end_date=payload.statement_end_date,
+            ending_balance_cents=payload.ending_balance_cents,
+            notes=payload.notes, actor=user,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await log_audit(db, user["id"], user["email"],
+                    "accounting.reconciliation.finalize",
+                    resource_type="reconciliation", resource_id=r["id"],
+                    metadata={"bank_account_id": payload.bank_account_id,
+                              "txns": r["txn_count"]},
+                    ip=get_client_ip(request))
+    return _strip_id(r)
+
+
+@api.get("/accounting/reconciliation/history")
+async def recon_history(bank_account_id: Optional[str] = None,
+                        limit: int = Query(50, le=200),
+                        user=Depends(require_roles("admin", "practitioner"))):
+    q: dict = {}
+    if bank_account_id:
+        q["bank_account_id"] = bank_account_id
+    rows = await db.reconciliations.find(q).sort("finalized_at", -1).to_list(limit)
+    return [_strip_id(r) for r in rows]
+
+
+@api.get("/accounting/reconciliation/{recon_id}/report")
+async def recon_report(recon_id: str,
+                        user=Depends(require_roles("admin", "practitioner"))):
+    try:
+        r = await cash_mod.reconciliation_report(recon_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    r["reconciliation"] = _strip_id(r["reconciliation"])
+    r["bank_account"] = _strip_id(r["bank_account"])
+    r["bank_transactions"] = [_strip_id(t) for t in r["bank_transactions"]]
+    r["journal_entries"] = [_strip_id(j) for j in r["journal_entries"]]
+    return r
+
+
+@api.get("/accounting/reconciliation/exceptions")
+async def recon_exceptions(bank_account_id: Optional[str] = None,
+                            user=Depends(require_roles("admin", "practitioner"))):
+    r = await recon_mod.exceptions_panel(bank_account_id)
+    for k in ("unmatched_bank_transactions_sample",
+              "unmatched_ledger_entries_sample"):
+        r[k] = [_strip_id(x) for x in r.get(k, [])]
+    return r
+
+
+# ------------------------ Cash transfers ------------------------------------ #
+class TransferIn(BaseModel):
+    from_bank_account_id: str
+    to_bank_account_id: str
+    amount_cents: int = Field(..., gt=0)
+    memo: Optional[str] = None
+    occurred_at: Optional[datetime] = None
+
+
+@api.post("/accounting/transfers")
+async def create_transfer(payload: TransferIn, request: Request,
+                           user=Depends(require_roles("admin"))):
+    src = await db.bank_accounts.find_one({"id": payload.from_bank_account_id})
+    dst = await db.bank_accounts.find_one({"id": payload.to_bank_account_id})
+    if not src or not dst:
+        raise HTTPException(status_code=404, detail="bank account not found")
+    if payload.from_bank_account_id == payload.to_bank_account_id:
+        raise HTTPException(status_code=400, detail="source == destination")
+    transfer_id = new_id()
+    doc = {
+        "id": transfer_id,
+        "from_bank_account_id": payload.from_bank_account_id,
+        "to_bank_account_id": payload.to_bank_account_id,
+        "amount_cents": payload.amount_cents,
+        "memo": payload.memo,
+        "created_by": user["id"],
+        "created_at": datetime.now(timezone.utc),
+    }
+    await db.bank_transfers.insert_one(doc)
+    event = AccountingEvent(
+        event_type="BankTransferMade",
+        occurred_at=payload.occurred_at or datetime.now(timezone.utc),
+        source_module="banking", source_ref_type="bank_transfer",
+        source_ref_id=transfer_id,
+        idempotency_key=f"bank_transfer:{transfer_id}:BankTransferMade",
+        amount_cents=payload.amount_cents,
+        context={"from_account_code": src["gl_account_code"],
+                 "to_account_code": dst["gl_account_code"],
+                 "memo": payload.memo,
+                 "from_bank_account_id": src["id"],
+                 "to_bank_account_id": dst["id"]},
+        actor_id=user["id"], actor_role=user["role"],
+    )
+    ev_id, status = await emit(event)
+    doc["event_id"] = ev_id
+    if status == "dead_letter":
+        raise HTTPException(status_code=400, detail="transfer posting failed")
+    await log_audit(db, user["id"], user["email"], "accounting.transfer",
+                    resource_type="bank_transfer", resource_id=transfer_id,
+                    metadata={"amount_cents": payload.amount_cents,
+                              "from": src["name"], "to": dst["name"]},
+                    ip=get_client_ip(request))
+    return _strip_id(doc)
+
+
+@api.get("/accounting/transfers")
+async def list_transfers(limit: int = Query(100, le=500),
+                          user=Depends(require_roles("admin", "practitioner"))):
+    rows = await db.bank_transfers.find({}).sort("created_at", -1).to_list(limit)
+    return [_strip_id(r) for r in rows]
+
+
+# ------------------------ Cash dashboard & reports -------------------------- #
+@api.get("/accounting/cash/dashboard")
+async def cash_dashboard(user=Depends(require_roles("admin", "practitioner"))):
+    return await cash_mod.cash_dashboard()
+
+
+@api.get("/accounting/cash/register/{ba_id}")
+async def cash_register(ba_id: str,
+                         start: Optional[datetime] = None,
+                         end: Optional[datetime] = None,
+                         limit: int = Query(500, le=2000),
+                         user=Depends(require_roles("admin", "practitioner"))):
+    try:
+        r = await cash_mod.bank_register(ba_id, start, end, limit)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    r["bank_account"] = _strip_id(r["bank_account"])
+    return r
+
+
+@api.get("/accounting/cash/flow")
+async def cash_flow(start: datetime, end: datetime,
+                     user=Depends(require_roles("admin", "practitioner"))):
+    return await cash_mod.cash_flow_summary(start, end)
+
+
+@api.get("/accounting/cash/outstanding-deposits")
+async def outstanding_deposits(bank_account_id: Optional[str] = None,
+                                user=Depends(require_roles("admin", "practitioner"))):
+    return await cash_mod.outstanding_deposits(bank_account_id)
+
+
+@api.get("/accounting/cash/outstanding-checks")
+async def outstanding_checks(bank_account_id: Optional[str] = None,
+                              user=Depends(require_roles("admin", "practitioner"))):
+    return await cash_mod.outstanding_checks(bank_account_id)
+
+
+@api.get("/accounting/cash/outstanding-reconciliation")
+async def outstanding_reconciliation(user=Depends(require_roles("admin", "practitioner"))):
+    r = await cash_mod.outstanding_reconciliation_report()
+    for a in r["accounts"]:
+        a["bank_account"] = _strip_id(a["bank_account"])
+        a["unmatched_bank_transactions"] = [_strip_id(x) for x in a["unmatched_bank_transactions"]]
+        a["unmatched_ledger_entries"] = [_strip_id(x) for x in a["unmatched_ledger_entries"]]
+    return r
+
+
+# ------------------------ Stripe settlement --------------------------------- #
+@api.get("/accounting/stripe/settlement")
+async def stripe_settlement(start: datetime, end: datetime,
+                             user=Depends(require_roles("admin"))):
+    return await cash_mod.stripe_settlement_summary(start, end)
