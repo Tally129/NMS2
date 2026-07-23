@@ -22,6 +22,7 @@ import bcrypt
 import jwt
 import pyotp
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.exceptions import InvalidTag
 from fastapi import HTTPException
 
 JWT_ALGO = "HS256"
@@ -265,12 +266,45 @@ def mfa_provisioning_uri(secret: str, email: str, issuer: str = "NatMedSol") -> 
     return pyotp.TOTP(secret).provisioning_uri(name=email, issuer_name=issuer)
 
 
+import logging as _mfa_logging
+
+_mfa_logger = _mfa_logging.getLogger("nms.mfa")
+
+
 def verify_mfa(secret_stored: str, token: str) -> bool:
-    """`secret_stored` may be ciphertext (Sprint 1b) or legacy plaintext."""
-    if not secret_stored or not token:
+    """`secret_stored` may be ciphertext (Sprint 1b) or legacy plaintext.
+
+    Logs a *classified* diagnostic (`mfa_secret_missing`,
+    `mfa_secret_decryption_failed`, `mfa_configuration_invalid`,
+    `mfa_totp_invalid`) so operators can distinguish "wrong code" from
+    "key rotation broke every enrollment" without leaking secret material.
+    """
+    if not secret_stored:
+        _mfa_logger.warning("mfa_verify_failed classification=mfa_secret_missing")
+        return False
+    if not token:
+        _mfa_logger.info("mfa_verify_failed classification=mfa_totp_invalid reason=empty_token")
         return False
     try:
         plaintext = decrypt_mfa_secret(secret_stored)
-        return pyotp.TOTP(plaintext).verify(token, valid_window=1)
-    except Exception:
+    except InvalidTag:
+        _mfa_logger.error("mfa_verify_failed classification=mfa_secret_decryption_failed reason=aes_gcm_tag_mismatch")
         return False
+    except RuntimeError as e:
+        # Configuration-level fault (missing key, bad base64, wrong length).
+        _mfa_logger.error("mfa_verify_failed classification=mfa_configuration_invalid reason=%s", type(e).__name__)
+        return False
+    except Exception as e:
+        _mfa_logger.error("mfa_verify_failed classification=mfa_secret_decryption_failed reason=%s", type(e).__name__)
+        return False
+    if not plaintext:
+        _mfa_logger.warning("mfa_verify_failed classification=mfa_secret_missing reason=empty_plaintext")
+        return False
+    try:
+        ok = pyotp.TOTP(plaintext).verify(token, valid_window=1)
+    except Exception as e:
+        _mfa_logger.error("mfa_verify_failed classification=mfa_configuration_invalid reason=%s", type(e).__name__)
+        return False
+    if not ok:
+        _mfa_logger.info("mfa_verify_failed classification=mfa_totp_invalid")
+    return ok

@@ -165,20 +165,56 @@ api.interceptors.response.use(
     // it from being a client-side crash source.
     if (status === 403) {
       // Distinguish REAL RBAC denials from session-recoverable states.
-      // When the backend answers 403 with `code: mfa_reauth_required` or
-      // `code: must_enroll_mfa`, the user IS authorized but their SESSION
-      // is missing an MFA gate — force them back to /login rather than
-      // showing a misleading "You don't have access" everywhere.
+      // `must_enroll_mfa`  — user IS authenticated (workforce hasn't set up
+      //   TOTP yet). We MUST keep the access token so they can hit
+      //   /auth/mfa/setup + /auth/mfa/verify. Just redirect to their Security
+      //   page. Clearing the session here caused the redirect loop (they'd
+      //   land on /login, log back in, get the same 403, log out again).
+      // `mfa_reauth_required` — the session lost its mfa_satisfied_at (e.g.
+      //   refresh grace expired). Send them to /mfa-challenge which still
+      //   uses the current access token to POST a fresh TOTP; only if THAT
+      //   fails do we drop them to /login.
       const detail = error?.response?.data?.detail;
       const code = (detail && typeof detail === "object") ? detail.code : null;
-      if (code === "mfa_reauth_required" || code === "must_enroll_mfa") {
-        _access_token = null;
-        localStorage.removeItem(LS.user);
+
+      if (code === "must_enroll_mfa") {
+        // Do NOT clear _access_token or LS.user — the token is needed to
+        // reach /api/auth/mfa/setup. Backend still 403s any non-auth PHI
+        // route, so PHI is safe. Only redirect if we're not already on
+        // Security or an auth page.
+        try {
+          const user = JSON.parse(localStorage.getItem(LS.user) || "null");
+          const role = user?.role || "staff";
+          const dest =
+            role === "admin"          ? "/portal/admin/security"    :
+            role === "practitioner"   ? "/portal/provider/security" :
+            role === "medical_assistant" ? "/portal/provider/security" :
+                                          "/portal/staff/security";
+          const path = window.location.pathname;
+          const alreadyThere = path === dest
+            || path.startsWith("/login")
+            || path.startsWith("/staff-login")
+            || path.endsWith("/security");
+          if (!alreadyThere) window.location.href = dest + "?enroll=required";
+        } catch { /* leave the caller to render its own empty state */ }
         broadcastAuth(code);
-        if (!window.location.pathname.startsWith("/login")
-            && !window.location.pathname.startsWith("/staff-login")) {
-          window.location.href = "/staff-login?reason=" + code;
-        }
+        return Promise.reject(error);
+      }
+
+      if (code === "mfa_reauth_required") {
+        // Keep the session; route to the dedicated challenge if we're not
+        // already on an auth page. The challenge view will POST /auth/mfa/verify
+        // against the current bearer and, on failure, THEN drop the session.
+        try {
+          const path = window.location.pathname;
+          const alreadyOnAuth = path.startsWith("/login")
+            || path.startsWith("/staff-login")
+            || path.startsWith("/mfa-challenge");
+          if (!alreadyOnAuth) {
+            window.location.href = "/mfa-challenge?reason=reauth";
+          }
+        } catch { /* fall through */ }
+        broadcastAuth(code);
         return Promise.reject(error);
       }
       // Log once per URL at debug so a real permission bug can be diagnosed.

@@ -56,6 +56,7 @@ import CampaignCenter from "./pages/portal/CampaignCenter";
 import Accounting from "./pages/portal/Accounting";
 import StaffLogin from "./pages/StaffLogin";
 import OAuthComplete from "./pages/OAuthComplete";
+import MfaChallenge from "./pages/MfaChallenge";
 import StaffDashboard from "./pages/staff/StaffDashboard";
 import { Toaster } from "./components/ui/toaster";
 import { AuthProvider } from "./lib/auth";
@@ -78,6 +79,7 @@ function App() {
             <Route path="/login" element={<Login />} />
             <Route path="/staff-login" element={<StaffLogin />} />
             <Route path="/oauth-complete" element={<OAuthComplete />} />
+            <Route path="/mfa-challenge" element={<MfaChallenge />} />
 
             {/* Portal redirect */}
             <Route path="/portal" element={<PortalIndex />} />
