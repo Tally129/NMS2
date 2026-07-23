@@ -193,8 +193,26 @@ def require_roles(*roles):
     """Role gate. Composes: authentication → workforce-MFA (if applicable) → role check.
 
     `auditor` retains break-glass READ-only access on any GET (still MFA-gated).
+    Also enforces `must_change_password`: patients (and any user) with the
+    flag set can only reach `/auth/*` — everything else 403s with
+    `password_change_required` so the frontend gate can route them to
+    /change-password.
     """
     async def dep(request: Request, user=Depends(require_workforce_mfa)):
+        # Force-change-password gate: block PHI access until the temporary
+        # password has been replaced. Auth-related endpoints are still
+        # reachable because they use `get_authenticated_user` directly
+        # rather than `require_roles`, so the user can call
+        # /auth/change-password to clear the flag.
+        if user.get("must_change_password"):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "password_change_required",
+                    "message": "Change your temporary password before continuing.",
+                    "next": {"change_password": "/api/auth/change-password"},
+                },
+            )
         role = user.get("role")
         if role == "auditor" and request.method == "GET":
             try:

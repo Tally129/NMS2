@@ -28,13 +28,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 
 from audit import get_client_ip, log_audit
-from auth_utils import hash_password
+from auth_utils import hash_password, validate_password_strength
 from deps import _strip_id, api, db, get_current_user, require_roles
 from models import new_id
 from notifiers import send_email as notify_email
+
+
+_PORTAL_ADMIN_ROLES = ("admin", "practitioner", "staff", "front_desk", "frontdesk")
 
 
 # --------------------------------------------------------------------------- #
@@ -264,31 +267,204 @@ async def _get_or_create_portal_user(client: dict, email: str) -> tuple[dict, bo
 
 
 @api.get("/clients/{client_id}/portal-status")
-async def portal_status(client_id: str, user=Depends(require_roles("admin", "practitioner", "staff"))):
+async def portal_status(client_id: str, user=Depends(require_roles(*_PORTAL_ADMIN_ROLES, "medical_assistant"))):
     client = await _fetch_client(client_id)
     linked = None
     if client.get("user_id"):
         linked = await db.users.find_one(
             {"id": client["user_id"]},
             {"id": 1, "email": 1, "is_active": 1, "last_login_at": 1, "created_at": 1,
-             "must_change_password": 1, "mfa_enabled": 1},
+             "must_change_password": 1, "mfa_enabled": 1, "password_changed_at": 1},
         )
+    # Newest reset/invite token — used to surface "invitation pending" state.
+    latest_token = None
+    if linked:
+        latest_token = await db.password_reset_tokens.find_one(
+            {"user_id": linked["id"], "consumed_at": None},
+            sort=[("created_at", -1)],
+            projection={"created_at": 1, "expires_at": 1, "purpose": 1, "consumed_at": 1},
+        )
+
+    now = datetime.now(timezone.utc)
+    exp = latest_token.get("expires_at") if latest_token else None
+    if exp is not None and getattr(exp, "tzinfo", None) is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    invite_active = bool(exp and exp > now)
+
+    # Human status label. Precedence: disabled > active session > invitation pending > never invited.
+    if not linked:
+        label = "not_invited"
+    elif not linked.get("is_active", True):
+        label = "disabled"
+    elif linked.get("last_login_at"):
+        label = "active"
+    elif invite_active:
+        label = "invitation_pending"
+    else:
+        label = "provisioned"
+
     return {
         "client_id": client_id,
         "has_portal": bool(linked),
         "portal_active": bool(linked and linked.get("is_active", True)),
+        "status": label,
         "email": (linked or {}).get("email") or client.get("email"),
         "last_login_at": (linked or {}).get("last_login_at"),
         "created_at": (linked or {}).get("created_at"),
         "must_change_password": (linked or {}).get("must_change_password", False),
         "mfa_enabled": (linked or {}).get("mfa_enabled", False),
+        "password_changed_at": (linked or {}).get("password_changed_at"),
+        "invitation_sent_at": (latest_token or {}).get("created_at"),
+        "invitation_expires_at": (latest_token or {}).get("expires_at"),
+        "invitation_active": invite_active,
+        "invitation_purpose": (latest_token or {}).get("purpose"),
         "is_test_patient": client.get("tags") and TEST_PATIENT_TAG in (client.get("tags") or []),
     }
 
 
+class PortalCreateIn(BaseModel):
+    email: Optional[EmailStr] = None
+    password: str = Field(..., min_length=12, max_length=128)
+    password_confirm: str = Field(..., min_length=12, max_length=128)
+    require_password_change: bool = True
+
+
+@api.post("/clients/{client_id}/portal-create-account", response_model=PortalInviteResponse)
+async def portal_create_account(client_id: str, payload: PortalCreateIn, request: Request,
+                                 user=Depends(require_roles(*_PORTAL_ADMIN_ROLES))):
+    """Create a portal login with an admin-set temporary password.
+    - Enforces the existing password policy.
+    - Uses the existing bcrypt hash — plaintext never stored / logged.
+    - Password is displayed to the admin exactly once (in the response) and
+      never persisted anywhere in cleartext.
+    - Sets `must_change_password` when `require_password_change=True`, which
+      the frontend gate uses to force a change before any PHI is loaded.
+    """
+    from rate_limit import enforce_forgot_rate
+    enforce_forgot_rate(request, "portal-create")
+
+    if payload.password != payload.password_confirm:
+        raise HTTPException(status_code=400, detail={
+            "code": "password_mismatch",
+            "message": "Passwords do not match.",
+        })
+    client = await _fetch_client(client_id)
+    email = (payload.email or client.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail={
+            "code": "missing_email",
+            "message": "Provide a login email (or set one on the client record first).",
+        })
+
+    # Password policy — reuse the exact function used everywhere else.
+    reason = validate_password_strength(payload.password, email=email,
+                                         full_name=client.get("full_name") or "")
+    if reason:
+        raise HTTPException(status_code=400, detail={"code": "weak_password", "message": reason})
+
+    # Existing account? Refuse — admins must use "Set Temporary Password" for those.
+    existing = await db.users.find_one({"email": email})
+    if existing and existing.get("role") != "client":
+        raise HTTPException(status_code=409, detail={
+            "code": "email_in_use_workforce",
+            "message": "An admin/staff account already uses this email. Choose a different email.",
+        })
+    if existing:
+        # Existing client user linked to a different patient?
+        other = await db.clients.find_one({"user_id": existing["id"], "id": {"$ne": client_id}})
+        if other:
+            raise HTTPException(status_code=409, detail={
+                "code": "email_in_use_client",
+                "message": "This email is already linked to a different patient record.",
+            })
+
+    now = datetime.now(timezone.utc)
+    if existing:
+        # Update in place — never create a duplicate patient or account.
+        await db.users.update_one(
+            {"id": existing["id"]},
+            {"$set": {
+                "password_hash": hash_password(payload.password),
+                "password_changed_at": now,
+                "must_change_password": payload.require_password_change,
+                "is_active": True,
+                "full_name": client.get("full_name") or existing.get("full_name") or "",
+                "phone": client.get("phone") or existing.get("phone"),
+            }, "$inc": {"session_version": 1}},
+        )
+        # Ensure the client is linked to this user.
+        if not client.get("user_id"):
+            await db.clients.update_one({"id": client_id}, {"$set": {"user_id": existing["id"]}})
+        # Revoke any active sessions so the fresh password is required next time.
+        try:
+            from sessions import revoke_all_user_sessions
+            await revoke_all_user_sessions(existing["id"], "portal_temp_password_reset")
+        except Exception:
+            pass
+        user_id = existing["id"]
+        created = False
+    else:
+        doc = {
+            "id": new_id(),
+            "email": email,
+            "password_hash": hash_password(payload.password),
+            "password_changed_at": now,
+            "full_name": client.get("full_name") or "",
+            "phone": client.get("phone"),
+            "role": "client",
+            "mfa_enabled": False, "mfa_secret": None,
+            "is_active": True,
+            "created_at": now,
+            "last_login_at": None,
+            "must_change_password": payload.require_password_change,
+            "session_version": 1,
+        }
+        await db.users.insert_one(doc)
+        await db.clients.update_one({"id": client_id}, {"$set": {"user_id": doc["id"]}})
+        user_id = doc["id"]
+        created = True
+
+    # Invalidate any outstanding invitation tokens so an admin-set password
+    # supersedes any email link.
+    await db.password_reset_tokens.update_many(
+        {"user_id": user_id, "consumed_at": None},
+        {"$set": {"consumed_at": now, "consumed_reason": "superseded_by_admin_password"}},
+    )
+
+    await log_audit(
+        db, user["id"], user["email"], "portal.account_created",
+        resource_type="client", resource_id=client_id,
+        severity="high",
+        metadata={
+            "created_user": created,
+            "email_hash": _hash_email(email),
+            "require_password_change": payload.require_password_change,
+        },
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
+
+    origin = _frontend_origin(request)
+    login_url = f"{origin}/patient-login" if origin else "/patient-login"
+    return PortalInviteResponse(
+        ok=True,
+        email=email,
+        invite_url=login_url,  # login URL — the temp password itself is the one-time secret
+        ttl_minutes=0,
+        already_has_user=not created,
+        delivery="admin_shown_once",
+        message=(
+            "Account created. Share the temporary password with the patient — "
+            "it is displayed once and cannot be retrieved again."
+            if created else
+            "Temporary password set on existing portal account. "
+            "Previous sessions and invitation links were revoked."
+        ),
+    )
+
+
 @api.post("/clients/{client_id}/portal-invite", response_model=PortalInviteResponse)
 async def portal_invite(client_id: str, request: Request,
-                        user=Depends(require_roles("admin", "practitioner", "staff"))):
+                        user=Depends(require_roles(*_PORTAL_ADMIN_ROLES))):
     client = await _fetch_client(client_id)
     email = (client.get("email") or "").strip().lower()
     if not email:
@@ -296,6 +472,10 @@ async def portal_invite(client_id: str, request: Request,
             "code": "missing_email",
             "message": "Add an email address to the client record before sending an invite.",
         })
+
+    # Rate-limit invitations per admin per IP (piggybacks on forgot-password limiter).
+    from rate_limit import enforce_forgot_rate
+    enforce_forgot_rate(request, email)
 
     linked_user, created = await _get_or_create_portal_user(client, email)
 
@@ -336,13 +516,15 @@ async def portal_invite(client_id: str, request: Request,
 
 @api.post("/clients/{client_id}/portal-reset-password", response_model=PortalInviteResponse)
 async def portal_reset_password(client_id: str, request: Request,
-                                 user=Depends(require_roles("admin", "practitioner", "staff"))):
+                                 user=Depends(require_roles(*_PORTAL_ADMIN_ROLES))):
     client = await _fetch_client(client_id)
     if not client.get("user_id"):
         raise HTTPException(status_code=400, detail={
             "code": "no_portal_user",
             "message": "This client has no portal account yet — send an invitation first.",
         })
+    from rate_limit import enforce_forgot_rate
+    enforce_forgot_rate(request, client.get("email") or client_id)
     linked = await db.users.find_one({"id": client["user_id"]})
     if not linked:
         raise HTTPException(status_code=404, detail="Linked user not found")
@@ -378,7 +560,7 @@ async def portal_reset_password(client_id: str, request: Request,
 
 @api.post("/clients/{client_id}/portal-disable")
 async def portal_disable(client_id: str, payload: PortalDisableIn, request: Request,
-                          user=Depends(require_roles("admin", "practitioner", "staff"))):
+                          user=Depends(require_roles(*_PORTAL_ADMIN_ROLES))):
     client = await _fetch_client(client_id)
     if not client.get("user_id"):
         raise HTTPException(status_code=400, detail="No portal user to disable")
@@ -398,7 +580,7 @@ async def portal_disable(client_id: str, payload: PortalDisableIn, request: Requ
 
 @api.post("/clients/{client_id}/portal-enable")
 async def portal_enable(client_id: str, request: Request,
-                         user=Depends(require_roles("admin", "practitioner", "staff"))):
+                         user=Depends(require_roles(*_PORTAL_ADMIN_ROLES))):
     client = await _fetch_client(client_id)
     if not client.get("user_id"):
         raise HTTPException(status_code=400, detail="No portal user to enable")

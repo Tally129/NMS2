@@ -596,7 +596,8 @@ async def seed_demo():
         logger.info("Seeded break-glass auditor user.")
 
     # Idempotent: seed a Medical Assistant test account for delegated-editing QA.
-    if not await db.users.find_one({"email": "ma@natmedsol.local"}):
+    ma_doc = await db.users.find_one({"email": "ma@natmedsol.local"})
+    if not ma_doc:
         await db.users.insert_one({
             "id": new_id(), "email": "ma@natmedsol.local",
             "password_hash": hash_password("MedAssist!2345"),
@@ -605,6 +606,11 @@ async def seed_demo():
             "is_active": True, "created_at": datetime.now(timezone.utc), "last_login_at": None,
         })
         logger.info("Seeded demo medical assistant user.")
+    elif ma_doc.get("role") != "medical_assistant":
+        # Self-heal: an earlier build shipped this seed with role="client".
+        # Correct it on boot without wiping the record so audit history is preserved.
+        await db.users.update_one({"id": ma_doc["id"]}, {"$set": {"role": "medical_assistant"}})
+        logger.info("Self-healed medical assistant role for ma@natmedsol.local.")
 
     # Accounting: seed chart-of-accounts + ensure indexes.
     try:

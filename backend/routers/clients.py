@@ -28,7 +28,7 @@ from models import (
 
 # =================== CLIENTS ===================
 @api.get("/clients", response_model=List[ClientOut])
-async def list_clients(user=Depends(require_roles("admin", "practitioner", "staff"))):
+async def list_clients(user=Depends(require_roles("admin", "practitioner", "staff", "medical_assistant", "front_desk", "frontdesk"))):
     items = await db.clients.find().sort("created_at", -1).to_list(500)
     return [_strip_id(i) for i in items]
 

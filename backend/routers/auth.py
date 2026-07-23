@@ -507,7 +507,12 @@ async def change_password(payload: PasswordChange, request: Request, user=Depend
     await db.users.update_one(
         {"id": user["id"]},
         {
-            "$set": {"password_hash": hash_password(payload.new_password), "password_changed_at": now},
+            "$set": {
+                "password_hash": hash_password(payload.new_password),
+                "password_changed_at": now,
+                # Clear the temp-password gate — the user has now chosen their own.
+                "must_change_password": False,
+            },
             "$inc": {"session_version": 1},
         },
     )
