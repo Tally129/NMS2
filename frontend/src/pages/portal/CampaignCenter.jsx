@@ -17,6 +17,20 @@ import {
 } from "lucide-react";
 import { useToast } from "../../hooks/use-toast";
 import { getErrorMessage } from "../../lib/errors";
+import RichTextEditor, { fillVariables } from "../../components/RichTextEditor";
+
+// Preview merge-field context — realistic placeholder values so template
+// authors can visualize the final email/SMS without touching real patient data.
+const PREVIEW_CONTEXT = {
+  patient: { first_name: "Alex", last_name: "Rivera", full_name: "Alex Rivera",
+             email: "alex.rivera@example.com", phone: "(555) 123-4567" },
+  appointment: { date: "Tue, Mar 4", time: "10:30 AM", provider: "Dr. Ravello" },
+  provider: { name: "Dr. Ravello" },
+  membership: { name: "Vitality Plan" },
+  package: { name: "Detox Package" },
+  clinic: { name: "Natural Medical Solutions", phone: "(770) 674-6311",
+             email: "info@natmedsol.com" },
+};
 
 const FILTER_TYPES = [
   { value: "all_marketing", label: "All marketing-opted-in patients" },
@@ -211,12 +225,13 @@ export default function CampaignCenter() {
 function NewCampaignDialog({ open, onOpenChange, onSent }) {
   const { toast } = useToast();
   const [form, setForm] = React.useState({
-    title: "", subject: "", message: "", channel: "email",
+    title: "", subject: "", message: "", message_text: "", channel: "email",
     filter_type: "all_marketing", filter_params: {}, mode: "now", schedule_at: "",
   });
   const [estimate, setEstimate] = React.useState(null);
   const [estimating, setEstimating] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
+  const [showPreview, setShowPreview] = React.useState(false);
 
   const filterConfig = FILTER_TYPES.find((f) => f.value === form.filter_type);
 
@@ -279,7 +294,7 @@ function NewCampaignDialog({ open, onOpenChange, onSent }) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bg-white max-w-xl" data-testid="new-campaign-dialog">
+      <DialogContent className="bg-white max-w-2xl" data-testid="new-campaign-dialog">
         <DialogHeader>
           <DialogTitle className="font-display text-2xl">New campaign</DialogTitle>
           <DialogDescription>
@@ -333,8 +348,47 @@ function NewCampaignDialog({ open, onOpenChange, onSent }) {
             </div>
           )}
           <div>
-            <Label>Message</Label>
-            <Textarea rows={4} value={form.message} onChange={(e) => setForm({ ...form, message: e.target.value })} data-testid="campaign-message" />
+            <div className="flex items-center justify-between">
+              <Label>{form.channel === "email" ? "Message (rich text)" : "Message (plain text)"}</Label>
+              <button
+                type="button"
+                onClick={() => setShowPreview((v) => !v)}
+                className="text-xs text-[#2f6a4a] hover:underline"
+                data-testid="campaign-preview-toggle"
+              >
+                {showPreview ? "Hide preview" : "Show preview"}
+              </button>
+            </div>
+            {form.channel === "email" ? (
+              <div className="mt-1">
+                <RichTextEditor
+                  value={form.message}
+                  onChange={(html) => setForm((p) => ({ ...p, message: html }))}
+                  onPlainTextChange={(txt) => setForm((p) => ({ ...p, message_text: txt }))}
+                  placeholder="Compose an email. Use the variables menu to insert merge fields."
+                  testid="campaign-editor"
+                />
+              </div>
+            ) : (
+              <Textarea rows={4}
+                value={form.message}
+                onChange={(e) => setForm({ ...form, message: e.target.value })}
+                placeholder="SMS message body. Merge fields like {{patient.first_name}} substitute at send time."
+                data-testid="campaign-message" />
+            )}
+            {showPreview && (
+              <div className="mt-2 rounded-lg border border-[#e2ebe4] bg-[#f7fbf8] p-3 max-h-56 overflow-y-auto"
+                   data-testid="campaign-preview">
+                {form.channel === "email" ? (
+                  <div className="prose prose-sm max-w-none"
+                       dangerouslySetInnerHTML={{ __html: fillVariables(form.message || "", PREVIEW_CONTEXT) }} />
+                ) : (
+                  <div className="whitespace-pre-wrap text-sm text-slate-700">
+                    {fillVariables(form.message || "", PREVIEW_CONTEXT)}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           <div className="flex gap-3 items-end">
             <div className="flex-1">
@@ -425,7 +479,14 @@ function CampaignDetail({ id, onClose }) {
         {c && (
           <div className="space-y-3 text-sm">
             {c.subject && <div><b>Subject:</b> {c.subject}</div>}
-            <div className="rounded-lg bg-[#f4f7f2] p-3 whitespace-pre-wrap">{c.message}</div>
+            {c.message && String(c.message).trim().startsWith("<") ? (
+              <div
+                className="rounded-lg bg-[#f4f7f2] p-3 prose prose-sm max-w-none"
+                dangerouslySetInnerHTML={{ __html: c.message }}
+              />
+            ) : (
+              <div className="rounded-lg bg-[#f4f7f2] p-3 whitespace-pre-wrap">{c.message}</div>
+            )}
             {c.stats && (
               <div className="grid grid-cols-4 gap-2 text-xs">
                 <Stat label="Success" value={c.stats.success} tone="text-[#2f6a4a]" />

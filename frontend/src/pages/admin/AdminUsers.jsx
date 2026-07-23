@@ -6,10 +6,10 @@ import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
 import { useToast } from "../../hooks/use-toast";
-import { UserPlus } from "lucide-react";
+import { UserPlus, Search } from "lucide-react";
 import { getErrorMessage } from "../../lib/errors";
 
-const ROLES = ["admin", "practitioner", "staff", "client"];
+const ROLES = ["admin", "practitioner", "staff", "medical_assistant", "client"];
 
 export default function AdminUsers() {
   const { toast } = useToast();
@@ -17,9 +17,22 @@ export default function AdminUsers() {
   const [loading, setLoading] = React.useState(true);
   const [creating, setCreating] = React.useState(false);
   const [form, setForm] = React.useState({ full_name: "", email: "", password: "", role: "practitioner", phone: "" });
+  const [q, setQ] = React.useState("");
+  const [roleFilter, setRoleFilter] = React.useState("all");
 
   const load = () => api.get("/admin/users").then((r) => setUsers(r.data || [])).finally(() => setLoading(false));
   React.useEffect(() => { load(); }, []);
+
+  const filtered = React.useMemo(() => {
+    const s = q.trim().toLowerCase();
+    return users.filter((u) => {
+      if (roleFilter !== "all" && u.role !== roleFilter) return false;
+      if (!s) return true;
+      return (u.full_name || "").toLowerCase().includes(s) ||
+             (u.email || "").toLowerCase().includes(s) ||
+             (u.role || "").toLowerCase().includes(s);
+    });
+  }, [users, q, roleFilter]);
 
   const create = async () => {
     if (!form.email || !form.full_name || form.password.length < 8) {
@@ -51,13 +64,35 @@ export default function AdminUsers() {
     <PortalLayout>
       <PortalHeader
         title="Users & Roles"
-        subtitle={`${users.length} users`}
+        subtitle={`${filtered.length} of ${users.length} users`}
         actions={
-          <Button onClick={() => setCreating((v) => !v)} className="btn-lift h-11 rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]">
+          <Button onClick={() => setCreating((v) => !v)} className="btn-lift h-11 rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]" data-testid="users-add-btn">
             <UserPlus size={16} className="mr-2" /> Add user
           </Button>
         }
       />
+
+      <div className="mb-4 flex flex-wrap gap-3 items-center">
+        <div className="relative max-w-md flex-1 min-w-[220px]">
+          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8a6a3c]" />
+          <Input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search by name, email, or role…"
+            className="pl-9 bg-[#fbf7ee] border-[#e0d6bc]"
+            data-testid="users-search-input"
+          />
+        </div>
+        <Select value={roleFilter} onValueChange={setRoleFilter}>
+          <SelectTrigger className="w-40 h-10 bg-[#fbf7ee] border-[#e0d6bc]" data-testid="users-role-filter">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All roles</SelectItem>
+            {ROLES.map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      </div>
 
       {creating && (
         <div className="mb-6 rounded-2xl border border-[#c19a4b] bg-[#fbf7ee] p-5 grid md:grid-cols-2 gap-4">
@@ -90,8 +125,9 @@ export default function AdminUsers() {
           </thead>
           <tbody>
             {loading && <tr><td colSpan={5} className="py-8 text-center text-[#6a6a6a]">Loading…</td></tr>}
-            {users.map((u) => (
-              <tr key={u.id} className="border-t border-[#e7dfc9]">
+            {!loading && filtered.length === 0 && <tr><td colSpan={5} className="py-10 text-center text-[#6a6a6a]">{q || roleFilter !== "all" ? "No users match this filter." : "No users."}</td></tr>}
+            {filtered.map((u) => (
+              <tr key={u.id} className="border-t border-[#e7dfc9]" data-testid={`user-row-${u.id}`}>
                 <td className="py-3 px-4">{u.full_name}</td>
                 <td className="py-3 px-4 text-[#3a3a3a]">{u.email}</td>
                 <td className="py-3 px-4">

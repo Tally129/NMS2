@@ -22,6 +22,7 @@ from reportlab.pdfgen import canvas as pdfcanvas
 
 from audit import get_client_ip, log_audit
 from notifiers import push_to_user
+from pydantic import BaseModel, Field, EmailStr
 from deps import (
     _resolve_self_client, _strip_id, api, db, get_current_user,
     logger, require_roles,
@@ -279,67 +280,317 @@ async def transaction_receipt(tid: str, user=Depends(get_current_user)):
         self_client = await _resolve_self_client(user)
         if not self_client or t.get("client_id") != self_client["id"]:
             raise HTTPException(status_code=403, detail="Forbidden")
-    # Generate PDF
-    buf = _io.BytesIO()
-    c = pdfcanvas.Canvas(buf, pagesize=letter)
-    width, _ = letter
-    y = 10.5 * inch
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(0.75 * inch, y, "Natural Medical Solutions Wellness Center")
-    y -= 0.3 * inch
-    c.setFont("Helvetica", 10)
-    c.drawString(0.75 * inch, y, "1130 Upper Hembree Rd, Roswell, GA 30076")
-    y -= 0.2 * inch
-    c.drawString(0.75 * inch, y, "(770) 674-6311")
-    y -= 0.4 * inch
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(0.75 * inch, y, f"Receipt {t['id'][:8]}")
-    c.drawRightString(width - 0.75 * inch, y, datetime.now(timezone.utc).strftime("%b %d, %Y"))
-    y -= 0.3 * inch
+    buf = await _render_invoice_pdf(t)
+    invoice_no = _invoice_number(t)
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f'attachment; filename="{invoice_no}.pdf"'})
+
+
+class InvoiceEmailIn(BaseModel):
+    to: Optional[EmailStr] = None
+    cc: Optional[EmailStr] = None
+    note: Optional[str] = Field(default=None, max_length=1000)
+
+
+@api.post("/transactions/{tid}/email")
+async def email_invoice(tid: str, payload: InvoiceEmailIn, request: Request,
+                        user=Depends(require_roles("admin", "staff", "practitioner"))):
+    """Email a PDF invoice to the client (or explicit override recipient).
+    Attaches the PDF via SendGrid when a live API key is configured; otherwise
+    logs a stub delivery entry."""
+    t = await db.transactions.find_one({"id": tid})
+    if not t:
+        raise HTTPException(status_code=404, detail="Not found")
+    client = None
     if t.get("client_id"):
-        cl = await db.clients.find_one({"id": t["client_id"]})
-        if cl:
-            c.setFont("Helvetica", 10)
-            c.drawString(0.75 * inch, y, f"Client: {cl.get('full_name', '')}")
-            y -= 0.25 * inch
-    c.line(0.75 * inch, y, width - 0.75 * inch, y)
-    y -= 0.2 * inch
+        client = await db.clients.find_one({"id": t["client_id"]},
+                                            {"full_name": 1, "email": 1})
+    target = (payload.to or (client or {}).get("email") or "").strip().lower()
+    if not target:
+        raise HTTPException(status_code=400, detail={
+            "code": "no_recipient",
+            "message": "No email on file for this client — provide a recipient in the request.",
+        })
+
+    buf = await _render_invoice_pdf(t)
+    pdf_bytes = buf.getvalue()
+    invoice_no = _invoice_number(t)
+    subject = f"Invoice {invoice_no} · Natural Medical Solutions"
+    body_note = f"<p>{payload.note}</p>" if payload.note else ""
+    html = (
+        f"<p>Hello {(client or {}).get('full_name') or 'there'},</p>"
+        f"<p>Please find your invoice ({invoice_no}) attached.</p>"
+        f"{body_note}"
+        "<p>Total: <strong>${:.2f}</strong></p>".format(t.get("total", 0))
+        + "<p>Thank you for choosing Natural Medical Solutions.</p>"
+    )
+
+    status = await _send_email_with_attachment(
+        db, target, subject, html, pdf_bytes, filename=f"{invoice_no}.pdf",
+    )
+    await log_audit(db, user["id"], user["email"], "invoice.email",
+                    resource_type="transaction", resource_id=tid,
+                    metadata={"client_id": t.get("client_id"), "delivery": status,
+                              "recipient_hash": _hash_email(target)},
+                    ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+    return {"ok": True, "delivery": status, "recipient": target,
+            "invoice_number": invoice_no}
+
+
+# --------------------------------------------------------------------------- #
+# Invoice PDF helpers (kept internal — no separate invoice model created)     #
+# --------------------------------------------------------------------------- #
+_PRACTICE_NAME = os.environ.get("PRACTICE_NAME", "Natural Medical Solutions Wellness Center")
+_PRACTICE_ADDR = os.environ.get("PRACTICE_ADDRESS", "1130 Upper Hembree Rd, Roswell, GA 30076")
+_PRACTICE_PHONE = os.environ.get("PRACTICE_PHONE", "(770) 674-6311")
+_PRACTICE_EMAIL = os.environ.get("PRACTICE_EMAIL", "info@natmedsol.com")
+_PRACTICE_WEB = os.environ.get("PRACTICE_WEBSITE", "natmedsol.com")
+
+
+def _invoice_number(t: dict) -> str:
+    """Human-readable invoice number derived from transaction id + created date."""
+    created = t.get("created_at") or datetime.now(timezone.utc)
+    if isinstance(created, str):
+        try:
+            created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+        except Exception:
+            created = datetime.now(timezone.utc)
+    return f"INV-{created.strftime('%Y%m%d')}-{str(t.get('id', ''))[:6].upper()}"
+
+
+def _hash_email(email: str) -> str:
+    import hashlib
+    return hashlib.sha256(email.lower().strip().encode()).hexdigest()[:16]
+
+
+async def _render_invoice_pdf(t: dict) -> "io.BytesIO":
+    """Server-side rendered invoice PDF. Returns a rewound BytesIO."""
+    client = None
+    if t.get("client_id"):
+        client = await db.clients.find_one({"id": t["client_id"]},
+                                            {"full_name": 1, "email": 1, "phone": 1,
+                                             "address": 1, "mrn": 1})
+    invoice_no = _invoice_number(t)
+    created = t.get("created_at") or datetime.now(timezone.utc)
+    subtotal = float(t.get("subtotal", 0) or 0)
+    discount = float(t.get("discount", 0) or 0)
+    tax = float(t.get("tax", 0) or 0)
+    tip = float(t.get("tip", 0) or 0)
+    total = float(t.get("total", 0) or 0)
+
+    buf = io.BytesIO()
+    c = pdfcanvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+    left = 0.75 * inch
+    right = width - 0.75 * inch
+
+    # Header — brand mark
+    c.setFillColorRGB(0.184, 0.290, 0.227)  # #2f4a3a (deep green)
+    c.rect(0, height - 0.35 * inch, width, 0.35 * inch, stroke=0, fill=1)
+    c.setFillColorRGB(1, 1, 1)
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, height - 0.24 * inch, _PRACTICE_NAME.upper())
+    c.setFillColorRGB(0.184, 0.290, 0.227)
+
+    y = height - 0.85 * inch
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(left, y, "INVOICE")
+    c.setFillColorRGB(0.20, 0.20, 0.20)
+    c.setFont("Helvetica", 10)
+    c.drawRightString(right, y, invoice_no)
+    y -= 0.22 * inch
+    c.setFont("Helvetica", 9)
+    c.drawRightString(right, y,
+                       created.strftime("Issued %b %d, %Y · %I:%M %p") if hasattr(created, "strftime") else "")
+    y -= 0.5 * inch
+
+    # From / To columns
+    c.setFillColorRGB(0.542, 0.416, 0.235)  # eyebrow gold
+    c.setFont("Helvetica-Bold", 8)
+    c.drawString(left, y, "FROM")
+    c.drawString(left + 3.2 * inch, y, "BILL TO")
+    c.setFillColorRGB(0.12, 0.16, 0.14)
     c.setFont("Helvetica-Bold", 10)
-    c.drawString(0.75 * inch, y, "Item")
-    c.drawString(4.5 * inch, y, "Qty")
-    c.drawString(5.2 * inch, y, "Unit")
-    c.drawRightString(width - 0.75 * inch, y, "Total")
-    y -= 0.2 * inch
+    y -= 0.18 * inch
+    c.drawString(left, y, _PRACTICE_NAME)
+    c.drawString(left + 3.2 * inch, y, (client or {}).get("full_name") or "Walk-in customer")
+    y -= 0.16 * inch
+    c.setFont("Helvetica", 9)
+    for line in (_PRACTICE_ADDR, f"Phone: {_PRACTICE_PHONE}",
+                 f"{_PRACTICE_EMAIL} · {_PRACTICE_WEB}"):
+        c.drawString(left, y, line)
+        y -= 0.14 * inch
+    # Reset y for right column height
+    ry = y + 0.42 * inch
+    if client:
+        for line in [client.get("email") or "",
+                      client.get("phone") or "",
+                      f"MRN: {client.get('mrn')}" if client.get("mrn") else ""]:
+            if not line:
+                continue
+            c.drawString(left + 3.2 * inch, ry, line)
+            ry -= 0.14 * inch
+
+    y = min(y, ry) - 0.15 * inch
+    c.setStrokeColorRGB(0.9, 0.86, 0.79)
+    c.line(left, y, right, y)
+    y -= 0.28 * inch
+
+    # Line items header
+    c.setFillColorRGB(0.542, 0.416, 0.235)
+    c.setFont("Helvetica-Bold", 8)
+    c.drawString(left, y, "DESCRIPTION")
+    c.drawRightString(left + 4.0 * inch, y, "QTY")
+    c.drawRightString(left + 5.0 * inch, y, "UNIT")
+    c.drawRightString(right, y, "AMOUNT")
+    y -= 0.06 * inch
+    c.setStrokeColorRGB(0.85, 0.80, 0.68)
+    c.line(left, y, right, y)
+    y -= 0.20 * inch
+
+    # Line items
+    c.setFillColorRGB(0.12, 0.16, 0.14)
     c.setFont("Helvetica", 10)
     for line in t.get("lines", []):
-        c.drawString(0.75 * inch, y, line["name"][:60])
-        c.drawString(4.5 * inch, y, str(line["qty"]))
-        c.drawString(5.2 * inch, y, f"${line['unit_price']:.2f}")
-        c.drawRightString(width - 0.75 * inch, y, f"${line['line_total']:.2f}")
-        y -= 0.2 * inch
-    y -= 0.1 * inch
-    c.line(0.75 * inch, y, width - 0.75 * inch, y)
-    y -= 0.25 * inch
-    for label, val in [("Subtotal", t["subtotal"]), ("Discount", -t.get("discount", 0)),
-                       ("Tax", t.get("tax", 0)), ("Tip", t.get("tip", 0))]:
-        if val:
-            c.drawRightString(width - 1.5 * inch, y, label)
-            c.drawRightString(width - 0.75 * inch, y, f"${val:.2f}")
-            y -= 0.18 * inch
-    c.setFont("Helvetica-Bold", 12)
-    c.drawRightString(width - 1.5 * inch, y, "TOTAL")
-    c.drawRightString(width - 0.75 * inch, y, f"${t['total']:.2f}")
-    y -= 0.25 * inch
-    c.setFont("Helvetica", 9)
-    c.drawString(0.75 * inch, y, f"Paid via {t['payment_method'].replace('_', ' ').title()}")
+        c.drawString(left, y, str(line.get("name", ""))[:60])
+        c.drawRightString(left + 4.0 * inch, y, str(line.get("qty", 0)))
+        c.drawRightString(left + 5.0 * inch, y, f"${(line.get('unit_price') or 0):.2f}")
+        c.drawRightString(right, y, f"${(line.get('line_total') or 0):.2f}")
+        y -= 0.18 * inch
+        if y < 2.2 * inch:
+            c.showPage(); y = height - 1 * inch
+
+    y -= 0.05 * inch
+    c.setStrokeColorRGB(0.9, 0.86, 0.79)
+    c.line(left + 3.0 * inch, y, right, y)
+    y -= 0.2 * inch
+
+    # Totals block
+    def _line(label, value, bold=False, negative=False):
+        nonlocal y
+        c.setFont("Helvetica-Bold" if bold else "Helvetica", 10)
+        c.drawRightString(right - 0.9 * inch, y, label)
+        val_str = f"−${abs(value):.2f}" if negative else f"${value:.2f}"
+        c.drawRightString(right, y, val_str)
+        y -= 0.18 * inch
+
+    _line("Subtotal", subtotal)
+    if discount:
+        _line("Discount", discount, negative=True)
+    if tax:
+        _line("Tax", tax)
+    if tip:
+        _line("Tip", tip)
+    y -= 0.08 * inch
+    c.setStrokeColorRGB(0.184, 0.290, 0.227)
+    c.setLineWidth(1.2)
+    c.line(right - 2.0 * inch, y, right, y)
+    y -= 0.02 * inch
+    c.setLineWidth(0.5)
+    c.setFillColorRGB(0.184, 0.290, 0.227)
+    c.setFont("Helvetica-Bold", 14)
+    y -= 0.24 * inch
+    c.drawRightString(right - 0.9 * inch, y, "TOTAL")
+    c.drawRightString(right, y, f"${total:.2f}")
+    y -= 0.35 * inch
+
+    # Payment status
+    c.setFillColorRGB(0.24, 0.42, 0.32)
+    c.setFont("Helvetica-Bold", 10)
+    pm = (t.get("payment_method") or "").replace("_", " ").title()
+    status_label = "PAID" if total > 0 else "PAID (Zero)"
+    c.drawString(left, y, f"{status_label}  ·  {pm}")
+    if t.get("payment_ref"):
+        c.setFont("Helvetica", 9)
+        c.setFillColorRGB(0.35, 0.35, 0.35)
+        c.drawString(left + 2.5 * inch, y, f"Ref: {t.get('payment_ref')}")
     y -= 0.4 * inch
+
+    # Notes
+    if t.get("note"):
+        c.setFillColorRGB(0.542, 0.416, 0.235)
+        c.setFont("Helvetica-Bold", 8)
+        c.drawString(left, y, "NOTES")
+        y -= 0.16 * inch
+        c.setFillColorRGB(0.20, 0.20, 0.20)
+        c.setFont("Helvetica", 9)
+        for chunk in _wrap(t["note"], 100):
+            c.drawString(left, y, chunk); y -= 0.13 * inch
+
+    # Footer
+    c.setFillColorRGB(0.46, 0.46, 0.46)
     c.setFont("Helvetica-Oblique", 8)
-    c.drawString(0.75 * inch, y, "Thank you for choosing Natural Medical Solutions.")
-    c.showPage()
-    c.save()
+    c.drawCentredString(width / 2, 0.6 * inch,
+                        f"Thank you for choosing {_PRACTICE_NAME}. "
+                        f"Questions? Call {_PRACTICE_PHONE} or reply to {_PRACTICE_EMAIL}.")
+    c.drawCentredString(width / 2, 0.45 * inch,
+                        "Wellness services are not billed to insurance unless specifically arranged. "
+                        "All sales final unless noted otherwise.")
+    c.showPage(); c.save()
     buf.seek(0)
-    return StreamingResponse(buf, media_type="application/pdf",
-                             headers={"Content-Disposition": f'attachment; filename="receipt-{t["id"][:8]}.pdf"'})
+    return buf
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    """Very small word wrapper for PDF footer text."""
+    words = str(text or "").split()
+    out, line = [], ""
+    for w in words:
+        if len(line) + len(w) + 1 > width:
+            out.append(line); line = w
+        else:
+            line = f"{line} {w}".strip()
+    if line:
+        out.append(line)
+    return out or [""]
+
+
+async def _send_email_with_attachment(db, to: str, subject: str, html: str,
+                                       attachment: bytes, *, filename: str) -> str:
+    """Send an email with a PDF attachment. Returns delivery status string."""
+    import base64
+    from notifiers import email_status
+    now = datetime.now(timezone.utc)
+    log_doc = {
+        "service": "sendgrid",
+        "action": "invoice.email_dispatch",
+        "payload": {"to": to, "subject": subject, "filename": filename,
+                     "size": len(attachment)},
+        "ts": now,
+    }
+    if email_status() != "live":
+        log_doc["_stubbed"] = True
+        await db.integration_log.insert_one(log_doc)
+        return "sent_stub"
+    api_key = os.environ["SENDGRID_API_KEY"]
+    from_email = os.environ["SENDGRID_FROM_EMAIL"]
+
+    def _blocking() -> int:
+        from sendgrid import SendGridAPIClient
+        from sendgrid.helpers.mail import (
+            Mail, Attachment, FileContent, FileName, FileType, Disposition,
+        )
+        msg = Mail(from_email=from_email, to_emails=to, subject=subject,
+                   html_content=html)
+        att = Attachment(
+            FileContent(base64.b64encode(attachment).decode()),
+            FileName(filename), FileType("application/pdf"),
+            Disposition("attachment"),
+        )
+        msg.attachment = att
+        sg = SendGridAPIClient(api_key)
+        return sg.send(msg).status_code
+
+    import asyncio
+    try:
+        code = await asyncio.to_thread(_blocking)
+        log_doc.update({"status_code": code, "_stubbed": False})
+        await db.integration_log.insert_one(log_doc)
+        return "sent" if 200 <= code < 300 else "failed"
+    except Exception as e:
+        log_doc.update({"error": str(e), "_stubbed": False, "failed": True})
+        await db.integration_log.insert_one(log_doc)
+        return "failed"
 
 
 # ---------- Time Clock ----------

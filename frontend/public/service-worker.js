@@ -1,7 +1,7 @@
 /* Natural Medical Solutions — service worker
  * Network-first for /api (fresh PHI), cache-first for static assets.
  */
-const VERSION = "nms-v2-2026-02-24";
+const VERSION = "nms-v3-2026-07-23-sprint-usability";
 const STATIC_CACHE = `${VERSION}-static`;
 const ASSET_PATTERNS = [/\.css$/, /\.js$/, /\.woff2?$/, /\.png$/, /\.svg$/, /\.ico$/];
 

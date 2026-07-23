@@ -6,7 +6,7 @@ import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../../components/ui/dialog";
 import { useToast } from "../../hooks/use-toast";
-import { Plus, Pencil, Trash2 } from "lucide-react";
+import { Plus, Pencil, Trash2, Search } from "lucide-react";
 import { getErrorMessage } from "../../lib/errors";
 
 const empty = { name: "", category: "", duration_min: 60, price: 0, sku: "", description: "", active: true };
@@ -17,10 +17,22 @@ export default function Treatments() {
   const [loading, setLoading] = React.useState(true);
   const [edit, setEdit] = React.useState(null);
   const [form, setForm] = React.useState(empty);
+  const [q, setQ] = React.useState("");
 
   const load = () =>
     api.get("/treatments").then((r) => setItems(r.data || [])).finally(() => setLoading(false));
   React.useEffect(() => { load(); }, []);
+
+  const filtered = React.useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return items;
+    return items.filter((t) =>
+      (t.name || "").toLowerCase().includes(s) ||
+      (t.category || "").toLowerCase().includes(s) ||
+      (t.sku || "").toLowerCase().includes(s) ||
+      (t.description || "").toLowerCase().includes(s)
+    );
+  }, [items, q]);
 
   const openNew = () => { setEdit("new"); setForm(empty); };
   const openEdit = (t) => { setEdit(t.id); setForm({ ...empty, ...t }); };
@@ -62,13 +74,24 @@ export default function Treatments() {
     <PortalLayout>
       <PortalHeader
         title="Treatments"
-        subtitle={`${items.length} services in catalog`}
+        subtitle={`${filtered.length} of ${items.length} services in catalog`}
         actions={
           <Button onClick={openNew} className="btn-lift rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]" data-testid="treatments-new-btn">
             <Plus size={16} className="mr-2" /> New treatment
           </Button>
         }
       />
+
+      <div className="mb-4 relative max-w-md">
+        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8a6a3c]" />
+        <Input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search by name, category, SKU, or description…"
+          className="pl-9 bg-[#fbf7ee] border-[#e0d6bc]"
+          data-testid="treatments-search-input"
+        />
+      </div>
 
       <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] overflow-hidden" data-testid="treatments-table">
         <table className="w-full text-sm">
@@ -84,8 +107,8 @@ export default function Treatments() {
           </thead>
           <tbody>
             {loading && <tr><td colSpan={6} className="py-8 text-center text-[#6a6a6a]">Loading…</td></tr>}
-            {!loading && items.length === 0 && <tr><td colSpan={6} className="py-10 text-center text-[#6a6a6a]">No treatments yet. Click <em>New treatment</em>.</td></tr>}
-            {items.map((t) => (
+            {!loading && filtered.length === 0 && <tr><td colSpan={6} className="py-10 text-center text-[#6a6a6a]">{q ? `No treatments match "${q}".` : 'No treatments yet. Click New treatment.'}</td></tr>}
+            {filtered.map((t) => (
               <tr key={t.id} className="border-t border-[#e7dfc9]" data-testid={`treatment-row-${t.id}`}>
                 <td className="py-3 px-4 font-medium text-[#1f2a22]">{t.name}</td>
                 <td className="py-3 px-4 text-[#6a6a6a]">{t.category || "—"}</td>

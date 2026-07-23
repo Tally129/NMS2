@@ -7,7 +7,7 @@ import { Label } from "../../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../../components/ui/tabs";
 import { useToast } from "../../hooks/use-toast";
-import { Plus, Trash2, Receipt, Stethoscope, Boxes, Pencil } from "lucide-react";
+import { Plus, Trash2, Receipt, Stethoscope, Boxes, Pencil, Search } from "lucide-react";
 import { getErrorMessage } from "../../lib/errors";
 
 const PAY_METHODS = [
@@ -33,6 +33,8 @@ export default function PointOfSale() {
   const [note, setNote] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [customForm, setCustomForm] = React.useState({ name: "", unit_price: "" });
+  const [treatmentQ, setTreatmentQ] = React.useState("");
+  const [inventoryQ, setInventoryQ] = React.useState("");
 
   const load = async () => {
     try {
@@ -136,48 +138,90 @@ export default function PointOfSale() {
             </TabsList>
 
             <TabsContent value="treatments" className="mt-4">
-              {treatments.length === 0 ? (
-                <p className="text-sm text-[#6a6a6a]">No active treatments. Add some in the Treatments page.</p>
-              ) : (
-                <div className="grid sm:grid-cols-2 gap-3">
-                  {treatments.map((t) => (
-                    <button
-                      key={t.id}
-                      onClick={() => addTreatment(t)}
-                      className="text-left rounded-xl border border-[#e0d6bc] bg-[#f6f1e6] p-3 hover:bg-[#f1ead8] transition"
-                      data-testid={`pos-treatment-${t.id}`}
-                    >
-                      <div className="font-medium text-[#1f2a22] text-sm">{t.name}</div>
-                      <div className="text-xs text-[#6a6a6a]">{t.duration_min} min · {t.category || "general"}</div>
-                      <div className="text-[#2f4a3a] font-display text-lg mt-1">${t.price.toFixed(2)}</div>
-                    </button>
-                  ))}
-                </div>
-              )}
+              <div className="mb-3 relative">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8a6a3c]" />
+                <Input
+                  value={treatmentQ}
+                  onChange={(e) => setTreatmentQ(e.target.value)}
+                  placeholder="Search treatments…"
+                  className="pl-9 bg-[#f6f1e6] border-[#e0d6bc] h-9"
+                  data-testid="pos-treatments-search"
+                />
+              </div>
+              {(() => {
+                const s = treatmentQ.trim().toLowerCase();
+                const filteredTx = s
+                  ? treatments.filter((t) =>
+                      (t.name || "").toLowerCase().includes(s) ||
+                      (t.category || "").toLowerCase().includes(s) ||
+                      (t.sku || "").toLowerCase().includes(s)
+                    )
+                  : treatments;
+                if (filteredTx.length === 0) {
+                  return <p className="text-sm text-[#6a6a6a]">{treatments.length === 0 ? "No active treatments. Add some in the Treatments page." : `No treatments match "${treatmentQ}".`}</p>;
+                }
+                return (
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    {filteredTx.map((t) => (
+                      <button
+                        key={t.id}
+                        onClick={() => addTreatment(t)}
+                        className="text-left rounded-xl border border-[#e0d6bc] bg-[#f6f1e6] p-3 hover:bg-[#f1ead8] transition"
+                        data-testid={`pos-treatment-${t.id}`}
+                      >
+                        <div className="font-medium text-[#1f2a22] text-sm">{t.name}</div>
+                        <div className="text-xs text-[#6a6a6a]">{t.duration_min} min · {t.category || "general"}</div>
+                        <div className="text-[#2f4a3a] font-display text-lg mt-1">${t.price.toFixed(2)}</div>
+                      </button>
+                    ))}
+                  </div>
+                );
+              })()}
             </TabsContent>
 
             <TabsContent value="inventory" className="mt-4">
-              {inventory.length === 0 ? (
-                <p className="text-sm text-[#6a6a6a]">No inventory items.</p>
-              ) : (
-                <div className="grid sm:grid-cols-2 gap-3">
-                  {inventory.map((i) => (
-                    <button
-                      key={i.id}
-                      onClick={() => addInventory(i)}
-                      disabled={(i.stock || 0) <= 0}
-                      className="text-left rounded-xl border border-[#e0d6bc] bg-[#f6f1e6] p-3 hover:bg-[#f1ead8] transition disabled:opacity-50"
-                      data-testid={`pos-inventory-${i.id}`}
-                    >
-                      <div className="font-medium text-[#1f2a22] text-sm">{i.name}</div>
-                      <div className="text-xs text-[#6a6a6a]">
-                        Stock: <span className={(i.stock || 0) <= (i.low_stock_threshold || 5) ? "text-[#7a2a2a]" : ""}>{i.stock || 0}</span>
-                      </div>
-                      <div className="text-[#2f4a3a] font-display text-lg mt-1">${(i.unit_price || 0).toFixed(2)}</div>
-                    </button>
-                  ))}
-                </div>
-              )}
+              <div className="mb-3 relative">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8a6a3c]" />
+                <Input
+                  value={inventoryQ}
+                  onChange={(e) => setInventoryQ(e.target.value)}
+                  placeholder="Search inventory…"
+                  className="pl-9 bg-[#f6f1e6] border-[#e0d6bc] h-9"
+                  data-testid="pos-inventory-search"
+                />
+              </div>
+              {(() => {
+                const s = inventoryQ.trim().toLowerCase();
+                const filteredInv = s
+                  ? inventory.filter((i) =>
+                      (i.name || "").toLowerCase().includes(s) ||
+                      (i.sku || "").toLowerCase().includes(s) ||
+                      (i.category || "").toLowerCase().includes(s)
+                    )
+                  : inventory;
+                if (filteredInv.length === 0) {
+                  return <p className="text-sm text-[#6a6a6a]">{inventory.length === 0 ? "No inventory items." : `No inventory items match "${inventoryQ}".`}</p>;
+                }
+                return (
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    {filteredInv.map((i) => (
+                      <button
+                        key={i.id}
+                        onClick={() => addInventory(i)}
+                        disabled={(i.stock || 0) <= 0}
+                        className="text-left rounded-xl border border-[#e0d6bc] bg-[#f6f1e6] p-3 hover:bg-[#f1ead8] transition disabled:opacity-50"
+                        data-testid={`pos-inventory-${i.id}`}
+                      >
+                        <div className="font-medium text-[#1f2a22] text-sm">{i.name}</div>
+                        <div className="text-xs text-[#6a6a6a]">
+                          Stock: <span className={(i.stock || 0) <= (i.low_stock_threshold || 5) ? "text-[#7a2a2a]" : ""}>{i.stock || 0}</span>
+                        </div>
+                        <div className="text-[#2f4a3a] font-display text-lg mt-1">${(i.unit_price || 0).toFixed(2)}</div>
+                      </button>
+                    ))}
+                  </div>
+                );
+              })()}
             </TabsContent>
 
             <TabsContent value="custom" className="mt-4">

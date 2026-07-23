@@ -1,6 +1,6 @@
 import React from "react";
 import PortalLayout, { PortalHeader } from "../PortalLayout";
-import api from "../../lib/api";
+import api, { API_BASE, LS } from "../../lib/api";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
@@ -11,7 +11,10 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "../../components/ui/dialog";
-import { FlaskConical, ClipboardPlus, ShieldOff, AlertTriangle, CheckCircle2 } from "lucide-react";
+import {
+  FlaskConical, ClipboardPlus, ShieldOff, AlertTriangle, CheckCircle2, Paperclip,
+  FileText, X, Search,
+} from "lucide-react";
 import { useToast } from "../../hooks/use-toast";
 import { getErrorMessage } from "../../lib/errors";
 
@@ -32,6 +35,7 @@ export default function LabReviewQueue() {
   const { toast } = useToast();
   const [rows, setRows] = React.useState([]);
   const [filter, setFilter] = React.useState("");
+  const [q, setQ] = React.useState("");
   const [selected, setSelected] = React.useState(null);
   const [creatingTask, setCreatingTask] = React.useState(null);
 
@@ -45,6 +49,17 @@ export default function LabReviewQueue() {
   }, [filter, toast]);
 
   React.useEffect(() => { load(); }, [load]);
+
+  const filtered = React.useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return rows;
+    return rows.filter((lab) =>
+      (lab.test_name || "").toLowerCase().includes(s) ||
+      (lab.client_name || "").toLowerCase().includes(s) ||
+      (lab.ordering_provider_name || "").toLowerCase().includes(s) ||
+      (lab.recorded_by_name || "").toLowerCase().includes(s)
+    );
+  }, [rows, q]);
 
   const transition = async (lab, next, notes) => {
     try {
@@ -70,7 +85,7 @@ export default function LabReviewQueue() {
     <PortalLayout>
       <PortalHeader
         title="Lab review queue"
-        subtitle={`${rows.length} items`}
+        subtitle={`${filtered.length} of ${rows.length} items`}
         actions={
           <Select value={filter || "open"} onValueChange={(v) => setFilter(v === "open" ? "" : v)}>
             <SelectTrigger className="w-[220px] h-10 border-[#d9e2db]" data-testid="lab-queue-filter">
@@ -84,11 +99,22 @@ export default function LabReviewQueue() {
         }
       />
 
+      <div className="mb-4 relative max-w-md">
+        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8a6a3c]" />
+        <Input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search by test, patient, or provider…"
+          className="pl-9 bg-white border-[#d9e2db]"
+          data-testid="lab-queue-search"
+        />
+      </div>
+
       <div className="rounded-2xl border border-[#e2ebe4] bg-white overflow-hidden" data-testid="lab-queue-table">
-        {rows.length === 0 ? (
+        {filtered.length === 0 ? (
           <div className="p-10 text-center text-slate-500">
             <FlaskConical size={26} className="mx-auto mb-3 text-slate-300" />
-            No labs pending review.
+            {q ? `No labs match "${q}".` : "No labs pending review."}
           </div>
         ) : (
           <table className="w-full">
@@ -104,7 +130,7 @@ export default function LabReviewQueue() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((lab) => {
+              {filtered.map((lab) => {
                 const abnormal = outOfRange(lab);
                 const status = lab.review_status || "new";
                 const badge = REVIEW_STATUSES.find((s) => s.value === status);
@@ -124,6 +150,11 @@ export default function LabReviewQueue() {
                       <span className={`px-2 py-1 rounded-full text-[11px] ${badge?.color || "bg-slate-100"}`}>
                         {badge?.label || status}
                       </span>
+                      {lab.attachment_file_ids?.length > 0 && (
+                        <span className="ml-1 inline-flex items-center gap-0.5 text-[10px] text-[#8a6a3c]" title={`${lab.attachment_file_ids.length} attachment(s)`}>
+                          <Paperclip size={10} /> {lab.attachment_file_ids.length}
+                        </span>
+                      )}
                     </td>
                     <td className="p-3 text-right space-x-2">
                       <Button
@@ -163,14 +194,73 @@ export default function LabReviewQueue() {
 }
 
 function ReviewDialog({ lab, onClose, onTransition }) {
+  const { toast } = useToast();
   const [notes, setNotes] = React.useState("");
   const [next, setNext] = React.useState("reviewed");
+  const [attachments, setAttachments] = React.useState([]);
+  const [uploading, setUploading] = React.useState(false);
+  const fileRef = React.useRef(null);
+
+  const loadAttachments = React.useCallback(async () => {
+    if (!lab?.attachment_file_ids?.length) { setAttachments([]); return; }
+    try {
+      const r = await api.get("/files", { params: { client_id: lab.client_id } });
+      const byId = Object.fromEntries((r.data || []).map((f) => [f.id, f]));
+      setAttachments(lab.attachment_file_ids.map((id) => byId[id]).filter(Boolean));
+    } catch { setAttachments([]); }
+  }, [lab]);
+
   React.useEffect(() => {
     if (lab) {
       setNotes(lab.review_notes || "");
       setNext(lab.review_status === "new" ? "reviewed" : "patient_notified");
+      loadAttachments();
     }
-  }, [lab]);
+  }, [lab, loadAttachments]);
+
+  const onFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file || !lab) return;
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("category", "lab");
+      fd.append("client_id", lab.client_id);
+      const up = await api.post("/files/upload", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      await api.post(`/labs/${lab.id}/attachments`, { file_id: up.data.id });
+      toast({ title: "Attached", description: file.name });
+      e.target.value = "";
+      // Reflect immediately without reloading the queue
+      lab.attachment_file_ids = [...(lab.attachment_file_ids || []), up.data.id];
+      loadAttachments();
+    } catch (err) {
+      toast({ title: "Attach failed",
+              description: err?.response?.data?.detail?.message ||
+                           err?.response?.data?.detail || err.message });
+    } finally { setUploading(false); }
+  };
+
+  const download = async (f) => {
+    try {
+      const token = localStorage.getItem(LS.access);
+      const r = await fetch(`${API_BASE}/files/${f.id}/download`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = f.filename; a.click();
+      URL.revokeObjectURL(url);
+    } catch { toast({ title: "Download failed" }); }
+  };
+
+  const detach = async (f) => {
+    try {
+      await api.delete(`/labs/${lab.id}/attachments/${f.id}`);
+      lab.attachment_file_ids = (lab.attachment_file_ids || []).filter((x) => x !== f.id);
+      loadAttachments();
+    } catch { toast({ title: "Remove failed" }); }
+  };
+
   if (!lab) return null;
   return (
     <Dialog open={!!lab} onOpenChange={onClose}>
@@ -197,6 +287,51 @@ function ReviewDialog({ lab, onClose, onTransition }) {
             <Label>Notes</Label>
             <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} data-testid="lab-review-notes" />
           </div>
+
+          {/* Attachments */}
+          <div className="rounded-lg border border-[#e2ebe4] bg-[#f7fbf8] p-3">
+            <div className="flex items-center justify-between mb-2">
+              <div className="eyebrow text-[#3d6b52] flex items-center gap-1"><Paperclip size={12} /> Attachments</div>
+              <div>
+                <input ref={fileRef} type="file" accept="application/pdf,image/*" onChange={onFile} className="hidden" data-testid="lab-upload-file-input" />
+                <Button
+                  size="sm" variant="outline"
+                  className="h-8 rounded-full border-[#cfe0d3] text-[#2f6a4a]"
+                  onClick={() => fileRef.current?.click()}
+                  disabled={uploading}
+                  data-testid="lab-upload-btn"
+                >
+                  {uploading ? "Uploading…" : (<><Paperclip size={13} className="mr-1" /> Attach PDF / image</>)}
+                </Button>
+              </div>
+            </div>
+            {attachments.length === 0 ? (
+              <div className="text-xs text-slate-500">No attachments yet.</div>
+            ) : (
+              <ul className="text-xs space-y-1" data-testid="lab-attachments-list">
+                {attachments.map((f) => (
+                  <li key={f.id} className="flex items-center justify-between gap-2 border-t border-[#e2ebe4] pt-1 first:border-t-0 first:pt-0">
+                    <button
+                      onClick={() => download(f)}
+                      className="flex items-center gap-2 text-[#2f6a4a] hover:underline truncate flex-1 min-w-0"
+                      data-testid={`lab-attachment-${f.id}`}
+                    >
+                      <FileText size={12} className="flex-shrink-0" />
+                      <span className="truncate">{f.filename}</span>
+                      <span className="text-slate-400 text-[10px]">{Math.round((f.size || 0) / 1024)} KB</span>
+                    </button>
+                    <button
+                      onClick={() => detach(f)}
+                      className="text-[#7a2a2a] hover:text-[#5e1f1f]"
+                      title="Detach"
+                      data-testid={`lab-detach-${f.id}`}
+                    ><X size={12} /></button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
           {lab.review_history?.length > 0 && (
             <div className="max-h-32 overflow-y-auto text-xs space-y-1 border-t border-[#e2ebe4] pt-2">
               {lab.review_history.map((h, i) => (

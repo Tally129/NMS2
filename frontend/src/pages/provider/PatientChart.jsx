@@ -13,6 +13,7 @@ import TreatmentPlanBuilder from "../../components/TreatmentPlanBuilder";
 import LabsPanel from "../../components/LabsPanel";
 import SymptomTrends from "../../components/SymptomTrends";
 import { AuthorizationBadge, useDelegatedEdit } from "../../components/AuthorizationBadge";
+import PortalAccessPanel from "../../components/PortalAccessPanel";
 import { useAuth } from "../../lib/auth";
 import { getErrorMessage } from "../../lib/errors";
 
@@ -117,6 +118,12 @@ export default function PatientChart() {
         title={client.full_name || "Patient"}
         subtitle={`${client.email || ""} · ${client.phone || ""}`}
       />
+
+      {(role === "admin" || role === "practitioner" || role === "staff") && (
+        <div className="mb-6">
+          <PortalAccessPanel clientId={id} clientEmail={client.email} />
+        </div>
+      )}
 
       <Tabs defaultValue="summary" className="w-full">
         <TabsList className="bg-[#f1ead8] p-1 rounded-full flex-wrap h-auto">

@@ -81,6 +81,7 @@ from routers import tasks as _tasks_routes  # noqa: F401
 from routers import lab_review as _lab_review_routes  # noqa: F401
 from routers import campaigns as _campaigns_routes  # noqa: F401
 from routers import accounting as _accounting_routes  # noqa: F401
+from routers import portal_ops as _portal_ops_routes  # noqa: F401
 
 # Startup config safety validation (fail-fast in HIPAA_MODE)
 from security_config import enforce_production_config

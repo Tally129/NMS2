@@ -23,7 +23,6 @@ from delegations import has_active_delegation
 from deps import _strip_id, api, db, require_roles
 from models import new_id
 
-
 REVIEW_STATUSES = (
     "new", "waiting_for_review", "reviewed",
     "patient_notified", "follow_up_needed",
@@ -158,7 +157,65 @@ async def patch_review_status(lab_id: str, payload: ReviewPatch, request: Reques
     return _strip_id(updated)
 
 
-@api.post("/labs/{lab_id}/create-task")
+class LabAttachIn(BaseModel):
+    file_id: str
+
+
+@api.post("/labs/{lab_id}/attachments")
+async def attach_file_to_lab(lab_id: str, payload: LabAttachIn, request: Request,
+                              user=Depends(require_roles("practitioner", "admin", "medical_assistant", "staff"))):
+    """Link an already-uploaded file to a lab result. File must already exist
+    in the file vault (upload via `/api/files/upload` first with `category=lab`
+    and the same `client_id` as the lab)."""
+    lab = await db.lab_values.find_one({"id": lab_id})
+    if not lab:
+        raise HTTPException(status_code=404, detail="Lab not found")
+    meta = await db.files.find_one({"id": payload.file_id, "deleted_at": None})
+    if not meta:
+        raise HTTPException(status_code=404, detail="File not found")
+    if meta.get("client_id") and lab.get("client_id") and meta["client_id"] != lab["client_id"]:
+        raise HTTPException(status_code=400, detail="File belongs to a different client")
+    # Delegated access enforcement mirrors _can_transition.
+    if user.get("role") in ("admin", "medical_assistant"):
+        d = await has_active_delegation(user, lab.get("client_id"))
+        if d is None:
+            raise HTTPException(status_code=403, detail={
+                "code": "delegation_required",
+                "message": "Provider authorization required to attach files to this lab.",
+            })
+    await db.lab_values.update_one(
+        {"id": lab_id},
+        {"$addToSet": {"attachment_file_ids": payload.file_id}},
+    )
+    await log_audit(db, user["id"], user["email"], "lab.attach_file",
+                    resource_type="lab", resource_id=lab_id,
+                    metadata={"file_id": payload.file_id, "client_id": lab.get("client_id")},
+                    ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+    updated = await db.lab_values.find_one({"id": lab_id})
+    return _strip_id(updated)
+
+
+@api.delete("/labs/{lab_id}/attachments/{file_id}")
+async def detach_file_from_lab(lab_id: str, file_id: str, request: Request,
+                                user=Depends(require_roles("practitioner", "admin", "medical_assistant", "staff"))):
+    lab = await db.lab_values.find_one({"id": lab_id})
+    if not lab:
+        raise HTTPException(status_code=404, detail="Lab not found")
+    if user.get("role") in ("admin", "medical_assistant"):
+        d = await has_active_delegation(user, lab.get("client_id"))
+        if d is None:
+            raise HTTPException(status_code=403, detail="Provider authorization required")
+    await db.lab_values.update_one(
+        {"id": lab_id}, {"$pull": {"attachment_file_ids": file_id}},
+    )
+    await log_audit(db, user["id"], user["email"], "lab.detach_file",
+                    resource_type="lab", resource_id=lab_id,
+                    metadata={"file_id": file_id}, ip=get_client_ip(request),
+                    user_agent=request.headers.get("user-agent"))
+    return {"ok": True}
+
+
+
 async def create_task_from_lab(lab_id: str, payload: LabTaskShortcut, request: Request,
                                user=Depends(require_roles("practitioner", "admin", "medical_assistant"))):
     lab = await db.lab_values.find_one({"id": lab_id})

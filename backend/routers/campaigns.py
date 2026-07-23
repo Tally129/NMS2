@@ -237,16 +237,16 @@ async def _run_campaign(campaign: dict, *, worker_id: Optional[str] = None) -> d
             if campaign["channel"] == "email":
                 status = await send_email(
                     db, c["email"],
-                    campaign.get("subject") or campaign["title"],
+                    _fill_variables(campaign.get("subject") or campaign["title"], _build_context(c)),
                     _render_html(campaign["message"], c),
-                    plain_text=campaign["message"],
+                    plain_text=_render_plain(campaign["message"], c),
                     action="campaign.email",
                     payload_metadata={"campaign_id": campaign["id"]},
                 )
             else:
                 status = await send_sms(
                     db, c.get("phone", ""),
-                    campaign["message"],
+                    _render_plain(campaign["message"], c),
                     action="campaign.sms",
                     payload_metadata={"campaign_id": campaign["id"]},
                 )
@@ -327,15 +327,84 @@ async def _try_claim(campaign_id: str, worker_id: str,
     return result
 
 
+_VAR_RE = re.compile(r"\{\{\s*([\w.]+)\s*\}\}")
+
+
+def _build_context(client: dict) -> dict:
+    """Build the merge-field context for a single recipient."""
+    full = (client.get("full_name") or "").strip()
+    parts = full.split(" ", 1)
+    first = parts[0] if parts else ""
+    last = parts[1] if len(parts) > 1 else ""
+    return {
+        "patient": {
+            "first_name": first or "there",
+            "last_name": last,
+            "full_name": full or "there",
+            "email": client.get("email") or "",
+            "phone": client.get("phone") or "",
+        },
+        "clinic": {
+            "name": os.environ.get("PRACTICE_NAME", "Natural Medical Solutions"),
+            "phone": os.environ.get("PRACTICE_PHONE", "(770) 674-6311"),
+            "email": os.environ.get("PRACTICE_EMAIL", "info@natmedsol.com"),
+        },
+        # Appointment / provider / membership vars fall back to empty strings —
+        # campaign senders shouldn't depend on live joins to keep the send loop cheap.
+        "appointment": {},
+        "provider": {},
+        "membership": {},
+        "package": {},
+    }
+
+
+def _fill_variables(text: str, ctx: dict) -> str:
+    def _sub(match):
+        key = match.group(1)
+        cur = ctx
+        for part in key.split("."):
+            if not isinstance(cur, dict):
+                return match.group(0)
+            cur = cur.get(part)
+            if cur is None:
+                return ""  # missing var → empty (safer than leaving braces in email)
+        return str(cur)
+    return _VAR_RE.sub(_sub, text or "")
+
+
 def _render_html(message: str, client: dict) -> str:
-    safe = (message
+    """Render a campaign message with merge-field substitution.
+    If `message` already looks like HTML (starts with a tag), we trust it
+    (it came from the TipTap rich-text editor) and only substitute variables.
+    Otherwise we escape and wrap it as before."""
+    ctx = _build_context(client)
+    filled = _fill_variables(message or "", ctx)
+    stripped = filled.lstrip()
+    footer = ("<p style='color:#999;font-size:12px'>You are receiving this because "
+              "you opted in to marketing from Natural Medical Solutions. "
+              "Reply STOP to opt out.</p>")
+    if stripped.startswith("<"):
+        return filled + footer
+    safe = (filled
             .replace("&", "&amp;")
             .replace("<", "&lt;")
             .replace(">", "&gt;")
             .replace("\n", "<br/>"))
-    name = (client.get("full_name") or "").split(" ")[0] or "there"
-    return f"<p>Hi {name},</p><p>{safe}</p><p style='color:#999;font-size:12px'>You are receiving this because you opted in to marketing from Natural Medical Solutions. Reply STOP to opt out.</p>"
+    name = ctx["patient"]["first_name"]
+    return f"<p>Hi {name},</p><p>{safe}</p>{footer}"
 
+
+def _render_plain(message: str, client: dict) -> str:
+    """Plain-text render for SMS. Strips HTML tags and substitutes variables."""
+    ctx = _build_context(client)
+    filled = _fill_variables(message or "", ctx)
+    if "<" in filled:
+        # Cheap HTML → text: drop tags, collapse whitespace.
+        text = re.sub(r"<br\s*/?>", "\n", filled, flags=re.I)
+        text = re.sub(r"</p>", "\n\n", text, flags=re.I)
+        text = re.sub(r"<[^>]+>", "", text)
+        return re.sub(r"[ \t]+", " ", text).strip()
+    return filled
 
 @api.post("/campaigns")
 async def create_campaign(payload: CampaignIn, request: Request,

@@ -38,7 +38,9 @@ import {
   UserCircle,
   BarChart3,
   Home,
+  Search,
 } from "lucide-react";
+import GlobalSearchPalette from "../components/GlobalSearchPalette";
 
 // =============== NAV CONFIG (grouped) ===============
 const NAV = {
@@ -215,7 +217,20 @@ export default function PortalLayout({ children }) {
   const [open, setOpen] = React.useState(false);
   const [unread, setUnread] = React.useState(0);
   const [overdueTasks, setOverdueTasks] = React.useState(0);
+  const [paletteOpen, setPaletteOpen] = React.useState(false);
   const groups = NAV[user?.role] || [];
+
+  // Ctrl/Cmd+K opens the global search palette anywhere in the portal.
+  React.useEffect(() => {
+    const handler = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   React.useEffect(() => {
     if (!user) return;
@@ -279,6 +294,19 @@ export default function PortalLayout({ children }) {
               <X size={20} />
             </button>
           </div>
+          {/* Global search trigger — Ctrl/Cmd + K */}
+          <button
+            type="button"
+            onClick={() => setPaletteOpen(true)}
+            className="mx-3 mt-3 mb-1 flex items-center gap-2 px-3 py-2 rounded-lg border border-[#e7dfc9] bg-[#f6f1e6] hover:bg-[#f1ead8] text-left text-sm text-[#6a6a6a] transition"
+            data-testid="sidebar-global-search-btn"
+          >
+            <Search size={14} className="text-[#8a6a3c]" />
+            <span className="flex-1 truncate">Search anything…</span>
+            <kbd className="hidden md:inline-flex items-center px-1.5 py-0.5 text-[10px] rounded border border-[#d9c9a3] text-[#8a6a3c] bg-[#fbf7ee]">
+              ⌘K
+            </kbd>
+          </button>
           <nav className="flex-1 p-3 space-y-4 overflow-y-auto" data-testid="portal-nav">
             {groups.map((grp) => (
               <div key={grp.group} data-testid={`nav-group-${grp.group.toLowerCase().replace(/\s+/g, "-")}`}>
@@ -370,6 +398,7 @@ export default function PortalLayout({ children }) {
           <BottomLink to="/portal/patient/account" icon={UserCircle} label="Me" />
         </nav>
       )}
+      <GlobalSearchPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
     </div>
   );
 }

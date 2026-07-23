@@ -5,7 +5,7 @@ import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
 import { useToast } from "../../hooks/use-toast";
-import { Download, Wallet, TrendingUp, FileText, FileBarChart } from "lucide-react";
+import { Download, Wallet, TrendingUp, FileText, FileBarChart, Printer, Mail } from "lucide-react";
 
 const METHOD_LABELS = {
   chase_pos: "Chase POS", cash: "Cash", check: "Check", card_other: "Card", stripe: "Stripe",
@@ -41,11 +41,46 @@ export default function Transactions() {
       const blob = await r.blob();
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = `receipt-${id.slice(0, 8)}.pdf`;
+      a.download = `invoice-${id.slice(0, 8)}.pdf`;
       a.click();
       URL.revokeObjectURL(a.href);
     } catch (e) {
       toast({ title: "Failed to download", description: e.message });
+    }
+  };
+
+  const printReceipt = async (id) => {
+    try {
+      const token = localStorage.getItem(LS.access);
+      const r = await fetch(`${API_BASE}/transactions/${id}/receipt`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const w = window.open(url);
+      if (w) {
+        w.addEventListener("load", () => { try { w.print(); } catch {} });
+      } else {
+        toast({ title: "Popup blocked", description: "Allow popups to print." });
+      }
+    } catch (e) {
+      toast({ title: "Failed to print", description: e.message });
+    }
+  };
+
+  const emailReceipt = async (t) => {
+    const recipient = window.prompt(
+      "Send invoice to which email?",
+      t.client_email || "",
+    );
+    if (recipient === null) return;
+    try {
+      const r = await api.post(`/transactions/${t.id}/email`, {
+        to: recipient || undefined,
+      });
+      toast({ title: `Invoice ${r.data.delivery === "sent" ? "sent" : r.data.delivery === "sent_stub" ? "queued (simulated)" : "attempted"}`,
+              description: `${r.data.invoice_number} → ${r.data.recipient}` });
+    } catch (e) {
+      toast({ title: "Email failed", description: e?.response?.data?.detail?.message || e.message });
     }
   };
 
@@ -110,7 +145,7 @@ export default function Transactions() {
               <th className="text-left py-3 px-4">Method</th>
               <th className="text-left py-3 px-4">Status</th>
               <th className="text-right py-3 px-4">Total</th>
-              <th className="text-right py-3 px-4">Receipt</th>
+              <th className="text-right py-3 px-4">Invoice</th>
             </tr>
           </thead>
           <tbody>
@@ -131,9 +166,15 @@ export default function Transactions() {
                     : <span className="text-[#8a6a3c]">{t.status}</span>}
                 </td>
                 <td className="py-3 px-4 text-right font-display text-[#2f4a3a]">${(t.total || 0).toFixed(2)}</td>
-                <td className="py-3 px-4 text-right">
-                  <Button size="sm" variant="outline" className="h-7 rounded-full text-xs border-[#2f4a3a] text-[#2f4a3a]" onClick={() => downloadReceipt(t.id)} data-testid={`txn-receipt-${t.id}`}>
+                <td className="py-3 px-4 text-right space-x-1">
+                  <Button size="sm" variant="outline" className="h-7 rounded-full text-xs border-[#2f4a3a] text-[#2f4a3a]" onClick={() => downloadReceipt(t.id)} data-testid={`txn-download-${t.id}`}>
                     <Download size={12} className="mr-1" /> PDF
+                  </Button>
+                  <Button size="sm" variant="outline" className="h-7 rounded-full text-xs border-[#8a6a3c] text-[#8a6a3c]" onClick={() => printReceipt(t.id)} data-testid={`txn-print-${t.id}`}>
+                    <Printer size={12} />
+                  </Button>
+                  <Button size="sm" variant="outline" className="h-7 rounded-full text-xs border-[#c19a4b] text-[#8a6a3c]" onClick={() => emailReceipt(t)} data-testid={`txn-email-${t.id}`}>
+                    <Mail size={12} />
                   </Button>
                 </td>
               </tr>

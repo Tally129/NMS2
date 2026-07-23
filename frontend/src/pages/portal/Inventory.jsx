@@ -6,7 +6,7 @@ import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../../components/ui/dialog";
 import { useToast } from "../../hooks/use-toast";
-import { Plus, Pencil, AlertTriangle, Boxes, Sliders, Calendar as CalendarIcon } from "lucide-react";
+import { Plus, Pencil, AlertTriangle, Boxes, Sliders, Calendar as CalendarIcon, Search } from "lucide-react";
 import { getErrorMessage } from "../../lib/errors";
 
 const empty = { name: "", sku: "", category: "", stock: 0, unit_price: 0, low_stock_threshold: 5, active: true };
@@ -23,12 +23,23 @@ export default function Inventory() {
   const [lotFor, setLotFor] = React.useState(null);
   const [lotForm, setLotForm] = React.useState(emptyLot);
   const [expiring, setExpiring] = React.useState([]);
+  const [q, setQ] = React.useState("");
 
   const load = () => {
     api.get("/inventory").then((r) => setItems(r.data || [])).finally(() => setLoading(false));
     api.get("/inventory/expiring?days=60").then((r) => setExpiring(r.data || [])).catch(() => {});
   };
   React.useEffect(() => { load(); }, []);
+
+  const filtered = React.useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return items;
+    return items.filter((i) =>
+      (i.name || "").toLowerCase().includes(s) ||
+      (i.sku || "").toLowerCase().includes(s) ||
+      (i.category || "").toLowerCase().includes(s)
+    );
+  }, [items, q]);
 
   const lowStock = items.filter((i) => (i.stock || 0) <= (i.low_stock_threshold || 5));
 
@@ -128,6 +139,17 @@ export default function Inventory() {
         </div>
       )}
 
+      <div className="mb-4 relative max-w-md">
+        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8a6a3c]" />
+        <Input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search by name, SKU, or category…"
+          className="pl-9 bg-[#fbf7ee] border-[#e0d6bc]"
+          data-testid="inventory-search-input"
+        />
+      </div>
+
       <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] overflow-hidden" data-testid="inventory-table">
         <table className="w-full text-sm">
           <thead className="bg-[#f1ead8] text-[#8a6a3c] uppercase text-[11px] tracking-widest">
@@ -143,8 +165,8 @@ export default function Inventory() {
           </thead>
           <tbody>
             {loading && <tr><td colSpan={7} className="py-8 text-center text-[#6a6a6a]">Loading…</td></tr>}
-            {!loading && items.length === 0 && <tr><td colSpan={7} className="py-10 text-center text-[#6a6a6a]">No inventory items yet.</td></tr>}
-            {items.map((i) => {
+            {!loading && filtered.length === 0 && <tr><td colSpan={7} className="py-10 text-center text-[#6a6a6a]">{q ? `No inventory items match "${q}".` : 'No inventory items yet.'}</td></tr>}
+            {filtered.map((i) => {
               const low = (i.stock || 0) <= (i.low_stock_threshold || 5);
               return (
                 <tr key={i.id} className="border-t border-[#e7dfc9]" data-testid={`inv-row-${i.id}`}>
