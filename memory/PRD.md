@@ -557,3 +557,86 @@ truth for TB / BS / duplicates / integrity.
 - Loan management, investments, treasury management
 
 _Last updated: Feb 24, 2026 (Sprints 1.5 & 2)_
+
+---
+
+## Sprint 6 — Frontend Usability & Workflow Completion (Jul 23, 2026)
+
+Goal: polish existing modules without rebuilding. Reuse existing search
+components, PDF engine (ReportLab), file-vault uploader, password-reset token
+plumbing, and campaign engine.
+
+### What was built
+- **Global search palette (Ctrl/Cmd + K)** — `GlobalSearchPalette.jsx` + backend
+  `GET /api/search/global?q=…`. Fans out into patients / treatments / inventory
+  / users / appointments / vendors, RBAC-aware (clients see only their own
+  appointments; providers/staff hide client-role users). Bucket-per-collection
+  envelope, empty buckets pruned. Visible sidebar trigger added to `PortalLayout`.
+- **Per-page search inputs** on Treatments, Inventory, Users (admin), POS
+  Treatments + Inventory tabs, Lab Review Queue. Users page also gains a role
+  filter.
+- **Server-side invoice PDF** — rewrote `_render_invoice_pdf` in `routers/ops.py`
+  with practice logo/name band, from/to columns, itemized lines, discount/tax/tip
+  breakdown, payment status, ref number, footer disclaimer. Invoice numbers are
+  `INV-YYYYMMDD-XXXXXX`. `Transactions.jsx` gains per-row PDF / Print / Email
+  buttons (`data-testid txn-download-*`, `txn-print-*`, `txn-email-*`).
+- **Email invoice** — new `POST /api/transactions/{tid}/email` uses SendGrid
+  (with `sent_stub` fallback in dev) to attach the PDF and mail it, redacting
+  recipient in audit metadata.
+- **Lab attachments** — new `POST /api/labs/{id}/attachments` +
+  `DELETE /api/labs/{id}/attachments/{file_id}` link files already uploaded via
+  the existing `/api/files/upload` vault (no new storage system). Provider role
+  can attach; admin/medical_assistant must have an active delegation. The
+  Lab Review dialog gains an “Attach PDF / image” button and downloadable list;
+  the queue row shows a paperclip badge with attachment count.
+- **TipTap rich-text editor for Campaign Center** — `RichTextEditor.jsx`
+  (StarterKit + Underline + Link + Image + Placeholder + Table extensions +
+  Variables popover). Merge fields supported: `patient.first_name`, `.last_name`,
+  `.full_name`, `.email`, `.phone`; `appointment.date`, `.time`, `.provider`;
+  `provider.name`; `membership.name`, `package.name`; `clinic.name`, `.phone`,
+  `.email`. Preview toggle renders the editor output with sample context so
+  authors visualize substitution. Backend `_render_html` / `_render_plain` /
+  `_fill_variables` render the same HTML for email and clean plaintext for SMS.
+- **Portal invitation / account management** — new `routers/portal_ops.py`:
+  * `GET /api/clients/{id}/portal-status`
+  * `POST /api/clients/{id}/portal-invite` — idempotently creates or reuses a
+    client-role user linked to the client, issues a 24-hour password-setup token
+    (via existing `password_reset_tokens`), and mails it. `invite_url` is
+    returned in-band when `HIPAA_MODE=false` so admins can copy the setup link
+    directly; redacted when HIPAA_MODE is on.
+  * `POST /api/clients/{id}/portal-reset-password` — 60-min reset link.
+  * `POST /api/clients/{id}/portal-disable` / `.../portal-enable` — flips
+    `is_active` and revokes all sessions on disable.
+  * Frontend `PortalAccessPanel.jsx` mounted at the top of the provider
+    patient chart with Send / Resend / Reset / Copy portal login URL / Disable /
+    Re-enable buttons and Active / Disabled / Not-invited / **TEST PATIENT** badges.
+    Never displays a password.
+- **Portal test patient seeder** — `POST /api/dev/portal-test-patient`
+  (admin-only, refused when `HIPAA_MODE=true`) idempotently creates
+  `Portal Test Patient — NON-PRODUCTION DATA` (`portal.test@natmedsol.local`,
+  mrn `NMS-TEST01`, tags `[portal_test_patient]`, consent_marketing: false).
+  Returns `portal_login_url` + one-time `portal_password_setup_url`.
+  Delete via `DELETE /api/dev/portal-test-patient/{client_id}`.
+- **Bookkeeping** — `models.py` `ClientIn`/`ClientOut` now expose optional
+  `tags: List[str]` so the portal_test_patient flag round-trips.
+  Service worker `VERSION` bumped to `nms-v3-2026-07-23-sprint-usability`.
+  `FRONTEND_ORIGIN` env set so invitation URLs are absolute.
+
+### Testing
+- Backend regression suite `test_iter24_sprint_usability.py` — **17/17 pass**
+  (global search RBAC + envelope, portal seeder idempotency, portal status /
+  invite / reset / disable / enable, invoice PDF %PDF magic + INV-* filename,
+  invoice email stub, lab attach / detach + delegation enforcement, campaign
+  HTML + merge vars + SMS plaintext).
+- Sprint 1 (14) + 1.5 (11) + 2 (12) regression untouched — 54/54 with iter24.
+- Frontend UI verified by testing agent (~95% pass; only two Radix a11y
+  console warnings, since resolved by adding VisuallyHidden DialogTitle /
+  Description to the shadcn `CommandDialog`).
+
+### Explicitly NOT built (out-of-scope per user brief)
+- Admin “preview as patient” impersonation (user explicitly declined — real
+  patient login flow used instead).
+- No new invoice model / no new storage system / no new campaign engine.
+- No repository-wide refactor.
+
+_Last updated: Jul 23, 2026 (Sprint 6 · Frontend Usability & Workflow Completion)_

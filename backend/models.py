@@ -111,6 +111,7 @@ class ClientIn(BaseModel):
     consent_photo: Optional[bool] = None
     consent_marketing: Optional[bool] = None
     notes: Optional[str] = None
+    tags: Optional[List[str]] = None  # e.g. ["portal_test_patient"] for QA fixtures
     
     @field_validator('email')
     @classmethod
