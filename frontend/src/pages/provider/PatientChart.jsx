@@ -1,7 +1,7 @@
 import React from "react";
 import { useParams, Link } from "react-router-dom";
 import PortalLayout, { PortalHeader } from "../PortalLayout";
-import api, { API_BASE, LS } from "../../lib/api";
+import api, { downloadBlob } from "../../lib/api";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../../components/ui/tabs";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -96,12 +96,14 @@ export default function PatientChart() {
   };
 
   const downloadFile = async (f) => {
-    const token = localStorage.getItem(LS.access);
-    const res = await fetch(`${API_BASE}/files/${f.id}/download`, { headers: { Authorization: `Bearer ${token}` } });
-    if (!res.ok) return toast({ title: "Download failed" });
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = f.filename; a.click(); URL.revokeObjectURL(url);
+    try {
+      await downloadBlob(`/files/${f.id}/download`, { filename: f.filename });
+    } catch (e) {
+      toast({
+        title: "Download failed",
+        description: e?.isAuthDenied ? "You no longer have access to this file." : (e.message || "Try again."),
+      });
+    }
   };
 
   if (!client)

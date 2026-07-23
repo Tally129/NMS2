@@ -116,17 +116,59 @@ export { doRefresh };
 api.interceptors.response.use(
   (r) => {
     // Because validateStatus allows 403, we may arrive here with a 403.
-    // Convert it to the sentinel shape so callers don't try to render
-    // the raw structured detail object (which is not React-renderable).
+    // 403 has TWO meanings we must distinguish BEFORE converting to the
+    // empty-data sentinel:
+    //   1. `must_enroll_mfa`     → session is fine, workforce hasn't
+    //      finished TOTP setup. Preserve the token and redirect to the
+    //      role-appropriate Security page.
+    //   2. `mfa_reauth_required` → session lost its mfa_satisfied_at.
+    //      Preserve the token and redirect to /mfa-challenge.
+    //   3. Everything else       → real RBAC denial; return the sentinel
+    //      shape so callers can render an empty state without crashing.
     if (r && r.status === 403) {
-      // eslint-disable-next-line no-console
-      console.debug("[nms] 403 auth denial resolved as empty:", r?.config?.url);
       const detail = r?.data?.detail;
+      const code = (detail && typeof detail === "object") ? detail.code : null;
+
+      if (code === "must_enroll_mfa") {
+        try {
+          const user = JSON.parse(localStorage.getItem(LS.user) || "null");
+          const role = user?.role || "staff";
+          const dest =
+            role === "admin"             ? "/portal/admin/security"    :
+            role === "practitioner"      ? "/portal/provider/security" :
+            role === "medical_assistant" ? "/portal/provider/security" :
+            role === "auditor"           ? "/portal/admin/security"    :
+                                            "/portal/staff/security";
+          const path = window.location.pathname;
+          const alreadyThere = path === dest
+            || path.startsWith("/login")
+            || path.startsWith("/staff-login")
+            || path.endsWith("/security");
+          if (!alreadyThere) window.location.href = dest + "?enroll=required";
+        } catch { /* fall through */ }
+        broadcastAuth(code);
+      } else if (code === "mfa_reauth_required") {
+        try {
+          const path = window.location.pathname;
+          const alreadyOnAuth = path.startsWith("/login")
+            || path.startsWith("/staff-login")
+            || path.startsWith("/mfa-challenge");
+          if (!alreadyOnAuth) {
+            window.location.href = "/mfa-challenge?reason=reauth";
+          }
+        } catch { /* fall through */ }
+        broadcastAuth(code);
+      } else {
+        // eslint-disable-next-line no-console
+        console.debug("[nms] 403 auth denial resolved as empty:", r?.config?.url);
+      }
+
       const msg = typeof detail === "string" ? detail : detail?.message || "You don't have access.";
       return {
         ...r,
         data: null,
         __isAuthDenied: true,
+        __authCode: code || null,
         __errorMessage: msg,
       };
     }
@@ -152,85 +194,6 @@ api.interceptors.response.use(
           window.location.href = "/login";
         }
       }
-    }
-    // 403 is an EXPECTED authorization denial for background widget calls
-    // that mount for every user. We RESOLVE (not reject) with a sentinel
-    // response so:
-    //   • CRA's react-error-overlay never sees an uncaught promise rejection;
-    //   • callers using `await api.get(...)` still receive a response object;
-    //   • checks like `if (data) render()` naturally show an empty state;
-    //   • callers who explicitly need to detect 403 can inspect
-    //     `res.status === 403` or `res.__isAuthDenied`.
-    // Backend RBAC is untouched — the network 403 still happens; we just stop
-    // it from being a client-side crash source.
-    if (status === 403) {
-      // Distinguish REAL RBAC denials from session-recoverable states.
-      // `must_enroll_mfa`  — user IS authenticated (workforce hasn't set up
-      //   TOTP yet). We MUST keep the access token so they can hit
-      //   /auth/mfa/setup + /auth/mfa/verify. Just redirect to their Security
-      //   page. Clearing the session here caused the redirect loop (they'd
-      //   land on /login, log back in, get the same 403, log out again).
-      // `mfa_reauth_required` — the session lost its mfa_satisfied_at (e.g.
-      //   refresh grace expired). Send them to /mfa-challenge which still
-      //   uses the current access token to POST a fresh TOTP; only if THAT
-      //   fails do we drop them to /login.
-      const detail = error?.response?.data?.detail;
-      const code = (detail && typeof detail === "object") ? detail.code : null;
-
-      if (code === "must_enroll_mfa") {
-        // Do NOT clear _access_token or LS.user — the token is needed to
-        // reach /api/auth/mfa/setup. Backend still 403s any non-auth PHI
-        // route, so PHI is safe. Only redirect if we're not already on
-        // Security or an auth page.
-        try {
-          const user = JSON.parse(localStorage.getItem(LS.user) || "null");
-          const role = user?.role || "staff";
-          const dest =
-            role === "admin"          ? "/portal/admin/security"    :
-            role === "practitioner"   ? "/portal/provider/security" :
-            role === "medical_assistant" ? "/portal/provider/security" :
-                                          "/portal/staff/security";
-          const path = window.location.pathname;
-          const alreadyThere = path === dest
-            || path.startsWith("/login")
-            || path.startsWith("/staff-login")
-            || path.endsWith("/security");
-          if (!alreadyThere) window.location.href = dest + "?enroll=required";
-        } catch { /* leave the caller to render its own empty state */ }
-        broadcastAuth(code);
-        return Promise.reject(error);
-      }
-
-      if (code === "mfa_reauth_required") {
-        // Keep the session; route to the dedicated challenge if we're not
-        // already on an auth page. The challenge view will POST /auth/mfa/verify
-        // against the current bearer and, on failure, THEN drop the session.
-        try {
-          const path = window.location.pathname;
-          const alreadyOnAuth = path.startsWith("/login")
-            || path.startsWith("/staff-login")
-            || path.startsWith("/mfa-challenge");
-          if (!alreadyOnAuth) {
-            window.location.href = "/mfa-challenge?reason=reauth";
-          }
-        } catch { /* fall through */ }
-        broadcastAuth(code);
-        return Promise.reject(error);
-      }
-      // Log once per URL at debug so a real permission bug can be diagnosed.
-      // eslint-disable-next-line no-console
-      console.debug("[nms] 403 auth denial resolved as empty:", error?.config?.url);
-      return {
-        data: null,
-        status: 403,
-        statusText: "Forbidden",
-        headers: error?.response?.headers || {},
-        config: error?.config,
-        __isAuthDenied: true,
-        __errorMessage: (typeof detail === "string"
-          ? detail
-          : detail?.message) || "You don't have access.",
-      };
     }
     return Promise.reject(error);
   }
@@ -271,3 +234,41 @@ if (typeof window !== "undefined" && !window.__nms_rejection_installed) {
 
 export { api };
 export default api;
+
+/**
+ * Download a protected file via the authenticated axios instance and either
+ * hand back the blob URL for the caller to consume (print / preview) or
+ * trigger a browser download. Uses `responseType: "blob"` so the current
+ * bearer is attached automatically via the request interceptor — the caller
+ * never needs (and MUST NOT) read localStorage for a token.
+ *
+ *  - filename supplied → downloads directly and revokes the object URL
+ *  - filename omitted  → returns { blob, url } for the caller to manage
+ */
+export async function downloadBlob(url, { filename, params, method = "get", data } = {}) {
+  const cfg = { responseType: "blob", params };
+  const res = method === "get"
+    ? await api.get(url, cfg)
+    : await api.request({ url, method, data, ...cfg });
+  if (res && (res.__isAuthDenied || res.status === 403)) {
+    const msg = res.__errorMessage || "You don't have access to that file.";
+    const err = new Error(msg);
+    err.isAuthDenied = true;
+    err.status = 403;
+    throw err;
+  }
+  const blob = res.data;
+  const objectUrl = URL.createObjectURL(blob);
+  if (filename) {
+    const a = document.createElement("a");
+    a.href = objectUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // give the browser a beat to start the download before revoking
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
+    return { blob };
+  }
+  return { blob, url: objectUrl, revoke: () => URL.revokeObjectURL(objectUrl) };
+}

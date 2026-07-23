@@ -31,7 +31,7 @@ CLIENT_ABSOLUTE_DAYS = int(os.environ.get("CLIENT_ABSOLUTE_SESSION_DAYS", "7"))
 MAX_ACTIVE_WORKFORCE_SESSIONS = int(os.environ.get("MAX_ACTIVE_WORKFORCE_SESSIONS", "5"))
 MAX_ACTIVE_CLIENT_SESSIONS = int(os.environ.get("MAX_ACTIVE_CLIENT_SESSIONS", "10"))
 TOUCH_THROTTLE_SECONDS = 60  # only re-write last_used_at once per minute
-WORKFORCE_ROLES = {"admin", "practitioner", "staff", "front_desk", "frontdesk", "auditor"}
+WORKFORCE_ROLES = {"admin", "practitioner", "staff", "front_desk", "frontdesk", "medical_assistant", "auditor"}
 
 
 # --------------------------------------------------------------------------- #

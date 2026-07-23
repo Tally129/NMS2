@@ -4,11 +4,9 @@ import api from "../../lib/api";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { useToast } from "../../hooks/use-toast";
-import { useAuth } from "../../lib/auth";
+import { useAuth, isWorkforceRole } from "../../lib/auth";
 import { ShieldCheck, ShieldOff, KeyRound, Lock } from "lucide-react";
 import { getErrorMessage } from "../../lib/errors";
-
-const WORKFORCE_ROLES = new Set(["admin", "practitioner", "staff", "medical_assistant"]);
 
 export default function Security() {
   const { user, refreshMe } = useAuth();
@@ -16,7 +14,7 @@ export default function Security() {
   const [setup, setSetup] = React.useState(null);
   const [code, setCode] = React.useState("");
   const [busy, setBusy] = React.useState(false);
-  const isWorkforce = WORKFORCE_ROLES.has(user?.role);
+  const isWorkforce = isWorkforceRole(user?.role);
 
   const startSetup = async () => {
     setBusy(true);

@@ -1,6 +1,6 @@
 import React from "react";
 import PortalLayout, { PortalHeader } from "../PortalLayout";
-import api, { API_BASE, LS } from "../../lib/api";
+import api, { downloadBlob } from "../../lib/api";
 import { Button } from "../../components/ui/button";
 import { Upload, Download, FolderOpen } from "lucide-react";
 import { useToast } from "../../hooks/use-toast";
@@ -14,8 +14,11 @@ export default function PatientFiles({ clientIdProp }) {
   const [clientId, setClientId] = React.useState(clientIdProp || null);
   const inputRef = React.useRef(null);
 
+  const [loadError, setLoadError] = React.useState(null);
+
   const load = React.useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       let cid = clientIdProp || clientId;
       if (!cid) {
@@ -26,7 +29,8 @@ export default function PatientFiles({ clientIdProp }) {
       const r = await api.get("/files", { params: { client_id: cid } });
       setFiles(r.data || []);
     } catch (e) {
-      // ignore
+      setFiles([]);
+      setLoadError(e?.response?.data?.detail?.message || e?.message || "Could not load your files.");
     } finally {
       setLoading(false);
     }
@@ -58,21 +62,14 @@ export default function PatientFiles({ clientIdProp }) {
   };
 
   const download = async (f) => {
-    const token = localStorage.getItem(LS.access);
-    const res = await fetch(`${API_BASE}/files/${f.id}/download`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) {
-      toast({ title: "Download failed" });
-      return;
+    try {
+      await downloadBlob(`/files/${f.id}/download`, { filename: f.filename });
+    } catch (e) {
+      toast({
+        title: "Download failed",
+        description: e?.isAuthDenied ? "You no longer have access to this file." : (e.message || "Try again."),
+      });
     }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = f.filename;
-    a.click();
-    URL.revokeObjectURL(url);
   };
 
   return (
@@ -90,6 +87,18 @@ export default function PatientFiles({ clientIdProp }) {
 
       {loading ? (
         <div className="text-[#6a6a6a]">Loading…</div>
+      ) : loadError ? (
+        <div className="rounded-2xl border border-[#c19a4b] bg-[#fbf3df] p-6 text-center" data-testid="patient-files-error">
+          <div className="text-sm text-[#7a2a2a] mb-3">{loadError}</div>
+          <Button
+            onClick={load}
+            variant="outline"
+            className="rounded-full border-[#8a6a3c] text-[#8a6a3c]"
+            data-testid="patient-files-retry"
+          >
+            Try again
+          </Button>
+        </div>
       ) : files.length === 0 ? (
         <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-10 text-center text-[#6a6a6a]">
           <FolderOpen size={28} className="mx-auto text-[#c19a4b]" />

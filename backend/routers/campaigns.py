@@ -374,9 +374,9 @@ def _fill_variables(text: str, ctx: dict) -> str:
 
 def _render_html(message: str, client: dict) -> str:
     """Render a campaign message with merge-field substitution.
-    If `message` already looks like HTML (starts with a tag), we trust it
-    (it came from the TipTap rich-text editor) and only substitute variables.
-    Otherwise we escape and wrap it as before."""
+    If `message` already looks like HTML (starts with a tag), sanitize it
+    with the allowlist (defense-in-depth — creates already sanitized the
+    stored copy) and substitute variables. Otherwise escape+wrap it."""
     ctx = _build_context(client)
     filled = _fill_variables(message or "", ctx)
     stripped = filled.lstrip()
@@ -384,7 +384,10 @@ def _render_html(message: str, client: dict) -> str:
               "you opted in to marketing from Natural Medical Solutions. "
               "Reply STOP to opt out.</p>")
     if stripped.startswith("<"):
-        return filled + footer
+        # Belt-and-braces: even though the stored message is already sanitized,
+        # re-sanitize the merged output so any variable value carrying HTML
+        # can't inject markup at send time.
+        return sanitize_campaign_html(filled) + footer
     safe = (filled
             .replace("&", "&amp;")
             .replace("<", "&lt;")
@@ -406,6 +409,69 @@ def _render_plain(message: str, client: dict) -> str:
         return re.sub(r"[ \t]+", " ", text).strip()
     return filled
 
+import bleach
+from bleach.css_sanitizer import CSSSanitizer
+
+# --------------------------------------------------------------------------- #
+# HTML sanitization allowlist (TipTap output surface + typography).           #
+# Applied BEFORE storage (`create_campaign`) and AS a defense-in-depth pass   #
+# during send (`_render_html`). Strips <script>, on* handlers, iframe,        #
+# object, embed, javascript: / data: URLs, and unsafe CSS.                    #
+# --------------------------------------------------------------------------- #
+_ALLOWED_TAGS = {
+    "a", "b", "strong", "i", "em", "u", "s", "code", "pre",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "p", "br", "hr", "blockquote",
+    "ul", "ol", "li",
+    "img",
+    "table", "thead", "tbody", "tr", "th", "td",
+    "span", "div",
+}
+_ALLOWED_ATTRS = {
+    "*": ["class", "style"],
+    "a": ["href", "title", "target", "rel"],
+    "img": ["src", "alt", "title", "width", "height"],
+    "th": ["scope", "colspan", "rowspan"],
+    "td": ["colspan", "rowspan"],
+}
+_ALLOWED_PROTOCOLS = ["http", "https", "mailto", "tel"]
+_ALLOWED_CSS_PROPERTIES = [
+    "color", "background-color", "font-size", "font-weight", "font-style",
+    "text-align", "text-decoration", "padding", "margin", "border",
+    "border-color", "border-width", "border-style",
+]
+_CSS_SANITIZER = CSSSanitizer(allowed_css_properties=_ALLOWED_CSS_PROPERTIES)
+
+
+def sanitize_campaign_html(html: str) -> str:
+    """Allowlist-based sanitizer for TipTap-authored campaign HTML.
+    Keeps supported rich-text formatting; drops scripts, event handlers,
+    unsafe URLs (javascript:, data:), iframes/object/embed and unsafe styles.
+    Anchor tags are forced to `rel=noopener noreferrer` for external links."""
+    if not html:
+        return ""
+    cleaned = bleach.clean(
+        html,
+        tags=_ALLOWED_TAGS,
+        attributes=_ALLOWED_ATTRS,
+        protocols=_ALLOWED_PROTOCOLS,
+        css_sanitizer=_CSS_SANITIZER,
+        strip=True,          # remove disallowed tags entirely (don't escape)
+        strip_comments=True,
+    )
+    # Force safe link attributes on every <a> that has an href.
+    return bleach.linkify(
+        cleaned,
+        callbacks=[
+            lambda attrs, new=False: {**attrs, (None, "rel"): "noopener noreferrer",
+                                       (None, "target"): "_blank"}
+            if attrs.get((None, "href"), "").startswith(("http://", "https://"))
+            else attrs
+        ],
+        skip_tags=["pre", "code"],
+    )
+
+
 @api.post("/campaigns")
 async def create_campaign(payload: CampaignIn, request: Request,
                           user=Depends(require_roles("admin", "practitioner", "staff"))):
@@ -422,12 +488,18 @@ async def create_campaign(payload: CampaignIn, request: Request,
             "code": "invalid_filter_type", "allowed": list(FILTER_TYPES),
         })
 
+    # Sanitize author-supplied HTML BEFORE it enters the database.
+    # Plain-text SMS bodies are passed through unchanged (no HTML there).
+    stored_message = payload.message or ""
+    if payload.channel == "email" and stored_message.lstrip().startswith("<"):
+        stored_message = sanitize_campaign_html(stored_message)
+
     now = datetime.now(timezone.utc)
     doc = {
         "id": new_id(),
         "title": payload.title.strip(),
         "subject": (payload.subject or "").strip() or None,
-        "message": payload.message,
+        "message": stored_message,
         "channel": payload.channel,
         "filter_type": payload.filter_type,
         "filter_params": payload.filter_params or {},

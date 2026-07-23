@@ -63,6 +63,14 @@ import { AuthProvider } from "./lib/auth";
 import { Protected } from "./lib/Protected";
 import ErrorBoundary from "./components/ErrorBoundary";
 
+// Consolidated role sets so route access stays in sync across the app.
+// Front-desk aliases (`front_desk`, `frontdesk`) are both accepted because
+// legacy user records use the hyphen-free form.
+const FRONT_DESK_ROLES = ["admin", "staff", "front_desk", "frontdesk"];
+const CLINICAL_STAFF_ROLES = ["admin", "practitioner", "staff", "medical_assistant", "front_desk", "frontdesk"];
+const PROVIDER_ROLES = ["admin", "practitioner", "staff", "medical_assistant", "front_desk", "frontdesk"];
+const READ_ONLY_WORKFORCE = [...FRONT_DESK_ROLES, "practitioner", "medical_assistant", "auditor"];
+
 function App() {
   return (
     <div className="App">
@@ -71,6 +79,7 @@ function App() {
           <AuthProvider>
           <PushOptInBanner />
           <SessionTimeout />
+          {/* Shared role sets are defined at module scope above. */}
           <Routes>
             {/* Public marketing */}
             <Route path="/" element={<Home />} />
@@ -86,29 +95,29 @@ function App() {
 
             {/* Telehealth */}
             <Route path="/portal/visit/:id" element={
-              <Protected roles={["client", "practitioner", "staff", "admin"]}><TelehealthVisit /></Protected>
+              <Protected roles={["client", "practitioner", "staff", "admin", "medical_assistant"]}><TelehealthVisit /></Protected>
             } />
             <Route path="/portal/patient/telehealth" element={<Protected roles={["client"]}><TelehealthHub /></Protected>} />
             <Route path="/portal/provider/telehealth" element={<Protected roles={["practitioner", "admin"]}><TelehealthHub /></Protected>} />
-            <Route path="/portal/staff/telehealth" element={<Protected roles={["staff", "admin"]}><TelehealthHub /></Protected>} />
-            <Route path="/portal/staff/tasks" element={<Protected roles={["staff", "admin", "medical_assistant", "practitioner"]}><Tasks /></Protected>} />
-            <Route path="/portal/staff/lab-review" element={<Protected roles={["staff", "admin", "medical_assistant", "practitioner"]}><LabReviewQueue /></Protected>} />
-            <Route path="/portal/staff/campaigns" element={<Protected roles={["staff", "admin", "practitioner"]}><CampaignCenter /></Protected>} />
-            <Route path="/portal/admin/accounting" element={<Protected roles={["admin"]}><Accounting /></Protected>} />
+            <Route path="/portal/staff/telehealth" element={<Protected roles={FRONT_DESK_ROLES}><TelehealthHub /></Protected>} />
+            <Route path="/portal/staff/tasks" element={<Protected roles={CLINICAL_STAFF_ROLES}><Tasks /></Protected>} />
+            <Route path="/portal/staff/lab-review" element={<Protected roles={CLINICAL_STAFF_ROLES}><LabReviewQueue /></Protected>} />
+            <Route path="/portal/staff/campaigns" element={<Protected roles={["staff", "admin", "practitioner", "front_desk", "frontdesk"]}><CampaignCenter /></Protected>} />
+            <Route path="/portal/admin/accounting" element={<Protected roles={["admin", "auditor"]}><Accounting /></Protected>} />
             <Route path="/portal/admin/telehealth" element={<Protected roles={["admin"]}><TelehealthHub /></Protected>} />
 
             {/* Staff portal (front-desk-first) */}
-            <Route path="/portal/staff" element={<Protected roles={["staff", "admin"]}><StaffDashboard /></Protected>} />
-            <Route path="/portal/staff/front-desk" element={<Protected roles={["staff", "admin"]}><FrontDesk /></Protected>} />
-            <Route path="/portal/staff/appointments" element={<Protected roles={["staff", "admin"]}><AppointmentsEHR /></Protected>} />
-            <Route path="/portal/staff/patients" element={<Protected roles={["staff", "admin"]}><PatientsList /></Protected>} />
-            <Route path="/portal/staff/pos" element={<Protected roles={["staff", "admin"]}><PointOfSale /></Protected>} />
-            <Route path="/portal/staff/transactions" element={<Protected roles={["staff", "admin"]}><Transactions /></Protected>} />
-            <Route path="/portal/staff/inventory" element={<Protected roles={["staff", "admin"]}><Inventory /></Protected>} />
-            <Route path="/portal/staff/treatments" element={<Protected roles={["staff", "admin"]}><Treatments /></Protected>} />
-            <Route path="/portal/staff/time-clock" element={<Protected roles={["staff", "admin"]}><TimeClock /></Protected>} />
-            <Route path="/portal/staff/account" element={<Protected roles={["staff", "admin"]}><MyAccount /></Protected>} />
-            <Route path="/portal/staff/security" element={<Protected roles={["staff", "admin"]}><Security /></Protected>} />
+            <Route path="/portal/staff" element={<Protected roles={FRONT_DESK_ROLES}><StaffDashboard /></Protected>} />
+            <Route path="/portal/staff/front-desk" element={<Protected roles={FRONT_DESK_ROLES}><FrontDesk /></Protected>} />
+            <Route path="/portal/staff/appointments" element={<Protected roles={FRONT_DESK_ROLES}><AppointmentsEHR /></Protected>} />
+            <Route path="/portal/staff/patients" element={<Protected roles={READ_ONLY_WORKFORCE}><PatientsList /></Protected>} />
+            <Route path="/portal/staff/pos" element={<Protected roles={FRONT_DESK_ROLES}><PointOfSale /></Protected>} />
+            <Route path="/portal/staff/transactions" element={<Protected roles={[...FRONT_DESK_ROLES, "auditor"]}><Transactions /></Protected>} />
+            <Route path="/portal/staff/inventory" element={<Protected roles={FRONT_DESK_ROLES}><Inventory /></Protected>} />
+            <Route path="/portal/staff/treatments" element={<Protected roles={[...FRONT_DESK_ROLES, "practitioner"]}><Treatments /></Protected>} />
+            <Route path="/portal/staff/time-clock" element={<Protected roles={CLINICAL_STAFF_ROLES}><TimeClock /></Protected>} />
+            <Route path="/portal/staff/account" element={<Protected roles={CLINICAL_STAFF_ROLES}><MyAccount /></Protected>} />
+            <Route path="/portal/staff/security" element={<Protected roles={CLINICAL_STAFF_ROLES}><Security /></Protected>} />
 
             {/* Patient */}
             <Route path="/portal/patient" element={<Protected roles={["client"]}><PatientDashboard /></Protected>} />
@@ -125,21 +134,21 @@ function App() {
             <Route path="/portal/patient/security" element={<Protected roles={["client"]}><Security /></Protected>} />
 
             {/* Provider & staff */}
-            <Route path="/portal/provider" element={<Protected roles={["practitioner", "staff", "admin"]}><ProviderDashboard /></Protected>} />
-            <Route path="/portal/provider/patients" element={<Protected roles={["practitioner", "staff", "admin"]}><PatientsList /></Protected>} />
-            <Route path="/portal/provider/patients/:id" element={<Protected roles={["practitioner", "staff", "admin"]}><ProviderPatientChart /></Protected>} />
-            <Route path="/portal/provider/schedule" element={<Protected roles={["practitioner", "staff", "admin"]}><AppointmentsEHR /></Protected>} />
-            <Route path="/portal/provider/appointments" element={<Protected roles={["practitioner", "staff", "admin"]}><AppointmentsEHR /></Protected>} />
+            <Route path="/portal/provider" element={<Protected roles={PROVIDER_ROLES}><ProviderDashboard /></Protected>} />
+            <Route path="/portal/provider/patients" element={<Protected roles={READ_ONLY_WORKFORCE}><PatientsList /></Protected>} />
+            <Route path="/portal/provider/patients/:id" element={<Protected roles={READ_ONLY_WORKFORCE}><ProviderPatientChart /></Protected>} />
+            <Route path="/portal/provider/schedule" element={<Protected roles={PROVIDER_ROLES}><AppointmentsEHR /></Protected>} />
+            <Route path="/portal/provider/appointments" element={<Protected roles={PROVIDER_ROLES}><AppointmentsEHR /></Protected>} />
             <Route path="/portal/provider/availability" element={<Protected roles={["practitioner", "admin"]}><Availability /></Protected>} />
-            <Route path="/portal/provider/messages" element={<Protected roles={["practitioner", "admin"]}><Messages /></Protected>} />
-            <Route path="/portal/provider/security" element={<Protected roles={["practitioner", "staff", "admin"]}><Security /></Protected>} />
-            <Route path="/portal/provider/account" element={<Protected roles={["practitioner", "staff", "admin"]}><MyAccount /></Protected>} />
-            <Route path="/portal/provider/front-desk" element={<Protected roles={["practitioner", "staff", "admin"]}><FrontDesk /></Protected>} />
-            <Route path="/portal/provider/time-clock" element={<Protected roles={["practitioner", "staff", "admin"]}><TimeClock /></Protected>} />
-            <Route path="/portal/provider/treatments" element={<Protected roles={["practitioner", "staff", "admin"]}><Treatments /></Protected>} />
-            <Route path="/portal/provider/pos" element={<Protected roles={["staff", "admin"]}><PointOfSale /></Protected>} />
-            <Route path="/portal/provider/transactions" element={<Protected roles={["staff", "admin"]}><Transactions /></Protected>} />
-            <Route path="/portal/provider/inventory" element={<Protected roles={["staff", "admin"]}><Inventory /></Protected>} />
+            <Route path="/portal/provider/messages" element={<Protected roles={["practitioner", "admin", "medical_assistant"]}><Messages /></Protected>} />
+            <Route path="/portal/provider/security" element={<Protected roles={PROVIDER_ROLES}><Security /></Protected>} />
+            <Route path="/portal/provider/account" element={<Protected roles={PROVIDER_ROLES}><MyAccount /></Protected>} />
+            <Route path="/portal/provider/front-desk" element={<Protected roles={PROVIDER_ROLES}><FrontDesk /></Protected>} />
+            <Route path="/portal/provider/time-clock" element={<Protected roles={PROVIDER_ROLES}><TimeClock /></Protected>} />
+            <Route path="/portal/provider/treatments" element={<Protected roles={PROVIDER_ROLES}><Treatments /></Protected>} />
+            <Route path="/portal/provider/pos" element={<Protected roles={FRONT_DESK_ROLES}><PointOfSale /></Protected>} />
+            <Route path="/portal/provider/transactions" element={<Protected roles={[...FRONT_DESK_ROLES, "auditor"]}><Transactions /></Protected>} />
+            <Route path="/portal/provider/inventory" element={<Protected roles={FRONT_DESK_ROLES}><Inventory /></Protected>} />
 
             {/* Admin */}
             <Route path="/portal/admin" element={<Protected roles={["admin"]}><AdminOverview /></Protected>} />

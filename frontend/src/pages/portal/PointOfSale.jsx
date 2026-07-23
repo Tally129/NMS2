@@ -1,6 +1,6 @@
 import React from "react";
 import PortalLayout, { PortalHeader } from "../PortalLayout";
-import api, { API_BASE, LS } from "../../lib/api";
+import api, { downloadBlob } from "../../lib/api";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
@@ -103,16 +103,18 @@ export default function PointOfSale() {
       };
       const r = await api.post("/pos/checkout", payload);
       toast({ title: `Sale recorded · $${r.data.total.toFixed(2)}` });
-      // Download PDF receipt
-      const token = localStorage.getItem(LS.access);
-      const url = `${API_BASE}/transactions/${r.data.id}/receipt`;
-      const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-      const blob = await resp.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `receipt-${r.data.id.slice(0, 8)}.pdf`;
-      a.click();
-      URL.revokeObjectURL(a.href);
+      // Download PDF receipt through the authenticated axios instance —
+      // never read the bearer token from localStorage.
+      try {
+        await downloadBlob(`/transactions/${r.data.id}/receipt`, {
+          filename: `receipt-${r.data.id.slice(0, 8)}.pdf`,
+        });
+      } catch (dlErr) {
+        toast({
+          title: "Receipt PDF unavailable",
+          description: dlErr?.message || "Sale saved — download the receipt from Transactions.",
+        });
+      }
       // Reset cart
       setCart([]); setDiscount(0); setTip(0); setTaxRate(0); setNote(""); setPaymentRef("");
       load();

@@ -1,6 +1,6 @@
 import React from "react";
 import PortalLayout, { PortalHeader, StatCard } from "../PortalLayout";
-import api, { API_BASE, LS } from "../../lib/api";
+import api, { downloadBlob } from "../../lib/api";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
@@ -35,35 +35,36 @@ export default function Transactions() {
 
   const downloadReceipt = async (id) => {
     try {
-      const token = localStorage.getItem(LS.access);
-      const r = await fetch(`${API_BASE}/transactions/${id}/receipt`, { headers: { Authorization: `Bearer ${token}` } });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const blob = await r.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `invoice-${id.slice(0, 8)}.pdf`;
-      a.click();
-      URL.revokeObjectURL(a.href);
+      await downloadBlob(`/transactions/${id}/receipt`, {
+        filename: `invoice-${id.slice(0, 8)}.pdf`,
+      });
     } catch (e) {
-      toast({ title: "Failed to download", description: e.message });
+      toast({
+        title: "Failed to download",
+        description: e?.isAuthDenied ? "You no longer have access to this invoice." : (e.message || "Try again."),
+      });
     }
   };
 
   const printReceipt = async (id) => {
+    let handle = null;
     try {
-      const token = localStorage.getItem(LS.access);
-      const r = await fetch(`${API_BASE}/transactions/${id}/receipt`, { headers: { Authorization: `Bearer ${token}` } });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const blob = await r.blob();
-      const url = URL.createObjectURL(blob);
-      const w = window.open(url);
+      handle = await downloadBlob(`/transactions/${id}/receipt`);
+      const w = window.open(handle.url);
       if (w) {
         w.addEventListener("load", () => { try { w.print(); } catch {} });
+        // Revoke after 60s so the popup keeps the blob accessible while printing.
+        setTimeout(() => handle.revoke?.(), 60_000);
       } else {
+        handle.revoke?.();
         toast({ title: "Popup blocked", description: "Allow popups to print." });
       }
     } catch (e) {
-      toast({ title: "Failed to print", description: e.message });
+      handle?.revoke?.();
+      toast({
+        title: "Failed to print",
+        description: e?.isAuthDenied ? "You no longer have access to this invoice." : (e.message || "Try again."),
+      });
     }
   };
 
@@ -93,16 +94,15 @@ export default function Transactions() {
           <Button
             onClick={async () => {
               try {
-                const token = localStorage.getItem(LS.access);
-                const r = await fetch(`${API_BASE}/reports/eod-cash-drawer`, { headers: { Authorization: `Bearer ${token}` } });
-                if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                const blob = await r.blob();
-                const a = document.createElement("a");
-                a.href = URL.createObjectURL(blob);
-                a.download = `eod-cash-drawer-${new Date().toISOString().slice(0,10)}.pdf`;
-                a.click();
-                URL.revokeObjectURL(a.href);
-              } catch (e) { toast({ title: "Failed to generate report", description: e.message }); }
+                await downloadBlob("/reports/eod-cash-drawer", {
+                  filename: `eod-cash-drawer-${new Date().toISOString().slice(0,10)}.pdf`,
+                });
+              } catch (e) {
+                toast({
+                  title: "Failed to generate report",
+                  description: e?.isAuthDenied ? "You don't have access to this report." : (e.message || "Try again."),
+                });
+              }
             }}
             className="rounded-full bg-[#c19a4b] hover:bg-[#a8853f] text-[#1f2a22]"
             data-testid="eod-cash-drawer-btn"

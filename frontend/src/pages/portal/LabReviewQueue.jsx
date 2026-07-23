@@ -1,6 +1,6 @@
 import React from "react";
 import PortalLayout, { PortalHeader } from "../PortalLayout";
-import api, { API_BASE, LS } from "../../lib/api";
+import api, { downloadBlob } from "../../lib/api";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
@@ -183,7 +183,15 @@ export default function LabReviewQueue() {
       </div>
 
       <ReviewDialog
-        lab={selected} onClose={() => setSelected(null)} onTransition={transition}
+        lab={selected}
+        onClose={() => setSelected(null)}
+        onTransition={transition}
+        onLabUpdate={(next) => {
+          // Immutable update: replace both `rows` and `selected` so React
+          // sees a new reference and the paperclip badge re-renders.
+          setRows((prev) => prev.map((r) => (r.id === next.id ? { ...r, ...next } : r)));
+          setSelected((prev) => (prev && prev.id === next.id ? { ...prev, ...next } : prev));
+        }}
       />
       <LabToTaskDialog
         lab={creatingTask} onClose={() => setCreatingTask(null)}
@@ -193,28 +201,37 @@ export default function LabReviewQueue() {
   );
 }
 
-function ReviewDialog({ lab, onClose, onTransition }) {
+function ReviewDialog({ lab, onClose, onTransition, onLabUpdate }) {
   const { toast } = useToast();
   const [notes, setNotes] = React.useState("");
   const [next, setNext] = React.useState("reviewed");
   const [attachments, setAttachments] = React.useState([]);
+  const [attachmentIds, setAttachmentIds] = React.useState([]);
+  const [loadError, setLoadError] = React.useState(null);
   const [uploading, setUploading] = React.useState(false);
   const fileRef = React.useRef(null);
 
-  const loadAttachments = React.useCallback(async () => {
-    if (!lab?.attachment_file_ids?.length) { setAttachments([]); return; }
+  const loadAttachments = React.useCallback(async (ids) => {
+    setLoadError(null);
+    if (!ids || ids.length === 0) { setAttachments([]); return; }
     try {
       const r = await api.get("/files", { params: { client_id: lab.client_id } });
-      const byId = Object.fromEntries((r.data || []).map((f) => [f.id, f]));
-      setAttachments(lab.attachment_file_ids.map((id) => byId[id]).filter(Boolean));
-    } catch { setAttachments([]); }
+      const list = r.data || [];
+      const byId = Object.fromEntries(list.map((f) => [f.id, f]));
+      setAttachments(ids.map((id) => byId[id]).filter(Boolean));
+    } catch (err) {
+      setAttachments([]);
+      setLoadError(err?.response?.data?.detail?.message || err?.message || "Could not load attachments.");
+    }
   }, [lab]);
 
   React.useEffect(() => {
     if (lab) {
       setNotes(lab.review_notes || "");
       setNext(lab.review_status === "new" ? "reviewed" : "patient_notified");
-      loadAttachments();
+      const ids = lab.attachment_file_ids || [];
+      setAttachmentIds(ids);
+      loadAttachments(ids);
     }
   }, [lab, loadAttachments]);
 
@@ -231,9 +248,11 @@ function ReviewDialog({ lab, onClose, onTransition }) {
       await api.post(`/labs/${lab.id}/attachments`, { file_id: up.data.id });
       toast({ title: "Attached", description: file.name });
       e.target.value = "";
-      // Reflect immediately without reloading the queue
-      lab.attachment_file_ids = [...(lab.attachment_file_ids || []), up.data.id];
-      loadAttachments();
+      // Immutable update — never mutate the incoming `lab` prop.
+      const nextIds = [...attachmentIds, up.data.id];
+      setAttachmentIds(nextIds);
+      onLabUpdate?.({ id: lab.id, attachment_file_ids: nextIds });
+      loadAttachments(nextIds);
     } catch (err) {
       toast({ title: "Attach failed",
               description: err?.response?.data?.detail?.message ||
@@ -243,22 +262,28 @@ function ReviewDialog({ lab, onClose, onTransition }) {
 
   const download = async (f) => {
     try {
-      const token = localStorage.getItem(LS.access);
-      const r = await fetch(`${API_BASE}/files/${f.id}/download`, { headers: { Authorization: `Bearer ${token}` } });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const blob = await r.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a"); a.href = url; a.download = f.filename; a.click();
-      URL.revokeObjectURL(url);
-    } catch { toast({ title: "Download failed" }); }
+      await downloadBlob(`/files/${f.id}/download`, { filename: f.filename });
+    } catch (e) {
+      toast({
+        title: "Download failed",
+        description: e?.isAuthDenied ? "You no longer have access to this file." : (e.message || "Try again."),
+      });
+    }
   };
 
   const detach = async (f) => {
     try {
       await api.delete(`/labs/${lab.id}/attachments/${f.id}`);
-      lab.attachment_file_ids = (lab.attachment_file_ids || []).filter((x) => x !== f.id);
-      loadAttachments();
-    } catch { toast({ title: "Remove failed" }); }
+      const nextIds = attachmentIds.filter((x) => x !== f.id);
+      setAttachmentIds(nextIds);
+      onLabUpdate?.({ id: lab.id, attachment_file_ids: nextIds });
+      loadAttachments(nextIds);
+    } catch (err) {
+      toast({
+        title: "Remove failed",
+        description: err?.response?.data?.detail?.message || err?.message || "Try again.",
+      });
+    }
   };
 
   if (!lab) return null;
@@ -305,7 +330,19 @@ function ReviewDialog({ lab, onClose, onTransition }) {
                 </Button>
               </div>
             </div>
-            {attachments.length === 0 ? (
+            {loadError ? (
+              <div className="text-xs text-[#7a2a2a] flex items-center justify-between">
+                <span>{loadError}</span>
+                <button
+                  type="button"
+                  onClick={() => loadAttachments(attachmentIds)}
+                  className="underline text-[#2f6a4a]"
+                  data-testid="lab-attachments-retry"
+                >
+                  Retry
+                </button>
+              </div>
+            ) : attachments.length === 0 ? (
               <div className="text-xs text-slate-500">No attachments yet.</div>
             ) : (
               <ul className="text-xs space-y-1" data-testid="lab-attachments-list">
