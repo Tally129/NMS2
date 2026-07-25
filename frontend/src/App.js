@@ -58,6 +58,7 @@ import StaffLogin from "./pages/StaffLogin";
 import OAuthComplete from "./pages/OAuthComplete";
 import MfaChallenge from "./pages/MfaChallenge";
 import ChangePassword from "./pages/ChangePassword";
+import Unsubscribe from "./pages/Unsubscribe";
 import StaffDashboard from "./pages/staff/StaffDashboard";
 import { Toaster } from "./components/ui/toaster";
 import { AuthProvider } from "./lib/auth";
@@ -92,6 +93,7 @@ function App() {
             <Route path="/oauth-complete" element={<OAuthComplete />} />
             <Route path="/mfa-challenge" element={<MfaChallenge />} />
             <Route path="/change-password" element={<Protected><ChangePassword /></Protected>} />
+            <Route path="/unsubscribe" element={<Unsubscribe />} />
 
             {/* Portal redirect */}
             <Route path="/portal" element={<PortalIndex />} />

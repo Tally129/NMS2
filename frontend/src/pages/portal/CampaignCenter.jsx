@@ -95,20 +95,82 @@ export default function CampaignCenter() {
       toast({ title: "Retry failed", description: getErrorMessage(e) || "" });
     }
   };
+  const duplicate = async (c) => {
+    try {
+      const r = await api.post(`/campaigns/${c.id}/duplicate`);
+      toast({ title: "Draft created", description: r.data.title });
+      load();
+    } catch (e) {
+      toast({ title: "Duplicate failed", description: getErrorMessage(e) || "" });
+    }
+  };
+  const archive = async (c) => {
+    try {
+      await api.post(`/campaigns/${c.id}/archive`);
+      toast({ title: "Campaign archived" });
+      load();
+    } catch (e) {
+      toast({ title: "Archive failed", description: getErrorMessage(e) || "" });
+    }
+  };
+  const pause = async (c) => {
+    try {
+      await api.post(`/campaigns/${c.id}/pause`);
+      toast({ title: "Campaign paused" });
+      load();
+    } catch (e) {
+      toast({ title: "Pause failed", description: getErrorMessage(e) || "" });
+    }
+  };
+  const resume = async (c) => {
+    try {
+      const r = await api.post(`/campaigns/${c.id}/resume`);
+      toast({ title: `Campaign resumed → ${r.data.status}` });
+      load();
+    } catch (e) {
+      toast({ title: "Resume failed", description: getErrorMessage(e) || "" });
+    }
+  };
+  const testSend = async (c) => {
+    const to = window.prompt("Test send this campaign to which email?", "");
+    if (!to) return;
+    try {
+      const r = await api.post(`/campaigns/${c.id}/test-send`, { recipients: [to] });
+      const d = r.data.results?.[0]?.delivery;
+      toast({
+        title: `Test email ${d === "sent" ? "sent" : d === "sent_stub" ? "queued (stub)" : d}`,
+        description: to,
+      });
+    } catch (e) {
+      toast({ title: "Test send failed", description: getErrorMessage(e) || "" });
+    }
+  };
 
+  const [showTemplates, setShowTemplates] = React.useState(false);
+  const [prefill, setPrefill] = React.useState(null);
   return (
     <PortalLayout>
       <PortalHeader
         title="Campaign center"
         subtitle="Outreach to opted-in patients only"
         actions={
-          <Button
-            onClick={() => setShowNew(true)}
-            className="btn-lift h-11 rounded-full bg-[#2f6a4a] hover:bg-[#265739] text-white"
-            data-testid="campaign-new-btn"
-          >
-            <Megaphone size={16} className="mr-2" /> New campaign
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              onClick={() => setShowTemplates(true)}
+              variant="outline"
+              className="h-11 rounded-full border-[#c19a4b] text-[#8a6a3c]"
+              data-testid="campaign-templates-btn"
+            >
+              <Mail size={16} className="mr-2" /> Templates
+            </Button>
+            <Button
+              onClick={() => { setPrefill(null); setShowNew(true); }}
+              className="btn-lift h-11 rounded-full bg-[#2f6a4a] hover:bg-[#265739] text-white"
+              data-testid="campaign-new-btn"
+            >
+              <Megaphone size={16} className="mr-2" /> New campaign
+            </Button>
+          </div>
         }
       />
 
@@ -197,6 +259,26 @@ export default function CampaignCenter() {
                           Cancel
                         </Button>
                       )}
+                      {(c.status === "scheduled" || c.status === "sending") && (
+                        <Button
+                          size="sm" variant="outline"
+                          className="h-8 rounded-full border-[#c19a4b] text-[#8a6a3c]"
+                          onClick={() => pause(c)}
+                          data-testid={`campaign-pause-${c.id}`}
+                        >
+                          Pause
+                        </Button>
+                      )}
+                      {c.status === "paused" && (
+                        <Button
+                          size="sm" variant="outline"
+                          className="h-8 rounded-full border-[#2f6a4a] text-[#2f6a4a]"
+                          onClick={() => resume(c)}
+                          data-testid={`campaign-resume-${c.id}`}
+                        >
+                          Resume
+                        </Button>
+                      )}
                       {c.status === "failed" && (
                         <Button
                           size="sm" variant="outline"
@@ -205,6 +287,34 @@ export default function CampaignCenter() {
                           data-testid={`campaign-retry-${c.id}`}
                         >
                           Retry
+                        </Button>
+                      )}
+                      {["draft", "scheduled", "paused"].includes(c.status) && c.channel === "email" && (
+                        <Button
+                          size="sm" variant="outline"
+                          className="h-8 rounded-full border-[#8a6a3c] text-[#8a6a3c]"
+                          onClick={() => testSend(c)}
+                          data-testid={`campaign-test-${c.id}`}
+                        >
+                          Test send
+                        </Button>
+                      )}
+                      <Button
+                        size="sm" variant="outline"
+                        className="h-8 rounded-full border-slate-300 text-slate-600"
+                        onClick={() => duplicate(c)}
+                        data-testid={`campaign-duplicate-${c.id}`}
+                      >
+                        Duplicate
+                      </Button>
+                      {!c.archived_at && ["sent", "completed", "failed", "cancelled"].includes(c.status) && (
+                        <Button
+                          size="sm" variant="ghost"
+                          className="h-8 rounded-full text-slate-500"
+                          onClick={() => archive(c)}
+                          data-testid={`campaign-archive-${c.id}`}
+                        >
+                          Archive
                         </Button>
                       )}
                     </td>
@@ -216,18 +326,54 @@ export default function CampaignCenter() {
         )}
       </div>
 
-      <NewCampaignDialog open={showNew} onOpenChange={setShowNew} onSent={() => { setShowNew(false); load(); }} />
+      <NewCampaignDialog open={showNew} onOpenChange={setShowNew} initial={prefill} onSent={() => { setShowNew(false); setPrefill(null); load(); }} />
+      <TemplatePickerDialog
+        open={showTemplates}
+        onClose={() => setShowTemplates(false)}
+        onPick={(tpl) => {
+          setShowTemplates(false);
+          setPrefill({
+            title: tpl.name,
+            subject: tpl.subject,
+            message: tpl.html,
+            channel: "email",
+            kind: tpl.kind || "marketing",
+          });
+          setShowNew(true);
+        }}
+      />
       <CampaignDetail id={selected?.id} onClose={() => setSelected(null)} />
     </PortalLayout>
   );
 }
 
-function NewCampaignDialog({ open, onOpenChange, onSent }) {
+function NewCampaignDialog({ open, onOpenChange, onSent, initial }) {
   const { toast } = useToast();
   const [form, setForm] = React.useState({
     title: "", subject: "", message: "", message_text: "", channel: "email",
     filter_type: "all_marketing", filter_params: {}, mode: "now", schedule_at: "",
+    kind: "marketing",
   });
+  React.useEffect(() => {
+    // Reset when the dialog opens; apply optional template prefill.
+    if (open) {
+      setForm((prev) => ({
+        ...prev,
+        title: initial?.title || "",
+        subject: initial?.subject || "",
+        message: initial?.message || "",
+        message_text: "",
+        channel: initial?.channel || "email",
+        kind: initial?.kind || "marketing",
+        filter_type: "all_marketing",
+        filter_params: {},
+        mode: "now",
+        schedule_at: "",
+      }));
+      setEstimate(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, initial]);
   const [estimate, setEstimate] = React.useState(null);
   const [estimating, setEstimating] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
@@ -271,6 +417,7 @@ function NewCampaignDialog({ open, onOpenChange, onSent }) {
         subject: form.subject || undefined,
         message: form.message,
         channel: form.channel,
+        kind: form.kind || "marketing",
         filter_type: form.filter_type,
         filter_params: form.filter_params,
         schedule_at: form.mode === "schedule" && form.schedule_at
@@ -531,5 +678,79 @@ function Stat({ label, value, tone }) {
       <div className={`text-xl font-display ${tone}`}>{value}</div>
       <div className="text-[10px] uppercase tracking-wider text-slate-500">{label}</div>
     </div>
+  );
+}
+
+function TemplatePickerDialog({ open, onClose, onPick }) {
+  const [templates, setTemplates] = React.useState({ defaults: [], custom: [] });
+  const [category, setCategory] = React.useState("all");
+  const [loading, setLoading] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!open) return;
+    setLoading(true);
+    api.get("/campaign-templates")
+      .then((r) => setTemplates(r.data || { defaults: [], custom: [] }))
+      .catch(() => setTemplates({ defaults: [], custom: [] }))
+      .finally(() => setLoading(false));
+  }, [open]);
+
+  const all = [...templates.defaults, ...templates.custom];
+  const filtered = category === "all" ? all : all.filter((t) => t.category === category);
+  const categories = Array.from(new Set(all.map((t) => t.category))).sort();
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose?.()}>
+      <DialogContent className="bg-white max-w-3xl" data-testid="template-picker-dialog">
+        <DialogHeader>
+          <DialogTitle className="font-display text-2xl">Email template library</DialogTitle>
+          <DialogDescription>
+            Start from a template. You'll be able to edit every field before sending.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex gap-2 flex-wrap mb-3">
+          <button
+            onClick={() => setCategory("all")}
+            className={`px-3 py-1 rounded-full text-xs border ${category === "all" ? "bg-[#2f6a4a] text-white border-[#2f6a4a]" : "border-[#e0d6bc] text-[#8a6a3c]"}`}
+            data-testid="template-cat-all"
+          >All ({all.length})</button>
+          {categories.map((c) => (
+            <button
+              key={c}
+              onClick={() => setCategory(c)}
+              className={`px-3 py-1 rounded-full text-xs border ${category === c ? "bg-[#2f6a4a] text-white border-[#2f6a4a]" : "border-[#e0d6bc] text-[#8a6a3c]"}`}
+              data-testid={`template-cat-${c}`}
+            >{c.replace(/_/g, " ")}</button>
+          ))}
+        </div>
+        {loading ? (
+          <div className="p-6 text-center text-sm text-slate-500">Loading templates…</div>
+        ) : (
+          <div className="grid sm:grid-cols-2 gap-3 max-h-[520px] overflow-y-auto pr-1">
+            {filtered.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => onPick(t)}
+                className="text-left rounded-xl border border-[#e0d6bc] bg-[#fbf7ee] p-3 hover:bg-[#f1ead8] transition"
+                data-testid={`template-${t.id}`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="font-medium text-[#1f2a22] text-sm">{t.name}</div>
+                  <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded ${t.kind === "transactional" ? "bg-[#e0eaf3] text-[#3a5a7a]" : "bg-[#eaf2ec] text-[#3d6b52]"}`}>
+                    {t.kind || "marketing"}
+                  </span>
+                </div>
+                <div className="text-xs text-[#6a6a6a] mt-1">{t.subject}</div>
+                <div className="text-[10px] text-[#8a6a3c] mt-2 uppercase tracking-widest">{t.category?.replace(/_/g, " ")}</div>
+              </button>
+            ))}
+            {filtered.length === 0 && <div className="col-span-2 text-sm text-slate-500 p-6 text-center">No templates in this category.</div>}
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -640,3 +640,68 @@ plumbing, and campaign engine.
 - No repository-wide refactor.
 
 _Last updated: Jul 23, 2026 (Sprint 6 · Frontend Usability & Workflow Completion)_
+
+---
+
+## Sprint 7 — Production-Ready Email Campaign Platform (Jul 24, 2026)
+
+Goal: extend the existing campaign engine into a full production tool. Reused
+`routers/campaigns.py`, TipTap editor, bleach sanitizer, notifiers, and
+password-reset token flow. Added on new endpoints and UX; nothing was rebuilt.
+
+### Backend (new `routers/campaign_extras.py`)
+- **Template library** — 20 curated defaults across all requested categories
+  (monthly newsletter, wellness tips, IV therapy, membership, hyperbaric,
+  weight loss, hormone, peptide, aesthetics, med spa specials, birthday,
+  holiday, appointment follow-up, reactivation, referral, portal invitation,
+  password reset, invoice, receipt, lab results ready). Public HTML endpoints:
+  `GET /api/campaign-templates`, `POST /api/campaign-templates` (custom save),
+  `DELETE /api/campaign-templates/{id}`.
+- **Lifecycle actions** — `/duplicate`, `/archive`, `/unarchive`, `/pause`,
+  `/resume`, `/test-send` (up to 5 explicit recipients, ignores segment
+  filter, prefixes subject with `[TEST]`).
+- **Draft edit lock** — new `PATCH /api/campaigns/{id}` allows edits only
+  while status is `draft` / `scheduled` / `paused`; sending/sent/failed 400s
+  with `campaign_locked`. Snapshot of subject/message/channel/filter is
+  written to the doc the moment sending starts (`campaigns.snapshot`).
+- **Broader segments** — `POST /api/campaigns/segments/estimate` accepts the
+  original `FILTER_TYPES` plus `active_patients` (last N days), `new_patients`
+  (created N days), `birthday_month`, `tags`, `custom_list`.
+- **Compliance footer** — every marketing email now carries clinic name,
+  address, phone, website and a per-recipient signed unsubscribe link.
+  Transactional emails (kind=transactional) skip the unsubscribe link with
+  the required "This is a transactional message" notice.
+- **Public unsubscribe** — `GET /api/campaign-unsubscribe?c=&t=` toggles
+  `consent_marketing: false` after verifying the HMAC-lite token; frontend
+  page at `/unsubscribe` gives the confirmation. Transactional messages
+  still flow.
+- **Provider abstraction stub** — `GET /api/campaigns/config/providers`
+  reports which of `sendgrid` / `resend` / `ses` are configured. SendGrid
+  is live (SG.6Ox... key in place); Resend and SES accept env credentials
+  without code changes.
+- **`portal.login_link` merge field** — substituted per-recipient at send
+  time as `${FRONTEND_ORIGIN}/patient-login`.
+
+### Frontend (`pages/portal/CampaignCenter.jsx` + `Unsubscribe.jsx`)
+- New **Templates** button + `TemplatePickerDialog` — category filter chips,
+  transactional / marketing badges, click any card to prefill the new-campaign
+  dialog with the template's subject and HTML.
+- Row-level actions extended: **Duplicate**, **Archive**, **Pause**,
+  **Resume**, **Test send**, plus existing Cancel / Retry. Send-test prompts
+  for a recipient and reports SendGrid delivery status.
+- NewCampaignDialog accepts an `initial` prefill from the picker and now
+  sends the `kind` field (`marketing` or `transactional`).
+- New public page `/unsubscribe` handles the compliance-link click.
+
+### Config
+- `SENDGRID_API_KEY` + `SENDGRID_FROM_EMAIL=info@natmedsol.com`,
+  `EMAIL_PROVIDER=sendgrid` set in `backend/.env`. Frontend service worker
+  bumped to `nms-v7-2026-07-24-campaign-platform`.
+
+### Explicitly NOT built (out-of-scope per brief)
+- No new authentication or messaging engine — reused notifiers/campaigns.
+- Full open/click/bounce webhooks require SendGrid Event Webhook
+  configuration; delivered/sent-stub/failed already flow via
+  `db.integration_log`.
+
+_Last updated: Jul 24, 2026 (Sprint 7 · Production-Ready Email Campaign Platform)_

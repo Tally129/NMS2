@@ -54,11 +54,22 @@ def _is_valid_phone(p: Optional[str]) -> bool:
 class CampaignIn(BaseModel):
     title: str = Field(..., min_length=2, max_length=160)
     subject: Optional[str] = Field(default=None, max_length=200)
-    message: str = Field(..., min_length=2, max_length=4000)
+    message: str = Field(..., min_length=2, max_length=20000)
     channel: str
     filter_type: str = "all_marketing"
     filter_params: dict = {}
     schedule_at: Optional[datetime] = None    # None ⇒ send now
+    kind: str = "marketing"  # marketing | transactional (affects footer/unsub)
+
+
+class CampaignPatchIn(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=2, max_length=160)
+    subject: Optional[str] = Field(default=None, max_length=200)
+    message: Optional[str] = Field(default=None, min_length=2, max_length=20000)
+    filter_type: Optional[str] = None
+    filter_params: Optional[dict] = None
+    schedule_at: Optional[datetime] = None
+    kind: Optional[str] = None
 
 
 class EstimateIn(BaseModel):
@@ -210,6 +221,24 @@ async def _run_campaign(campaign: dict, *, worker_id: Optional[str] = None) -> d
     scheduled_at.
     """
     started_at = datetime.now(timezone.utc)
+    # Immutable snapshot: preserve the exact content that begins delivery
+    # (subject, HTML message, channel, filter). Once written, the frontend
+    # stops allowing edits on `sending`/`sent` campaigns.
+    if not campaign.get("snapshot"):
+        try:
+            await db.campaigns.update_one(
+                {"id": campaign["id"], "snapshot": None},
+                {"$set": {"snapshot": {
+                    "captured_at": started_at,
+                    "subject": campaign.get("subject"),
+                    "message": campaign.get("message"),
+                    "channel": campaign.get("channel"),
+                    "filter_type": campaign.get("filter_type"),
+                    "filter_params": campaign.get("filter_params"),
+                }}},
+            )
+        except Exception:
+            pass
     try:
         candidates = await _resolve_recipients(campaign["filter_type"], campaign.get("filter_params") or {})
         eligible, skipped = _partition(candidates, campaign["channel"])
@@ -235,13 +264,26 @@ async def _run_campaign(campaign: dict, *, worker_id: Optional[str] = None) -> d
     for c in eligible:
         try:
             if campaign["channel"] == "email":
+                # Compliance footer + per-client unsubscribe link. The campaign
+                # `kind` classifies whether the unsubscribe link is offered
+                # (marketing) or hidden (transactional). Defaults to marketing.
+                from routers.campaign_extras import unsub_link_for, compliance_footer
+                kind = campaign.get("kind") or "marketing"
+                unsub = unsub_link_for(c["id"]) if kind == "marketing" else None
+                # `portal.login_link` merge value: absolute /patient-login URL.
+                origin = (os.environ.get("FRONTEND_ORIGIN") or "").rstrip("/")
+                ctx_extra = {"portal": {"login_link": f"{origin}/patient-login"}}
+                merged_ctx = {**_build_context(c), **ctx_extra}
+                html = _render_html(campaign["message"], c)
+                html = _fill_variables(html, ctx_extra)  # substitute {{portal.login_link}}
+                html += compliance_footer(unsub, kind == "marketing")
                 status = await send_email(
                     db, c["email"],
-                    _fill_variables(campaign.get("subject") or campaign["title"], _build_context(c)),
-                    _render_html(campaign["message"], c),
+                    _fill_variables(campaign.get("subject") or campaign["title"], merged_ctx),
+                    html,
                     plain_text=_render_plain(campaign["message"], c),
                     action="campaign.email",
-                    payload_metadata={"campaign_id": campaign["id"]},
+                    payload_metadata={"campaign_id": campaign["id"], "kind": kind},
                 )
             else:
                 status = await send_sms(
@@ -530,6 +572,56 @@ async def create_campaign(payload: CampaignIn, request: Request,
         await _run_campaign(claimed, worker_id=worker_id)
     doc = await db.campaigns.find_one({"id": doc["id"]})
     return _strip_id(doc)
+
+
+@api.patch("/campaigns/{campaign_id}")
+async def edit_campaign(campaign_id: str, payload: CampaignPatchIn, request: Request,
+                         user=Depends(require_roles("admin", "practitioner", "staff", "front_desk", "frontdesk"))):
+    """Edit a campaign — but ONLY while it is still a draft or a scheduled
+    campaign that has not begun sending. Once `sending`/`sent`/`failed`,
+    the content is locked (the `snapshot` field preserves the delivered copy).
+    """
+    c = await db.campaigns.find_one({"id": campaign_id})
+    if not c:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if c.get("status") not in ("draft", "scheduled", "paused"):
+        raise HTTPException(status_code=400, detail={
+            "code": "campaign_locked",
+            "message": "This campaign has already begun sending. Duplicate it to make changes.",
+        })
+    updates: dict = {}
+    if payload.title is not None:
+        updates["title"] = payload.title.strip()
+    if payload.subject is not None:
+        updates["subject"] = payload.subject.strip() or None
+    if payload.message is not None:
+        msg = payload.message
+        if c.get("channel") == "email" and msg.lstrip().startswith("<"):
+            msg = sanitize_campaign_html(msg)
+        updates["message"] = msg
+    if payload.filter_type is not None:
+        if payload.filter_type not in FILTER_TYPES:
+            raise HTTPException(status_code=400, detail={
+                "code": "invalid_filter_type", "allowed": list(FILTER_TYPES),
+            })
+        updates["filter_type"] = payload.filter_type
+    if payload.filter_params is not None:
+        updates["filter_params"] = payload.filter_params
+    if payload.schedule_at is not None:
+        updates["schedule_at"] = payload.schedule_at
+        updates["status"] = "scheduled"
+    if payload.kind is not None:
+        updates["kind"] = payload.kind
+    if not updates:
+        return _strip_id(c)
+    updates["updated_at"] = datetime.now(timezone.utc)
+    updates["updated_by"] = user["id"]
+    await db.campaigns.update_one({"id": campaign_id}, {"$set": updates})
+    await log_audit(db, user["id"], user["email"], "campaign.edit",
+                    resource_type="campaign", resource_id=campaign_id,
+                    metadata={"fields": list(updates.keys())},
+                    ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+    return _strip_id(await db.campaigns.find_one({"id": campaign_id}))
 
 
 @api.get("/campaigns")

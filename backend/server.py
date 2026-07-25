@@ -79,6 +79,7 @@ from routers import breakglass as _breakglass_routes  # noqa: F401
 from routers import delegations as _delegations_routes  # noqa: F401
 from routers import tasks as _tasks_routes  # noqa: F401
 from routers import lab_review as _lab_review_routes  # noqa: F401
+from routers import campaign_extras as _campaign_extras_routes  # noqa: F401 — registered BEFORE campaigns so /templates isn't shadowed by /{id}
 from routers import campaigns as _campaigns_routes  # noqa: F401
 from routers import accounting as _accounting_routes  # noqa: F401
 from routers import portal_ops as _portal_ops_routes  # noqa: F401
