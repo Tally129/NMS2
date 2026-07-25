@@ -705,3 +705,69 @@ password-reset token flow. Added on new endpoints and UX; nothing was rebuilt.
   `db.integration_log`.
 
 _Last updated: Jul 24, 2026 (Sprint 7 · Production-Ready Email Campaign Platform)_
+
+---
+
+## Sprint 8 — Legal & Policies Center (Jul 25, 2026)
+
+Goal: dedicated hub for every legal, privacy, HIPAA, and consent document with
+versioning, acceptance tracking, forced reacceptance, login/signup consent,
+and admin management.
+
+### Backend
+- **New router `routers/legal.py`** — collections `legal_policies` (with an
+  embedded `versions[]` array + `current_version`) and `legal_acceptances`
+  (immutable audit log per user × policy × version).
+- **Seeder**: idempotent boot task inserts v1.0 of all 9 required policies —
+  Terms of Use, Privacy Policy, HIPAA NPP, Financial Policy, Patient Portal
+  Terms, Telehealth Consent, Email & SMS Communications, Accessibility, Cookie
+  Policy. HTML bodies are run through the existing `sanitize_campaign_html`
+  allowlist before storage.
+- **Public endpoints (no auth)**: `GET /api/legal/policies`,
+  `GET /api/legal/policies/{slug}`, `GET /api/legal/policies/{slug}/versions`.
+- **Authenticated**: `POST /api/legal/acceptances`,
+  `GET /api/legal/acceptances/me`, `GET /api/legal/pending-reacceptance`.
+- **Admin**: `PATCH /api/legal/policies/{slug}`,
+  `POST /api/legal/policies/{slug}/versions` (marks previous as superseded,
+  optional `force_reacceptance`), `POST /api/legal/policies/{slug}/archive`,
+  `GET /api/legal/policies/{slug}/acceptance-stats`.
+
+### Frontend
+- **`/legal` hub** — 9 icon+title+description cards with version badge and
+  Last Updated date. Publicly accessible with a lightweight `PublicShell`
+  (site header + `LegalFooter`) for signed-out visitors; wraps in the
+  standard `PortalLayout` for authenticated users.
+- **`/legal/:slug` detail** — sticky auto-generated TOC (from h2/h3
+  headings), Print button, PDF button (disabled/"coming soon"), Back link,
+  Effective Date / Last Updated / version metadata.
+- **Login consent** — new 12-14px neutral-gray consent paragraph above the
+  Sign In button on every login variant with underlined links opening
+  `/legal/terms`, `/legal/hipaa`, `/legal/privacy` in a new tab so form
+  input is preserved.
+- **Signup checkboxes** — three required acknowledgments (Terms, HIPAA,
+  Privacy) with links opening the individual policy pages; the Create
+  Account button is disabled until all three are checked. On success, each
+  acceptance is posted to `/api/legal/acceptances` with the current
+  version and `method=signup_checkbox`.
+- **Reacceptance gate** — `<ReacceptancePolicyGate />` mounted globally in
+  App.js. On every authenticated mount it pulls
+  `/api/legal/pending-reacceptance` and shows a blocking modal titled
+  "We've updated our policies" until each pending policy is accepted.
+  Modal supports View Changes (inline), Read Full Policy (opens the
+  full page in a new tab), Accept & Continue.
+- **Sidebar** — Legal & Policies entry added to the Settings nav group
+  for patients.
+- **Footer** — new Legal column with links to Terms, Privacy, HIPAA,
+  Accessibility, Cookies, and mailto to the Privacy Officer.
+
+### Config / bookkeeping
+- Service worker `VERSION` bumped to `nms-v8-2026-07-24-legal-policies`.
+- Frontend routes: `/legal`, `/legal/:slug` — both public.
+
+### Not built (deferred)
+- Admin visual editor UI — reachable via the JSON API today; a dedicated
+  admin page can wrap it in a later sprint.
+- PDF export of individual policies — button present, disabled with a
+  hover tooltip "coming soon".
+
+_Last updated: Jul 25, 2026 (Sprint 8 · Legal & Policies Center)_

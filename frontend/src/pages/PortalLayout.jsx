@@ -39,6 +39,7 @@ import {
   BarChart3,
   Home,
   Search,
+  Scale,
 } from "lucide-react";
 import GlobalSearchPalette from "../components/GlobalSearchPalette";
 
@@ -72,6 +73,7 @@ const NAV = {
       items: [
         { to: "/portal/patient/account", label: "My Account", icon: UserCircle },
         { to: "/portal/patient/security", label: "Security", icon: ShieldCheck },
+        { to: "/legal", label: "Legal & Policies", icon: Scale },
       ],
     },
   ],

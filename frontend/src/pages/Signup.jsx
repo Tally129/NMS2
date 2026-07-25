@@ -9,6 +9,14 @@ import { ArrowLeft } from "lucide-react";
 import { useToast } from "../hooks/use-toast";
 import { useAuth, roleHome } from "../lib/auth";
 import { getErrorMessage } from "../lib/errors";
+import api from "../lib/api";
+import { Checkbox } from "../components/ui/checkbox";
+
+const REQUIRED_POLICIES = [
+  { slug: "terms",   label: "I have read and agree to the Terms of Use." },
+  { slug: "hipaa",   label: "I acknowledge receipt of the Notice of Privacy Practices." },
+  { slug: "privacy", label: "I have reviewed the Privacy Policy." },
+];
 
 export default function Signup() {
   const { toast } = useToast();
@@ -16,7 +24,21 @@ export default function Signup() {
   const { registerNew } = useAuth();
   const [form, setForm] = React.useState({ full_name: "", email: "", phone: "", password: "" });
   const [busy, setBusy] = React.useState(false);
+  const [acks, setAcks] = React.useState({ terms: false, hipaa: false, privacy: false });
+  const [policyVersions, setPolicyVersions] = React.useState({});
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
+
+  React.useEffect(() => {
+    // Fetch current versions of the required policies so we can record them
+    // at sign-up time. Public endpoint — no auth required.
+    api.get("/legal/policies").then((r) => {
+      const map = {};
+      (r.data || []).forEach((p) => { map[p.slug] = p.current_version; });
+      setPolicyVersions(map);
+    }).catch(() => {});
+  }, []);
+
+  const allAcked = REQUIRED_POLICIES.every((p) => acks[p.slug]);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -24,10 +46,23 @@ export default function Signup() {
       toast({ title: "Complete all fields", description: "Password must be at least 8 characters." });
       return;
     }
+    if (!allAcked) {
+      toast({ title: "Please acknowledge all required policies before continuing." });
+      return;
+    }
     setBusy(true);
     try {
       const { user } = await registerNew(form);
       toast({ title: "Welcome aboard", description: "Your client account has been created." });
+      // Record acknowledgments AFTER account creation — the axios interceptor
+      // now carries the bearer for the fresh session.
+      await Promise.all(REQUIRED_POLICIES.map((p) =>
+        api.post("/legal/acceptances", {
+          policy_slug: p.slug,
+          policy_version: policyVersions[p.slug] || "1.0",
+          method: "signup_checkbox",
+        }).catch(() => {})
+      ));
       navigate(roleHome(user.role), { replace: true });
     } catch (err) {
       toast({
@@ -77,7 +112,29 @@ export default function Signup() {
               className="mt-2 h-11 bg-[#f6f1e6] border-[#e0d6bc] rounded-lg" required minLength={8} autoComplete="new-password" />
           </div>
 
-          <Button type="submit" disabled={busy} className="btn-lift h-12 w-full rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]">
+          <div className="space-y-2 pt-2 border-t border-[#e7dfc9]">
+            <div className="text-[10px] uppercase tracking-widest text-[#8a6a3c] mb-1">Required acknowledgments</div>
+            {REQUIRED_POLICIES.map((p) => (
+              <label key={p.slug} className="flex items-start gap-2 text-xs text-[#3a3a3a]" data-testid={`signup-ack-${p.slug}`}>
+                <Checkbox
+                  checked={acks[p.slug]}
+                  onCheckedChange={(v) => setAcks((a) => ({ ...a, [p.slug]: !!v }))}
+                  className="mt-0.5"
+                  data-testid={`signup-ack-checkbox-${p.slug}`}
+                />
+                <span>
+                  {p.label.replace(/Terms of Use|Notice of Privacy Practices|Privacy Policy/, (m) => m)
+                    .split(/(Terms of Use|Notice of Privacy Practices|Privacy Policy)/g).map((chunk, i) => (
+                      /Terms of Use|Notice of Privacy Practices|Privacy Policy/.test(chunk)
+                        ? <Link key={i} to={`/legal/${p.slug}`} target="_blank" rel="noopener noreferrer" className="underline hover:text-[#2f6a4a]">{chunk}</Link>
+                        : chunk
+                  ))}
+                </span>
+              </label>
+            ))}
+          </div>
+
+          <Button type="submit" disabled={busy || !allAcked} className="btn-lift h-12 w-full rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6] disabled:opacity-60" data-testid="signup-submit">
             {busy ? "Creating…" : "Create Account"}
           </Button>
 

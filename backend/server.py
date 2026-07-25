@@ -83,6 +83,7 @@ from routers import campaign_extras as _campaign_extras_routes  # noqa: F401 —
 from routers import campaigns as _campaigns_routes  # noqa: F401
 from routers import accounting as _accounting_routes  # noqa: F401
 from routers import portal_ops as _portal_ops_routes  # noqa: F401
+from routers import legal as _legal_routes  # noqa: F401
 
 # Startup config safety validation (fail-fast in HIPAA_MODE)
 from security_config import enforce_production_config
@@ -612,6 +613,13 @@ async def seed_demo():
         # Correct it on boot without wiping the record so audit history is preserved.
         await db.users.update_one({"id": ma_doc["id"]}, {"$set": {"role": "medical_assistant"}})
         logger.info("Self-healed medical assistant role for ma@natmedsol.local.")
+
+    # Legal & Policies: seed the nine default policies (idempotent).
+    try:
+        from routers.legal import seed_default_policies
+        await seed_default_policies()
+    except Exception as _e:
+        logger.exception("Legal policies seed failed: %s", _e)
 
     # Accounting: seed chart-of-accounts + ensure indexes.
     try:

@@ -59,6 +59,9 @@ import OAuthComplete from "./pages/OAuthComplete";
 import MfaChallenge from "./pages/MfaChallenge";
 import ChangePassword from "./pages/ChangePassword";
 import Unsubscribe from "./pages/Unsubscribe";
+import LegalHub from "./pages/LegalHub";
+import LegalPolicyPage from "./pages/LegalPolicyPage";
+import ReacceptancePolicyGate from "./components/ReacceptancePolicyGate";
 import StaffDashboard from "./pages/staff/StaffDashboard";
 import { Toaster } from "./components/ui/toaster";
 import { AuthProvider } from "./lib/auth";
@@ -81,6 +84,7 @@ function App() {
           <AuthProvider>
           <PushOptInBanner />
           <SessionTimeout />
+          <ReacceptancePolicyGate />
           {/* Shared role sets are defined at module scope above. */}
           <Routes>
             {/* Public marketing */}
@@ -94,6 +98,9 @@ function App() {
             <Route path="/mfa-challenge" element={<MfaChallenge />} />
             <Route path="/change-password" element={<Protected><ChangePassword /></Protected>} />
             <Route path="/unsubscribe" element={<Unsubscribe />} />
+            {/* Legal & Policies (publicly readable) */}
+            <Route path="/legal" element={<LegalHub />} />
+            <Route path="/legal/:slug" element={<LegalPolicyPage />} />
 
             {/* Portal redirect */}
             <Route path="/portal" element={<PortalIndex />} />

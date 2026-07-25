@@ -205,6 +205,21 @@ export default function AuthCard({
                 />
               </div>
             )}
+            <p className="text-[12px] text-slate-500 leading-relaxed" data-testid="login-legal-consent">
+              By signing in, you agree to the{" "}
+              <Link to="/legal/terms" target="_blank" rel="noopener noreferrer"
+                    className="underline hover:text-[#2f6a4a]" data-testid="login-terms-link">
+                Terms of Use
+              </Link>, acknowledge our{" "}
+              <Link to="/legal/hipaa" target="_blank" rel="noopener noreferrer"
+                    className="underline hover:text-[#2f6a4a]" data-testid="login-hipaa-link">
+                Notice of Privacy Practices
+              </Link>, and understand our{" "}
+              <Link to="/legal/privacy" target="_blank" rel="noopener noreferrer"
+                    className="underline hover:text-[#2f6a4a]" data-testid="login-privacy-link">
+                Privacy Policy
+              </Link>.
+            </p>
             <Button
               type="submit" disabled={busy}
               className="btn-lift h-12 w-full rounded-full bg-[#2f6a4a] hover:bg-[#265739] text-white shadow-sm transition-all"

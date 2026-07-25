@@ -37,6 +37,17 @@ export default function Footer() {
             <li><Link to="/login" className="text-[#3a3a3a] hover:text-[#2f4a3a]">Patient Portal</Link></li>
           </ul>
         </div>
+        <div>
+          <div className="eyebrow text-[#8a6a3c]">Legal</div>
+          <ul className="mt-3 space-y-2 text-sm" data-testid="footer-legal">
+            <li><Link to="/legal/terms" className="text-[#3a3a3a] hover:text-[#2f4a3a]">Terms of Use</Link></li>
+            <li><Link to="/legal/privacy" className="text-[#3a3a3a] hover:text-[#2f4a3a]">Privacy Policy</Link></li>
+            <li><Link to="/legal/hipaa" className="text-[#3a3a3a] hover:text-[#2f4a3a]">Notice of Privacy Practices</Link></li>
+            <li><Link to="/legal/accessibility" className="text-[#3a3a3a] hover:text-[#2f4a3a]">Accessibility</Link></li>
+            <li><Link to="/legal/cookies" className="text-[#3a3a3a] hover:text-[#2f4a3a]">Cookie Policy</Link></li>
+            <li><a href="mailto:privacy@natmedsol.com" className="text-[#3a3a3a] hover:text-[#2f4a3a]">Contact Privacy Officer</a></li>
+          </ul>
+        </div>
       </div>
       <div className="border-t border-[#e7dfc9]">
         <div className="max-w-6xl mx-auto px-6 py-4 text-xs text-[#7a7a7a] flex flex-col md:flex-row justify-between items-center gap-2">
