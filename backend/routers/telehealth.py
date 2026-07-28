@@ -778,8 +778,8 @@ In-call chat transcript:
 Produce a SOAP draft as STRICT JSON only — no commentary."""
         try:
             response = await complete_text(sys_msg, prompt, session_id=f"soap-{appt_id}")
-        except RuntimeError:
-            raise HTTPException(status_code=503, detail="LLM key not configured (set ANTHROPIC_API_KEY)")
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail={"code": str(exc)})
         # Robust JSON extraction
         import json as _json
         import re as _re

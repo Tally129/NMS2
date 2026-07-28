@@ -277,14 +277,16 @@ class TestAutoDraft:
 class TestLlmSoap:
     @pytest.mark.slow
     def test_llm_returns_soap(self, admin_headers, telehealth_appt):
-        if not os.environ.get("EMERGENT_LLM_KEY"):
-            pytest.skip("EMERGENT_LLM_KEY not set")
+        import llm_client
+        if llm_client.provider() != "bedrock":
+            pytest.skip("Bedrock not configured in this environment")
         r = requests.post(f"{API}/visits/{telehealth_appt['id']}/llm-soap",
                           headers=admin_headers, timeout=90)
         assert r.status_code == 200, r.text
         d = r.json()
         assert d.get("source") == "llm"
-        assert "claude-sonnet-4-5" in d.get("model", "")
+        # Model id echoes BEDROCK_MODEL_ID; presence of the string is enough.
+        assert (d.get("model") or "") != ""
         # At least one section non-empty
         nonempty = sum(1 for k in ("subjective", "objective", "assessment", "plan")
                        if (d.get(k) or "").strip())

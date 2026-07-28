@@ -773,3 +773,56 @@ and admin management.
   hover tooltip "coming soon".
 
 _Last updated: Jul 25, 2026 (Sprint 8 · Legal & Policies Center)_
+
+---
+
+## Sprint 9 · Bedrock AI Standardization (Feb 28, 2026)
+
+### Scope (Parts 1–6 of the AI sprint charter — backend foundation only)
+Removed all Anthropic direct and Emergent LLM proxy support. Amazon Bedrock
+is now the only AI provider. The application authenticates to Bedrock via
+the EC2 instance IAM role — no static AWS credentials anywhere.
+
+### Changes
+- **backend/llm_client.py** — rewritten. Bedrock Converse API (with legacy
+  `invoke_model` fallback), `asyncio.to_thread` dispatch, safe error
+  categories, provider health strings (`bedrock`/`disabled`/`misconfigured`
+  /`unavailable`). Kept `complete_text()` signature and
+  `DEFAULT_ANTHROPIC_MODEL` alias so existing callers (telehealth, forms,
+  protocols, document, supplements) work unchanged.
+- **backend/llm_client.py** — added `PromptTemplate` + `run_template()` +
+  `safe_extract_json()` helpers so future AI features add a template, not
+  new infrastructure.
+- **backend/.env / .env.example** — removed `ANTHROPIC_API_KEY`,
+  `EMERGENT_LLM_KEY`, `ANTHROPIC_MODEL`. Added `AI_ENABLED`,
+  `AI_PROVIDER=bedrock`, `AWS_REGION`, `BEDROCK_MODEL_ID`,
+  `AI_REQUEST_TIMEOUT_SECONDS`.
+- **backend/BEDROCK_SETUP.md** — new. Least-privilege IAM policy
+  (`bedrock:InvokeModel` + `bedrock:Converse` scoped to model ARN), manual
+  AWS steps (model access approval), verification curl.
+- **backend/routers/telehealth.py** — safe 503 error code on AI failure.
+- **backend/routers/forms_protocols.py** — safe 503 error code on AI
+  failure (5 occurrences).
+- **backend/routers/compliance.py** — BAA checklist now lists Amazon
+  Bedrock instead of Anthropic; Emergent migration row demoted to optional.
+- **backend/tests/test_bedrock_ai.py** — new. 18 focused hermetic tests
+  covering provider reporting, complete_text signature, fail-closed on
+  disabled/misconfigured/wrong provider, event-loop non-blocking, safe
+  error mapping, absence of legacy providers, no static-cred requirement,
+  safe logging (no PHI in log records), fence-aware JSON extraction, and
+  the `PromptTemplate` helper.
+- **backend/tests/test_iter16_phase16.py** and **test_phase7.py** —
+  updated to skip live-AI tests when Bedrock is not configured, and to
+  accept the new health status values.
+
+### IAM / manual AWS work required
+Attach the IAM policy in `BEDROCK_SETUP.md` to the EC2 instance profile,
+enable Bedrock model access for the target region/model, then set
+`BEDROCK_MODEL_ID` in `backend/.env`.
+
+### Not built (out of scope for this task per user)
+- Lab Review AI endpoint / UI
+- Marketing Assistant endpoint / UI
+- Frontend AI health panel
+
+_Last updated: Feb 28, 2026 (Sprint 9 · Bedrock AI Standardization)_

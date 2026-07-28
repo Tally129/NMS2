@@ -103,7 +103,7 @@ async def _llm_form_transcribe(text: str, hint_category: Optional[str] = None) -
             session_id=f"form-transcribe-{new_id()[:8]}",
         )
     except RuntimeError:
-        raise HTTPException(status_code=503, detail="LLM key not configured (set ANTHROPIC_API_KEY)")
+        raise HTTPException(status_code=503, detail={"code": "ai_unavailable", "message": "AI service is unavailable."})
 
     import re as _re
     m = _re.search(r"\{.*\}", response, _re.DOTALL)
@@ -656,7 +656,7 @@ async def _llm_protocol_transcribe(source_text: str, hint_title: Optional[str] =
             session_id=f"protocol-transcribe-{new_id()[:8]}",
         )
     except RuntimeError:
-        raise HTTPException(status_code=503, detail="LLM key not configured (set ANTHROPIC_API_KEY)")
+        raise HTTPException(status_code=503, detail={"code": "ai_unavailable", "message": "AI service is unavailable."})
 
     import re as _re
     m = _re.search(r"\{.*\}", response, _re.DOTALL)
@@ -757,7 +757,7 @@ async def _llm_classify_document(text: str) -> dict:
             session_id=f"doc-classify-{new_id()[:8]}",
         )
     except RuntimeError:
-        raise HTTPException(status_code=503, detail="LLM key not configured (set ANTHROPIC_API_KEY)")
+        raise HTTPException(status_code=503, detail={"code": "ai_unavailable", "message": "AI service is unavailable."})
 
     import re as _re
     m = _re.search(r"\{.*\}", response, _re.DOTALL)
@@ -832,7 +832,7 @@ async def _llm_soap_template_extract(text: str, hint_title: Optional[str] = None
             session_id=f"soap-extract-{new_id()[:8]}",
         )
     except RuntimeError:
-        raise HTTPException(status_code=503, detail="LLM key not configured (set ANTHROPIC_API_KEY)")
+        raise HTTPException(status_code=503, detail={"code": "ai_unavailable", "message": "AI service is unavailable."})
     import re as _re
     m = _re.search(r"\{.*\}", response, _re.DOTALL)
     if not m:
@@ -864,7 +864,7 @@ async def _llm_supplement_extract(text: str, hint_title: Optional[str] = None) -
             session_id=f"supp-extract-{new_id()[:8]}",
         )
     except RuntimeError:
-        raise HTTPException(status_code=503, detail="LLM key not configured (set ANTHROPIC_API_KEY)")
+        raise HTTPException(status_code=503, detail={"code": "ai_unavailable", "message": "AI service is unavailable."})
     import re as _re
     m = _re.search(r"\{.*\}", response, _re.DOTALL)
     if not m:

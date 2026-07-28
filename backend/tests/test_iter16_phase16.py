@@ -57,9 +57,12 @@ class TestHealthIntegrations:
         integ = data["integrations"]
         assert "llm" in integ and "email" in integ and "sms" in integ and "google_oauth_direct" in integ
 
-    def test_health_llm_is_emergent_proxy_fallback(self):
+    def test_health_llm_reports_bedrock_status(self):
         r = requests.get(f"{BASE_URL}/api/health", timeout=15)
-        assert r.json()["integrations"]["llm"] == "emergent_proxy"
+        # Only 4 possible values now; no legacy provider strings should appear.
+        assert r.json()["integrations"]["llm"] in {
+            "bedrock", "disabled", "misconfigured", "unavailable",
+        }
 
     def test_health_email_is_sent_stub(self):
         r = requests.get(f"{BASE_URL}/api/health", timeout=15)
@@ -95,7 +98,15 @@ class TestGoogleOAuthDirect:
 
 # ========== 3. LLM ABSTRACTION (forms + protocols transcribe) ==========
 class TestLlmAbstraction:
+    def _skip_if_bedrock_offline(self):
+        import sys
+        sys.path.insert(0, "/app/backend")
+        import llm_client
+        if llm_client.provider() != "bedrock":
+            pytest.skip("Bedrock not configured in this environment")
+
     def test_forms_transcribe_via_llm_client(self, practitioner_headers):
+        self._skip_if_bedrock_offline()
         # Send a small text "file" as UploadFile — router extracts text and pipes to complete_text()
         content = (
             "Patient consent form. Patient name is required. "
@@ -107,13 +118,14 @@ class TestLlmAbstraction:
             f"{BASE_URL}/api/forms/transcribe",
             headers=practitioner_headers, files=files, timeout=90,
         )
-        # Must return 200 (proves llm_client.complete_text routed through emergent proxy)
+        # Must return 200 (proves llm_client.complete_text routed through Bedrock)
         assert r.status_code == 200, f"forms/transcribe failed: {r.status_code} {r.text[:400]}"
         data = r.json()
         # Structured schema — must contain the parsed fields OR at least be a dict
         assert isinstance(data, dict)
 
     def test_protocols_transcribe_via_llm_client(self, practitioner_headers):
+        self._skip_if_bedrock_offline()
         content = (
             "Detox protocol: 4 weeks. Weekly meal plan. Drink lemon water. "
             "Avoid dairy and gluten. Take supplements: milk thistle, activated charcoal."
