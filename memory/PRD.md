@@ -879,3 +879,80 @@ point. All future AI features will plug in the same way: define a
   Bedrock client, no per-feature service class.
 
 _Last updated: Feb 28, 2026 (Sprint 9.1 · Bedrock AI Features)_
+
+---
+
+## Sprint 10A · AI Frontend Integration (Feb 28, 2026)
+
+### Scope (frontend only — no backend changes)
+Wired the Sprint 9.1 AI endpoints into the existing Lab Review Queue and
+Campaign Center. Zero new pages, zero new navigation, zero chat interfaces.
+Built a tiny set of reusable AI primitives so every future AI feature
+(SOAP drafting, treatment plans, referral letters, insurance appeals, etc.)
+can drop into any workflow with the same look, error handling, and
+disclaimer behavior.
+
+### Reusable AI primitives in `frontend/src/components/ai/`
+- `AiGenerateButton.jsx` — purple pill button with sparkles icon and
+  loading state. Same trigger for every AI action across the app.
+- `AiLoadingOverlay.jsx` — feature-agnostic "Generating AI draft…" panel.
+- `AiDisclaimerBanner.jsx` — the mandatory yellow "human review required"
+  banner. `role="provider"` on clinical output, `role="human"` on marketing.
+- `AiDraftBadge.jsx` — the "✨ AI Draft" chip with tooltip
+  "Generated using Amazon Bedrock. Requires human review before use."
+- `AiDraftModal.jsx` — generic modal shell (title, disclaimer, sections,
+  actions) — Lab Review uses it directly; future features plug in the
+  same way.
+- `aiErrors.js` — safe Bedrock error-code → toast translator.
+- `index.js` — barrel exports.
+
+### Feature integrations (existing pages extended, not replaced)
+- **`pages/portal/LabReviewQueue.jsx`** — added an "AI Review" button on
+  every row (`data-testid="lab-ai-review-{id}"`), an AI modal that
+  renders all seven sections (Summary, Abnormal findings, Trends,
+  Clinical considerations, Patient-friendly explanation, Suggested
+  follow-up questions, Limitations), Copy / Regenerate / Close /
+  Insert-into-Review-Note actions, and a `_aiPrefill` hook on the
+  existing `ReviewDialog` so the draft populates the notes textarea for
+  the provider to edit before saving via the existing review-status
+  workflow.
+- **`pages/portal/CampaignCenter.jsx`** — added a "Draft with AI" button
+  next to the "Show preview" toggle in the composer, plus a
+  `CampaignAiPanel` that opens in a nested dialog, submits only business
+  context to `POST /api/campaigns/ai-draft`, and (on confirmation)
+  populates the existing subject + RichTextEditor / plain-text field.
+
+### Guardrails preserved
+- Nothing auto-saves. Nothing auto-sends. Nothing auto-publishes.
+- Every draft displays the mandatory disclaimer via `AiDisclaimerBanner`.
+- Bedrock error codes (`bedrock_unavailable`, `bedrock_misconfigured`,
+  `request_timeout`, `invalid_model_response`, `model_access_denied`,
+  `ai_disabled`) translate to user-safe toasts via a single mapper.
+- No raw AWS internals are surfaced — verified by unit tests.
+
+### Tests
+- Backend: 36 hermetic unit tests pass (Sprint 9 + 9.1 unchanged).
+- Frontend: `components/ai/aiErrors.test.js` — 6 focused tests covering
+  every Bedrock error code mapping and the fallback case. Passes under
+  `craco test`.
+- Live smoke tested via Playwright: 5 "AI Review" buttons render on the
+  lab queue; the "Draft with AI" panel opens with all form fields.
+
+### Files added
+- `frontend/src/components/ai/AiDraftBadge.jsx`
+- `frontend/src/components/ai/AiGenerateButton.jsx`
+- `frontend/src/components/ai/AiLoadingOverlay.jsx`
+- `frontend/src/components/ai/AiDisclaimerBanner.jsx`
+- `frontend/src/components/ai/AiDraftModal.jsx`
+- `frontend/src/components/ai/aiErrors.js`
+- `frontend/src/components/ai/aiErrors.test.js`
+- `frontend/src/components/ai/index.js`
+
+### Files modified
+- `frontend/src/pages/portal/LabReviewQueue.jsx`
+- `frontend/src/pages/portal/CampaignCenter.jsx`
+- `backend/tests/test_bedrock_features.py` (preload router modules at
+  collection time to keep hermetic tests hermetic when run after
+  `test_bedrock_ai.py`)
+
+_Last updated: Feb 28, 2026 (Sprint 10A · AI Frontend Integration)_

@@ -18,6 +18,10 @@ import {
 import { useToast } from "../../hooks/use-toast";
 import { getErrorMessage } from "../../lib/errors";
 import RichTextEditor, { fillVariables } from "../../components/RichTextEditor";
+import {
+  AiGenerateButton, AiLoadingOverlay, AiDisclaimerBanner, AiSectionCard,
+  showAiErrorToast,
+} from "../../components/ai";
 
 // Preview merge-field context — realistic placeholder values so template
 // authors can visualize the final email/SMS without touching real patient data.
@@ -378,6 +382,7 @@ function NewCampaignDialog({ open, onOpenChange, onSent, initial }) {
   const [estimating, setEstimating] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [showPreview, setShowPreview] = React.useState(false);
+  const [showAiPanel, setShowAiPanel] = React.useState(false);
 
   const filterConfig = FILTER_TYPES.find((f) => f.value === form.filter_type);
 
@@ -497,14 +502,22 @@ function NewCampaignDialog({ open, onOpenChange, onSent, initial }) {
           <div>
             <div className="flex items-center justify-between">
               <Label>{form.channel === "email" ? "Message (rich text)" : "Message (plain text)"}</Label>
-              <button
-                type="button"
-                onClick={() => setShowPreview((v) => !v)}
-                className="text-xs text-[#2f6a4a] hover:underline"
-                data-testid="campaign-preview-toggle"
-              >
-                {showPreview ? "Hide preview" : "Show preview"}
-              </button>
+              <div className="flex items-center gap-2">
+                <AiGenerateButton
+                  onClick={() => setShowAiPanel(true)}
+                  label="Draft with AI"
+                  testid="campaign-ai-open"
+                  className="h-7 text-xs"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPreview((v) => !v)}
+                  className="text-xs text-[#2f6a4a] hover:underline"
+                  data-testid="campaign-preview-toggle"
+                >
+                  {showPreview ? "Hide preview" : "Show preview"}
+                </button>
+              </div>
             </div>
             {form.channel === "email" ? (
               <div className="mt-1">
@@ -601,6 +614,383 @@ function NewCampaignDialog({ open, onOpenChange, onSent, initial }) {
               ? (<><Clock size={13} className="mr-1" /> Schedule</>)
               : (<><Send size={13} className="mr-1" /> Send now</>))}
           </Button>
+        </DialogFooter>
+      </DialogContent>
+      <CampaignAiPanel
+        open={showAiPanel}
+        onOpenChange={setShowAiPanel}
+        channel={form.channel}
+        onInsertHtml={(html) => setForm((p) => ({ ...p, message: html }))}
+        onInsertSubject={(subj) => setForm((p) => ({ ...p, subject: subj }))}
+        onInsertPlain={(txt) => setForm((p) => ({ ...p, message: txt }))}
+      />
+    </Dialog>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+//  Marketing AI draft panel.
+//  Renders inside the New Campaign dialog. Sends only business context to
+//  the backend — never touches patient records or recipient lists.
+// ---------------------------------------------------------------------------
+
+const AI_CONTENT_TYPES = [
+  { value: "social_post", label: "Social post" },
+  { value: "social_series", label: "Social series" },
+  { value: "email", label: "Email" },
+  { value: "email_sequence", label: "Email sequence" },
+  { value: "sms", label: "SMS" },
+  { value: "blog_outline", label: "Blog outline" },
+  { value: "blog_article", label: "Blog article" },
+  { value: "landing_page", label: "Landing page" },
+  { value: "ad_copy", label: "Ad copy" },
+  { value: "content_calendar", label: "Content calendar" },
+  { value: "short_video_script", label: "Short video script" },
+  { value: "patient_education", label: "Patient education" },
+  { value: "service_description", label: "Service description" },
+  { value: "faq", label: "FAQ" },
+  { value: "promotion", label: "Promotion" },
+  { value: "campaign_strategy", label: "Campaign strategy" },
+];
+
+function CampaignAiPanel({
+  open, onOpenChange, channel,
+  onInsertHtml, onInsertSubject, onInsertPlain,
+}) {
+  const { toast } = useToast();
+  const [form, setForm] = React.useState({
+    content_type: channel === "sms" ? "sms" : "email",
+    service_or_topic: "",
+    audience: "",
+    platform: "",
+    tone: "warm",
+    objective: "",
+    call_to_action: "",
+    instructions: "",
+  });
+  const [loading, setLoading] = React.useState(false);
+  const [draft, setDraft] = React.useState(null);
+  const [selectedVariation, setSelectedVariation] = React.useState(0);
+
+  React.useEffect(() => {
+    if (open) {
+      setForm((p) => ({
+        ...p,
+        content_type: channel === "sms" ? "sms" : (p.content_type || "email"),
+      }));
+      setDraft(null);
+      setSelectedVariation(0);
+    }
+  }, [open, channel]);
+
+  const generate = async () => {
+    if (!form.service_or_topic.trim()) {
+      toast({ title: "Add a service or topic first." });
+      return;
+    }
+    setLoading(true);
+    setDraft(null);
+    try {
+      const r = await api.post("/campaigns/ai-draft", {
+        content_type: form.content_type,
+        service_or_topic: form.service_or_topic.trim(),
+        audience: form.audience || undefined,
+        platform: form.platform || undefined,
+        tone: form.tone || undefined,
+        objective: form.objective || undefined,
+        call_to_action: form.call_to_action || undefined,
+        compliance_notes: form.instructions || undefined,
+        number_of_variations: 3,
+      });
+      setDraft(r.data);
+      setSelectedVariation(0);
+    } catch (e) {
+      showAiErrorToast(e, toast);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const activeCopy = React.useMemo(() => {
+    if (!draft) return "";
+    const variations = Array.isArray(draft.variations) ? draft.variations : [];
+    if (variations.length > 0 && variations[selectedVariation]) {
+      return variations[selectedVariation];
+    }
+    return draft.draft || "";
+  }, [draft, selectedVariation]);
+
+  const insertIntoEditor = () => {
+    if (!draft) return;
+    const copy = activeCopy;
+    if (form.content_type === "sms" || channel === "sms") {
+      onInsertPlain?.(copy);
+    } else {
+      const html = copy
+        .split(/\n\n+/)
+        .map((para) =>
+          `<p>${para
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/\n/g, "<br/>")}</p>`,
+        )
+        .join("");
+      onInsertHtml?.(html);
+    }
+    if (channel !== "sms" && Array.isArray(draft.subject_lines) && draft.subject_lines.length > 0) {
+      onInsertSubject?.(draft.subject_lines[0]);
+    }
+    toast({ title: "Draft inserted — review and edit before sending." });
+    onOpenChange(false);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        className="bg-white max-w-xl max-h-[85vh] overflow-y-auto"
+        data-testid="campaign-ai-panel"
+      >
+        <DialogHeader>
+          <DialogTitle className="font-display text-2xl">Draft with AI</DialogTitle>
+          <DialogDescription>
+            Business context only — no patient records, recipient lists, or PHI are sent.
+          </DialogDescription>
+        </DialogHeader>
+
+        <AiDisclaimerBanner role="human" className="mb-3" />
+
+        {!draft && !loading && (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label>Content type</Label>
+                <Select
+                  value={form.content_type}
+                  onValueChange={(v) => setForm({ ...form, content_type: v })}
+                >
+                  <SelectTrigger data-testid="campaign-ai-content-type" className="mt-1">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {AI_CONTENT_TYPES.map((c) => (
+                      <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label>Tone</Label>
+                <Input
+                  value={form.tone}
+                  onChange={(e) => setForm({ ...form, tone: e.target.value })}
+                  placeholder="warm, energetic, calm…"
+                  className="mt-1"
+                  data-testid="campaign-ai-tone"
+                />
+              </div>
+            </div>
+
+            <div>
+              <Label>Service or topic</Label>
+              <Input
+                value={form.service_or_topic}
+                onChange={(e) => setForm({ ...form, service_or_topic: e.target.value })}
+                placeholder="e.g. IV hydration package, thyroid support consult"
+                className="mt-1"
+                data-testid="campaign-ai-service"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label>Audience</Label>
+                <Input
+                  value={form.audience}
+                  onChange={(e) => setForm({ ...form, audience: e.target.value })}
+                  placeholder="e.g. busy professionals, athletes"
+                  className="mt-1"
+                  data-testid="campaign-ai-audience"
+                />
+              </div>
+              <div>
+                <Label>Platform</Label>
+                <Input
+                  value={form.platform}
+                  onChange={(e) => setForm({ ...form, platform: e.target.value })}
+                  placeholder="Instagram, email, blog…"
+                  className="mt-1"
+                  data-testid="campaign-ai-platform"
+                />
+              </div>
+            </div>
+
+            <div>
+              <Label>Objective</Label>
+              <Input
+                value={form.objective}
+                onChange={(e) => setForm({ ...form, objective: e.target.value })}
+                placeholder="Book weekend consultations, promote fall detox…"
+                className="mt-1"
+                data-testid="campaign-ai-objective"
+              />
+            </div>
+
+            <div>
+              <Label>Call to action</Label>
+              <Input
+                value={form.call_to_action}
+                onChange={(e) => setForm({ ...form, call_to_action: e.target.value })}
+                placeholder="Book now, Learn more, Reply YES to schedule…"
+                className="mt-1"
+                data-testid="campaign-ai-cta"
+              />
+            </div>
+
+            <div>
+              <Label>Optional instructions</Label>
+              <Textarea
+                value={form.instructions}
+                onChange={(e) => setForm({ ...form, instructions: e.target.value })}
+                placeholder="Any compliance notes or specific angles to include or avoid."
+                rows={2}
+                data-testid="campaign-ai-instructions"
+              />
+            </div>
+          </div>
+        )}
+
+        {loading && <AiLoadingOverlay />}
+
+        {draft && !loading && (
+          <div className="space-y-3">
+            {draft.title ? (
+              <AiSectionCard title="Title" testid="campaign-ai-title">
+                {draft.title}
+              </AiSectionCard>
+            ) : null}
+
+            {Array.isArray(draft.variations) && draft.variations.length > 1 ? (
+              <div className="rounded-lg border border-[#e2ebe4] bg-[#f7fbf8] p-3">
+                <div className="eyebrow text-[#3d6b52] mb-2 text-[11px] uppercase tracking-wider font-medium">
+                  Variations
+                </div>
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {draft.variations.map((_, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setSelectedVariation(i)}
+                      className={`text-xs rounded-full px-3 py-1 border ${
+                        i === selectedVariation
+                          ? "bg-[#5a3a8a] text-white border-[#5a3a8a]"
+                          : "bg-white text-slate-600 border-[#d9e2db] hover:bg-slate-50"
+                      }`}
+                      data-testid={`campaign-ai-variation-${i}`}
+                    >
+                      Version {i + 1}
+                    </button>
+                  ))}
+                </div>
+                <div className="text-sm text-slate-700 whitespace-pre-wrap max-h-60 overflow-y-auto"
+                     data-testid="campaign-ai-active-variation">
+                  {activeCopy}
+                </div>
+              </div>
+            ) : (
+              <AiSectionCard title="Draft" testid="campaign-ai-draft">
+                {draft.draft || null}
+              </AiSectionCard>
+            )}
+
+            {Array.isArray(draft.subject_lines) && draft.subject_lines.length > 0 ? (
+              <AiSectionCard title="Subject lines" testid="campaign-ai-subjects">
+                <ul className="list-disc pl-5 space-y-1">
+                  {draft.subject_lines.map((s, i) => <li key={i}>{s}</li>)}
+                </ul>
+              </AiSectionCard>
+            ) : null}
+
+            {Array.isArray(draft.calls_to_action) && draft.calls_to_action.length > 0 ? (
+              <AiSectionCard title="Calls to action" testid="campaign-ai-ctas">
+                <ul className="list-disc pl-5 space-y-1">
+                  {draft.calls_to_action.map((s, i) => <li key={i}>{s}</li>)}
+                </ul>
+              </AiSectionCard>
+            ) : null}
+
+            {Array.isArray(draft.hashtags) && draft.hashtags.length > 0 ? (
+              <AiSectionCard title="Hashtags" testid="campaign-ai-hashtags">
+                <div className="flex flex-wrap gap-1.5">
+                  {draft.hashtags.map((h, i) => (
+                    <span key={i} className="text-xs rounded-full bg-[#eaf2ec] text-[#3d6b52] px-2 py-0.5">
+                      {h.startsWith("#") ? h : `#${h}`}
+                    </span>
+                  ))}
+                </div>
+              </AiSectionCard>
+            ) : null}
+
+            {Array.isArray(draft.compliance_notes) && draft.compliance_notes.length > 0 ? (
+              <AiSectionCard title="Compliance notes" testid="campaign-ai-compliance">
+                <ul className="list-disc pl-5 space-y-1">
+                  {draft.compliance_notes.map((s, i) => <li key={i}>{s}</li>)}
+                </ul>
+              </AiSectionCard>
+            ) : null}
+          </div>
+        )}
+
+        <DialogFooter className="mt-3">
+          <Button
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            className="rounded-full border-[#d9e2db]"
+            data-testid="campaign-ai-close"
+          >
+            Close
+          </Button>
+          {draft ? (
+            <>
+              <Button
+                variant="outline" size="sm"
+                onClick={() => {
+                  navigator.clipboard?.writeText(activeCopy);
+                  toast({ title: "Copied to clipboard" });
+                }}
+                className="rounded-full border-[#d9e2db]"
+                data-testid="campaign-ai-copy"
+              >
+                Copy
+              </Button>
+              <Button
+                variant="outline" size="sm"
+                onClick={generate}
+                disabled={loading}
+                className="rounded-full border-[#d9e2db]"
+                data-testid="campaign-ai-regenerate"
+              >
+                Regenerate
+              </Button>
+              <Button
+                size="sm"
+                onClick={insertIntoEditor}
+                disabled={loading}
+                className="rounded-full bg-[#5a3a8a] hover:bg-[#4a2a7a] text-white"
+                data-testid="campaign-ai-insert"
+              >
+                Insert into editor
+              </Button>
+            </>
+          ) : (
+            <AiGenerateButton
+              onClick={generate}
+              loading={loading}
+              label="Generate draft"
+              testid="campaign-ai-generate"
+            />
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

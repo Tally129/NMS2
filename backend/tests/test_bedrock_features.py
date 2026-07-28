@@ -28,6 +28,13 @@ BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
+# Preload the router modules at collection time so their `asyncio.Lock()` etc.
+# is created while pytest still has a live event loop. Tests in this file
+# only inspect helpers on the already-imported modules; they never re-import
+# them under a reloaded llm_client.
+from routers import lab_review as _lab_review_module  # noqa: E402, F401
+from routers import campaigns as _campaigns_module    # noqa: E402, F401
+
 
 # --- Lab-review prompt builder ------------------------------------------- #
 

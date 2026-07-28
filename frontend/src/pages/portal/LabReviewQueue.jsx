@@ -17,6 +17,9 @@ import {
 } from "lucide-react";
 import { useToast } from "../../hooks/use-toast";
 import { getErrorMessage } from "../../lib/errors";
+import {
+  AiGenerateButton, AiDraftModal, AiSectionCard, showAiErrorToast,
+} from "../../components/ai";
 
 const REVIEW_STATUSES = [
   { value: "new", label: "New", color: "bg-[#eaf2ec] text-[#3d6b52]" },
@@ -38,6 +41,30 @@ export default function LabReviewQueue() {
   const [q, setQ] = React.useState("");
   const [selected, setSelected] = React.useState(null);
   const [creatingTask, setCreatingTask] = React.useState(null);
+  const [aiLab, setAiLab] = React.useState(null);      // lab being AI-reviewed
+  const [aiDraft, setAiDraft] = React.useState(null);  // structured response
+  const [aiLoading, setAiLoading] = React.useState(false);
+  const [aiError, setAiError] = React.useState(null);
+
+  const runAiReview = React.useCallback(async (lab) => {
+    setAiLab(lab);
+    setAiDraft(null);
+    setAiError(null);
+    setAiLoading(true);
+    try {
+      const r = await api.post(`/labs/${lab.id}/ai-review`);
+      setAiDraft(r.data);
+    } catch (e) {
+      const code = showAiErrorToast(e, toast);
+      setAiError(
+        code
+          ? "The AI draft could not be generated. See the notification above."
+          : (getErrorMessage(e) || "AI draft failed."),
+      );
+    } finally {
+      setAiLoading(false);
+    }
+  }, [toast]);
 
   const load = React.useCallback(async () => {
     try {
@@ -165,6 +192,14 @@ export default function LabReviewQueue() {
                       >
                         Review
                       </Button>
+                      <AiGenerateButton
+                        onClick={() => runAiReview(lab)}
+                        loading={aiLoading && aiLab?.id === lab.id}
+                        label="AI Review"
+                        loadingLabel="Generating…"
+                        testid={`lab-ai-review-${lab.id}`}
+                        className="h-8"
+                      />
                       <Button
                         size="sm" variant="outline"
                         className="h-8 rounded-full border-[#e6d38a] text-[#8a6a3c]"
@@ -197,6 +232,42 @@ export default function LabReviewQueue() {
         lab={creatingTask} onClose={() => setCreatingTask(null)}
         onCreated={() => { setCreatingTask(null); toast({ title: "Task created from lab" }); }}
       />
+
+      <AiDraftModal
+        open={!!aiLab}
+        onOpenChange={(v) => { if (!v) { setAiLab(null); setAiDraft(null); setAiError(null); } }}
+        title={aiLab ? `AI review · ${aiLab.test_name}` : "AI review"}
+        subtitle={aiLab
+          ? `${aiLab.value} ${aiLab.unit || ""} · reference ${aiLab.reference_low ?? "?"}–${aiLab.reference_high ?? "?"}`
+          : null}
+        loading={aiLoading}
+        data={aiDraft}
+        error={aiError}
+        disclaimerRole="provider"
+        onRegenerate={() => aiLab && runAiReview(aiLab)}
+        onCopy={() => {
+          if (!aiDraft) return;
+          const text = labDraftToText(aiDraft);
+          navigator.clipboard?.writeText(text);
+          toast({ title: "Copied to clipboard" });
+        }}
+        primaryAction={{
+          label: "Insert into Review Note",
+          onClick: () => {
+            if (!aiLab || !aiDraft) return;
+            setSelected({
+              ...aiLab,
+              _aiPrefill: labDraftToText(aiDraft),
+            });
+            setAiLab(null);
+            setAiDraft(null);
+            toast({ title: "Draft inserted — review and save from the note dialog." });
+          },
+          testid: "lab-ai-insert-into-note",
+        }}
+        renderSections={(d) => <LabAiSections data={d} />}
+        testid="lab-ai-modal"
+      />
     </PortalLayout>
   );
 }
@@ -210,6 +281,13 @@ function ReviewDialog({ lab, onClose, onTransition, onLabUpdate }) {
   const [loadError, setLoadError] = React.useState(null);
   const [uploading, setUploading] = React.useState(false);
   const fileRef = React.useRef(null);
+
+  // Auto-populate the notes textarea when opened via the AI flow.
+  React.useEffect(() => {
+    if (lab?._aiPrefill) {
+      setNotes(lab._aiPrefill);
+    }
+  }, [lab?._aiPrefill]);
 
   const loadAttachments = React.useCallback(async (ids) => {
     setLoadError(null);
@@ -452,4 +530,128 @@ function LabToTaskDialog({ lab, onClose, onCreated }) {
       </DialogContent>
     </Dialog>
   );
+}
+
+
+
+// ---- AI review helpers ----------------------------------------------------
+
+function LabAiSections({ data }) {
+  const {
+    summary, abnormal_findings, trends, clinical_considerations,
+    patient_friendly_explanation, suggested_follow_up_questions, limitations,
+  } = data || {};
+  return (
+    <>
+      <AiSectionCard title="Summary" testid="ai-lab-summary">
+        {summary || null}
+      </AiSectionCard>
+
+      <AiSectionCard title="Abnormal findings" testid="ai-lab-abnormal"
+                     empty="No abnormal findings flagged by the model.">
+        {Array.isArray(abnormal_findings) && abnormal_findings.length > 0 ? (
+          <ul className="space-y-2">
+            {abnormal_findings.map((f, i) => (
+              <li key={i} className="border-t border-[#e2ebe4] pt-2 first:border-t-0 first:pt-0">
+                <div className="font-medium text-[#7a2a2a]">
+                  {f.test} · {f.value}
+                  {f.reference_range ? ` (ref ${f.reference_range})` : ""}
+                </div>
+                <div className="text-slate-600 text-xs mt-0.5">{f.interpretation}</div>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </AiSectionCard>
+
+      <AiSectionCard title="Trends" testid="ai-lab-trends"
+                     empty="No trend history to interpret.">
+        {Array.isArray(trends) && trends.length > 0 ? (
+          <ul className="space-y-1.5">
+            {trends.map((t, i) => (
+              <li key={i}>
+                <span className="font-medium">{t.test}</span>
+                <span className="ml-1 text-xs uppercase tracking-wider text-slate-500">
+                  {(t.direction || "").replace("_", " ")}
+                </span>
+                <div className="text-xs text-slate-600">{t.explanation}</div>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </AiSectionCard>
+
+      <AiSectionCard title="Clinical considerations for the provider"
+                     testid="ai-lab-considerations"
+                     empty="No considerations returned.">
+        {Array.isArray(clinical_considerations) && clinical_considerations.length > 0 ? (
+          <ul className="list-disc pl-5 space-y-1">
+            {clinical_considerations.map((c, i) => <li key={i}>{c}</li>)}
+          </ul>
+        ) : null}
+      </AiSectionCard>
+
+      <AiSectionCard title="Patient-friendly explanation"
+                     testid="ai-lab-patient-friendly">
+        {patient_friendly_explanation || null}
+      </AiSectionCard>
+
+      <AiSectionCard title="Suggested follow-up questions"
+                     testid="ai-lab-followups"
+                     empty="No follow-up questions suggested.">
+        {Array.isArray(suggested_follow_up_questions) && suggested_follow_up_questions.length > 0 ? (
+          <ul className="list-disc pl-5 space-y-1">
+            {suggested_follow_up_questions.map((q, i) => <li key={i}>{q}</li>)}
+          </ul>
+        ) : null}
+      </AiSectionCard>
+
+      <AiSectionCard title="Limitations" testid="ai-lab-limitations"
+                     empty="No limitations flagged by the model.">
+        {Array.isArray(limitations) && limitations.length > 0 ? (
+          <ul className="list-disc pl-5 space-y-1">
+            {limitations.map((l, i) => <li key={i}>{l}</li>)}
+          </ul>
+        ) : null}
+      </AiSectionCard>
+    </>
+  );
+}
+
+function labDraftToText(d) {
+  if (!d) return "";
+  const lines = ["AI-generated lab review draft (provider review required).", ""];
+  if (d.summary) lines.push("SUMMARY", d.summary, "");
+  if (Array.isArray(d.abnormal_findings) && d.abnormal_findings.length) {
+    lines.push("ABNORMAL FINDINGS");
+    d.abnormal_findings.forEach((f) => {
+      lines.push(`- ${f.test} · ${f.value} (ref ${f.reference_range || "n/a"}) — ${f.interpretation || ""}`);
+    });
+    lines.push("");
+  }
+  if (Array.isArray(d.trends) && d.trends.length) {
+    lines.push("TRENDS");
+    d.trends.forEach((t) => {
+      lines.push(`- ${t.test}: ${t.direction || "insufficient_data"} — ${t.explanation || ""}`);
+    });
+    lines.push("");
+  }
+  if (Array.isArray(d.clinical_considerations) && d.clinical_considerations.length) {
+    lines.push("CLINICAL CONSIDERATIONS");
+    d.clinical_considerations.forEach((c) => lines.push(`- ${c}`));
+    lines.push("");
+  }
+  if (d.patient_friendly_explanation) {
+    lines.push("PATIENT-FRIENDLY EXPLANATION", d.patient_friendly_explanation, "");
+  }
+  if (Array.isArray(d.suggested_follow_up_questions) && d.suggested_follow_up_questions.length) {
+    lines.push("SUGGESTED FOLLOW-UP QUESTIONS");
+    d.suggested_follow_up_questions.forEach((q) => lines.push(`- ${q}`));
+    lines.push("");
+  }
+  if (Array.isArray(d.limitations) && d.limitations.length) {
+    lines.push("LIMITATIONS");
+    d.limitations.forEach((l) => lines.push(`- ${l}`));
+  }
+  return lines.join("\n").trim();
 }
