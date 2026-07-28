@@ -756,7 +756,9 @@ and admin management.
   Modal supports View Changes (inline), Read Full Policy (opens the
   full page in a new tab), Accept & Continue.
 - **Sidebar** — Legal & Policies entry added to the Settings nav group
-  for patients.
+  for patients, practitioners, staff, and admins (Feb 28, 2026). All
+  roles share the same `/legal` and `/legal/:slug` routes; no
+  role-scoped duplication.
 - **Footer** — new Legal column with links to Terms, Privacy, HIPAA,
   Accessibility, Cookies, and mailto to the Privacy Officer.
 

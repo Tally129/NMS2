@@ -208,6 +208,7 @@ const NAV = {
         { to: "/portal/admin/compliance", label: "HIPAA Compliance", icon: ShieldCheck },
         { to: "/portal/admin/account", label: "My Account", icon: UserCircle },
         { to: "/portal/admin/security", label: "Security", icon: ShieldCheck },
+        { to: "/legal", label: "Legal & Policies", icon: Scale },
       ],
     },
   ],
