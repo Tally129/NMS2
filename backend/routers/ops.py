@@ -158,7 +158,7 @@ async def _hydrate_txn(t):
 
 @api.post("/pos/checkout", response_model=TransactionOut)
 async def pos_checkout(payload: PosCheckoutIn, request: Request,
-                       user=Depends(require_roles("admin", "staff"))):
+                       user=Depends(require_roles("admin", "staff", "practitioner"))):
     if not payload.lines:
         raise HTTPException(status_code=400, detail="No line items")
     out_lines = []
@@ -217,6 +217,26 @@ async def pos_checkout(payload: PosCheckoutIn, request: Request,
         "created_at": datetime.now(timezone.utc),
     }
     await db.transactions.insert_one(txn)
+
+    # Handoff #4: link back to the appointment so the two records stay in
+    # sync. Only mark the appointment `completed` when the transaction was
+    # actually paid (Stripe stubs stay in `pending` until confirmed).
+    if payload.appointment_id:
+        appt_updates = {"transaction_id": txn["id"]}
+        if txn["status"] == "paid":
+            appt_updates["status"] = "completed"
+        await db.appointments.update_one(
+            {"id": payload.appointment_id}, {"$set": appt_updates},
+        )
+        # Also flip the front-desk row to checked_out so the today view
+        # collapses this visit into the "Completed" bucket.
+        await db.front_desk_visits.update_many(
+            {"appointment_id": payload.appointment_id, "status": {"$ne": "checked_out"}},
+            {"$set": {
+                "status": "checked_out",
+                "checked_out_at": datetime.now(timezone.utc),
+            }},
+        )
 
     # Stripe stub
     if payload.payment_method == "stripe":
@@ -703,6 +723,20 @@ async def edit_time(eid: str, payload: TimeEditIn, request: Request, user=Depend
 
 
 # ---------- Front Desk ----------
+# Front-desk visits and appointments are two parallel status machines. This
+# module keeps them in sync (handoff #3) and hydrates readiness signals for
+# the today view (handoff #2).
+
+# Maps a front-desk lifecycle status onto the equivalent appointment status.
+# `checked_out` deliberately does NOT auto-complete the appointment — the
+# POS checkout path owns that transition (handoff #4).
+_FD_TO_APPT_STATUS = {
+    "checked_in": "arrived",
+    "in_room": "in_session",
+    "no_show": "no_show",
+}
+
+
 async def _hydrate_fd(v):
     v = _strip_id(v)
     if not v:
@@ -710,6 +744,27 @@ async def _hydrate_fd(v):
     c = await db.clients.find_one({"id": v["client_id"]})
     if c:
         v["client_name"] = c.get("full_name")
+    # Readiness signals (handoff #2). Computed from existing collections —
+    # never persisted onto the front-desk row.
+    intake = await db.intakes.find_one(
+        {"client_id": v["client_id"]}, sort=[("created_at", -1)],
+    )
+    v["intake_complete"] = bool(intake and (intake.get("answers") or {}))
+    v["forms_pending"] = await db.forms.count_documents({
+        "client_id": v["client_id"],
+        "status": {"$in": ["sent", "draft"]},
+    })
+    v["documents_ready"] = await db.files.count_documents({
+        "client_id": v["client_id"],
+        "deleted_at": None,
+    }) > 0
+    # Linked transaction (handoff #4) resolved by appointment_id.
+    if v.get("appointment_id"):
+        appt = await db.appointments.find_one(
+            {"id": v["appointment_id"]}, {"transaction_id": 1},
+        )
+        if appt and appt.get("transaction_id"):
+            v["transaction_id"] = appt["transaction_id"]
     return v
 
 
@@ -748,10 +803,24 @@ async def front_desk_checkin(payload: FrontDeskCheckIn, request: Request,
 @api.put("/front-desk/{vid}", response_model=FrontDeskOut)
 async def front_desk_update(vid: str, payload: FrontDeskUpdate, request: Request,
                             user=Depends(require_roles("admin", "staff", "practitioner"))):
+    v_prev = await db.front_desk_visits.find_one({"id": vid})
+    if not v_prev:
+        raise HTTPException(status_code=404, detail="Not found")
     updates = {k: v for k, v in payload.dict().items() if v is not None}
     if payload.status == "checked_out":
         updates["checked_out_at"] = datetime.now(timezone.utc)
     await db.front_desk_visits.update_one({"id": vid}, {"$set": updates})
+
+    # Sync onto the linked appointment (handoff #3). No-op when the visit is
+    # a walk-in without an appointment or when the status has no mapping
+    # (e.g. `scheduled`, `checked_out` — the POS path owns completion).
+    mapped = _FD_TO_APPT_STATUS.get(payload.status) if payload.status else None
+    if mapped and v_prev.get("appointment_id"):
+        await db.appointments.update_one(
+            {"id": v_prev["appointment_id"]},
+            {"$set": {"status": mapped}},
+        )
+
     v = await db.front_desk_visits.find_one({"id": vid})
     if not v:
         raise HTTPException(status_code=404, detail="Not found")

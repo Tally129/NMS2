@@ -1,5 +1,5 @@
 import React from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import PortalLayout, { PortalHeader, StatCard } from "../PortalLayout";
 import api from "../../lib/api";
 import { Button } from "../../components/ui/button";
@@ -8,7 +8,10 @@ import { Label } from "../../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../../components/ui/dialog";
 import { useToast } from "../../hooks/use-toast";
-import { UserPlus, LogIn, LogOut, Building2, Users, Clock, X } from "lucide-react";
+import {
+  UserPlus, LogIn, LogOut, Building2, Users, Clock, X,
+  ClipboardCheck, FileText, FolderOpen, CheckCircle2, XCircle, CreditCard,
+} from "lucide-react";
 import { getErrorMessage } from "../../lib/errors";
 
 const STATUSES = [
@@ -20,8 +23,10 @@ const STATUSES = [
 
 export default function FrontDesk() {
   const { toast } = useToast();
+  const navigate = useNavigate();
   const [visits, setVisits] = React.useState([]);
   const [clients, setClients] = React.useState([]);
+  const [requests, setRequests] = React.useState([]);   // pending appointment requests
   const [loading, setLoading] = React.useState(true);
   const [showCheckin, setShowCheckin] = React.useState(false);
   const [form, setForm] = React.useState({ client_id: "", room: "", walk_in: false });
@@ -32,12 +37,20 @@ export default function FrontDesk() {
   const load = async () => {
     setLoading(true);
     try {
-      const [v, c] = await Promise.all([
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const in30 = new Date(todayStart.getTime() + 30 * 24 * 3600 * 1000);
+      const [v, c, r] = await Promise.all([
         api.get("/front-desk/today"),
         api.get("/clients"),
+        // Handoff #1: patient-initiated appointments arrive as `requested`.
+        api.get("/appointments", {
+          params: { start: todayStart.toISOString(), end: in30.toISOString() },
+        }).catch(() => ({ data: [] })),
       ]);
       setVisits(v.data || []);
       setClients(c.data || []);
+      setRequests((r.data || []).filter((a) => a.status === "requested"));
     } catch (e) {
       toast({ title: "Failed to load", description: getErrorMessage(e) || "" });
     } finally {
@@ -75,6 +88,30 @@ export default function FrontDesk() {
     } catch (e) {
       toast({ title: "Failed", description: getErrorMessage(e) || "" });
     }
+  };
+
+  // Handoff #1: staff decision on a pending appointment request.
+  const respondToRequest = async (appt, decision) => {
+    try {
+      await api.put(`/appointments/${appt.id}`, {
+        status: decision === "confirm" ? "confirmed" : "canceled",
+      });
+      toast({
+        title: decision === "confirm" ? "Appointment confirmed" : "Appointment declined",
+      });
+      load();
+    } catch (e) {
+      toast({ title: "Update failed", description: getErrorMessage(e) || "" });
+    }
+  };
+
+  // Handoff #4: send the front-desk row into POS with context prefilled so
+  // completion writes the transaction id back onto the appointment.
+  const goToCheckout = (v) => {
+    const params = new URLSearchParams();
+    if (v.client_id) params.set("client_id", v.client_id);
+    if (v.appointment_id) params.set("appointment_id", v.appointment_id);
+    navigate(`/portal/staff/pos?${params.toString()}`);
   };
 
   const filtered = visits.filter((v) => {
@@ -152,6 +189,47 @@ export default function FrontDesk() {
         </div>
       )}
 
+      {/* Handoff #1: patient-initiated requests awaiting staff confirmation. */}
+      {requests.length > 0 && (
+        <div className="mb-4 rounded-2xl border border-[#c19a4b] bg-[#fdf6db] p-4"
+             data-testid="frontdesk-requests-card">
+          <div className="flex items-center justify-between mb-2">
+            <div className="font-medium text-[#8a6a3c] text-sm">
+              {requests.length} appointment request{requests.length === 1 ? "" : "s"} pending
+            </div>
+            <span className="text-[10px] uppercase tracking-wider text-[#8a6a3c]">Awaiting confirmation</span>
+          </div>
+          <ul className="space-y-2">
+            {requests.map((a) => (
+              <li key={a.id} className="flex items-center justify-between gap-3 rounded-lg bg-white/70 border border-[#e6d38a] px-3 py-2"
+                  data-testid={`frontdesk-request-${a.id}`}>
+                <div className="min-w-0 text-sm">
+                  <div className="font-medium text-[#1f2a22] truncate">{a.client_name || a.client_id}</div>
+                  <div className="text-xs text-[#6a6a6a]">
+                    {a.service || "Consultation"} · {new Date(a.start).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
+                    {a.practitioner_name ? ` · ${a.practitioner_name}` : ""}
+                  </div>
+                </div>
+                <div className="flex-shrink-0 flex gap-2">
+                  <Button size="sm" variant="outline"
+                          className="h-8 rounded-full border-[#7a2a2a] text-[#7a2a2a]"
+                          onClick={() => respondToRequest(a, "decline")}
+                          data-testid={`frontdesk-request-decline-${a.id}`}>
+                    <XCircle size={13} className="mr-1" /> Decline
+                  </Button>
+                  <Button size="sm"
+                          className="h-8 rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]"
+                          onClick={() => respondToRequest(a, "confirm")}
+                          data-testid={`frontdesk-request-confirm-${a.id}`}>
+                    <CheckCircle2 size={13} className="mr-1" /> Confirm
+                  </Button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <Input
         placeholder="Search by client name…"
         value={search}
@@ -180,7 +258,10 @@ export default function FrontDesk() {
             )}
             {filtered.map((v) => (
               <tr key={v.id} className="border-t border-[#e7dfc9]" data-testid={`fd-row-${v.id}`}>
-                <td className="py-3 px-4 font-medium text-[#1f2a22]">{v.client_name || v.client_id}</td>
+                <td className="py-3 px-4">
+                  <div className="font-medium text-[#1f2a22]">{v.client_name || v.client_id}</div>
+                  <ReadinessChips visit={v} />
+                </td>
                 <td className="py-3 px-4">
                   <Select value={v.status} onValueChange={(val) => updateVisit(v.id, { status: val })}>
                     <SelectTrigger className="h-8 w-36 bg-[#f6f1e6] border-[#e0d6bc] text-xs"><SelectValue /></SelectTrigger>
@@ -210,16 +291,22 @@ export default function FrontDesk() {
                   {v.checked_out_at ? new Date(v.checked_out_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}
                 </td>
                 <td className="py-3 px-4 text-right">
-                  {v.status !== "checked_out" && (
+                  {v.transaction_id ? (
+                    <span className="inline-flex items-center gap-1 text-[11px] text-[#3d6b52]"
+                          data-testid={`fd-paid-${v.id}`}>
+                      <CheckCircle2 size={12} /> Paid
+                    </span>
+                  ) : v.status !== "checked_out" ? (
                     <Button
                       size="sm"
-                      variant="outline"
-                      className="h-7 rounded-full text-xs border-[#2f4a3a] text-[#2f4a3a]"
-                      onClick={() => updateVisit(v.id, { status: "checked_out" })}
+                      className="h-7 rounded-full text-xs bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]"
+                      onClick={() => goToCheckout(v)}
                       data-testid={`fd-checkout-btn-${v.id}`}
                     >
-                      <LogOut size={12} className="mr-1" /> Check out
+                      <CreditCard size={12} className="mr-1" /> Checkout
                     </Button>
+                  ) : (
+                    <span className="text-[11px] text-[#8a6a3c]">Completed</span>
                   )}
                 </td>
               </tr>
@@ -277,5 +364,35 @@ export default function FrontDesk() {
         </DialogContent>
       </Dialog>
     </PortalLayout>
+  );
+}
+
+
+// Handoff #2: three tiny chips summarising intake / forms / documents
+// readiness. Values come from the hydrated /front-desk/today response.
+function ReadinessChips({ visit }) {
+  const intake = visit.intake_complete;
+  const forms = visit.forms_pending;
+  const docs = visit.documents_ready;
+  const chip = (ok, label, Icon, testid, muted = "not on file") => (
+    <span
+      data-testid={testid}
+      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wider border ${
+        ok
+          ? "bg-[#eaf2ec] text-[#3d6b52] border-[#cfe0d3]"
+          : "bg-[#f1ead8] text-[#8a6a3c] border-[#e0d6bc]"
+      }`}
+      title={ok ? label : `${label}: ${muted}`}
+    >
+      <Icon size={10} /> {label}
+    </span>
+  );
+  return (
+    <div className="mt-1 flex flex-wrap gap-1" data-testid={`fd-readiness-${visit.id}`}>
+      {chip(!!intake, "Intake", ClipboardCheck, `fd-readiness-intake-${visit.id}`)}
+      {chip((forms || 0) === 0, forms ? `${forms} forms open` : "Forms", FileText,
+            `fd-readiness-forms-${visit.id}`, "pending completion")}
+      {chip(!!docs, "Docs", FolderOpen, `fd-readiness-docs-${visit.id}`, "none uploaded")}
+    </div>
   );
 }

@@ -336,5 +336,113 @@ async def messages_unread_count(user=Depends(get_current_user)):
     return {"count": count}
 
 
+# ---------- Promote a message thread to a task (handoff #6) ----------
+# Assignment, owner, priority, due date, status and escalation live on the
+# existing `internal_tasks` collection (see routers/tasks.py). To avoid
+# duplicating those fields onto every thread, we promote a thread INTO the
+# tasks system with a single call. The thread stores only `linked_task_id`;
+# the reverse pointer lives on the task via a `linked_thread_id` field.
+class PromoteThreadToTaskIn:
+    """Free-form dict validated inline so we don't import Pydantic here."""
+
+
+@api.post("/messages/threads/{thread_id}/promote-to-task")
+async def promote_thread_to_task(thread_id: str, payload: dict, request: Request,
+                                 user=Depends(require_roles(
+                                     "admin", "practitioner", "staff",
+                                     "front_desk", "frontdesk", "medical_assistant",
+                                 ))):
+    t = await db.message_threads.find_one({"id": thread_id})
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if t.get("linked_task_id"):
+        raise HTTPException(status_code=409, detail={
+            "code": "task_already_linked",
+            "task_id": t["linked_task_id"],
+        })
+
+    # Reuse task priority/category enums so this endpoint never drifts from
+    # the existing task authorization system.
+    from routers.tasks import TASK_PRIORITIES, TASK_CATEGORIES
+    priority = (payload or {}).get("priority") or "normal"
+    category = (payload or {}).get("category") or "message_followup"
+    if priority not in TASK_PRIORITIES:
+        raise HTTPException(status_code=400, detail={
+            "code": "invalid_priority", "allowed": list(TASK_PRIORITIES),
+        })
+    if category not in TASK_CATEGORIES:
+        # Fall back to a safe default rather than 400 — front-desk shouldn't
+        # need to know the enum list.
+        category = "other"
+
+    now = datetime.now(timezone.utc)
+    default_title = (payload or {}).get("title") or (
+        f"Follow up: {t.get('subject', 'patient message')}"
+    )[:200]
+    assigned_staff_id = (payload or {}).get("assigned_staff_id")
+    assigned_provider_id = (payload or {}).get("assigned_provider_id") \
+        or t.get("practitioner_id")
+
+    async def _name_of(uid):
+        if not uid:
+            return None
+        u = await db.users.find_one({"id": uid}, {"full_name": 1, "email": 1})
+        return (u or {}).get("full_name") or (u or {}).get("email")
+
+    client = await db.clients.find_one(
+        {"id": t.get("client_id")}, {"full_name": 1, "email": 1},
+    )
+
+    due_raw = (payload or {}).get("due_date")
+    due_date = None
+    if isinstance(due_raw, str) and due_raw:
+        try:
+            due_date = datetime.fromisoformat(due_raw.replace("Z", "+00:00"))
+        except ValueError:
+            due_date = None
+
+    task = {
+        "id": new_id(),
+        "title": default_title,
+        "description": (payload or {}).get("description")
+            or t.get("last_message_preview") or "",
+        "client_id": t.get("client_id"),
+        "client_name": (client or {}).get("full_name") or (client or {}).get("email"),
+        "assigned_staff_id": assigned_staff_id,
+        "assigned_staff_name": await _name_of(assigned_staff_id),
+        "assigned_provider_id": assigned_provider_id,
+        "assigned_provider_name": await _name_of(assigned_provider_id),
+        "due_date": due_date,
+        "priority": priority,
+        "category": category,
+        "linked_thread_id": thread_id,
+        "linked_lab_id": None,
+        "linked_appointment_id": None,
+        "status": "new",
+        "created_by": user["id"],
+        "created_by_name": user.get("full_name") or user.get("email"),
+        "created_at": now, "updated_at": now,
+        "completed_by": None, "completed_by_name": None, "completed_at": None,
+        "internal_notes": [],
+        "history": [{
+            "event": "created_from_message", "actor_id": user["id"],
+            "actor_name": user.get("full_name") or user.get("email"),
+            "ts": now, "thread_id": thread_id,
+        }],
+    }
+    await db.internal_tasks.insert_one(task)
+    await db.message_threads.update_one(
+        {"id": thread_id}, {"$set": {"linked_task_id": task["id"]}},
+    )
+    await log_audit(
+        db, user["id"], user["email"], "message.promote_to_task",
+        resource_type="task", resource_id=task["id"],
+        metadata={"thread_id": thread_id, "client_id": t.get("client_id")},
+        ip=get_client_ip(request), user_agent=request.headers.get("user-agent"),
+    )
+    return _strip_id(task)
+
+
+
 
 

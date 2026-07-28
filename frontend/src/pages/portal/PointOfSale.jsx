@@ -1,4 +1,5 @@
 import React from "react";
+import { useSearchParams } from "react-router-dom";
 import PortalLayout, { PortalHeader } from "../PortalLayout";
 import api, { downloadBlob } from "../../lib/api";
 import { Button } from "../../components/ui/button";
@@ -20,11 +21,20 @@ const PAY_METHODS = [
 
 export default function PointOfSale() {
   const { toast } = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [treatments, setTreatments] = React.useState([]);
   const [inventory, setInventory] = React.useState([]);
   const [clients, setClients] = React.useState([]);
   const [cart, setCart] = React.useState([]);
-  const [clientId, setClientId] = React.useState("walkin");
+  const [clientId, setClientId] = React.useState(
+    searchParams.get("client_id") || "walkin",
+  );
+  // Handoff #4: when POS is opened from the front-desk row we carry the
+  // appointment id through so the eventual checkout can write back onto
+  // the appointment and mark it completed.
+  const [appointmentId, setAppointmentId] = React.useState(
+    searchParams.get("appointment_id") || null,
+  );
   const [paymentMethod, setPaymentMethod] = React.useState("chase_pos");
   const [paymentRef, setPaymentRef] = React.useState("");
   const [discount, setDiscount] = React.useState(0);
@@ -100,9 +110,15 @@ export default function PointOfSale() {
         payment_method: paymentMethod,
         payment_ref: paymentRef || null,
         note: note || null,
+        // Handoff #4: when set, backend marks this appointment `completed`
+        // and stores `transaction_id` back on the appointment.
+        appointment_id: appointmentId || undefined,
       };
       const r = await api.post("/pos/checkout", payload);
-      toast({ title: `Sale recorded · $${r.data.total.toFixed(2)}` });
+      toast({
+        title: `Sale recorded · $${r.data.total.toFixed(2)}`,
+        description: appointmentId ? "Appointment marked completed." : undefined,
+      });
       // Download PDF receipt through the authenticated axios instance —
       // never read the bearer token from localStorage.
       try {
@@ -117,6 +133,14 @@ export default function PointOfSale() {
       }
       // Reset cart
       setCart([]); setDiscount(0); setTip(0); setTaxRate(0); setNote(""); setPaymentRef("");
+      // Clear the appointment context so the next sale is independent.
+      setAppointmentId(null);
+      if (searchParams.get("appointment_id") || searchParams.get("client_id")) {
+        const next = new URLSearchParams(searchParams);
+        next.delete("appointment_id");
+        next.delete("client_id");
+        setSearchParams(next, { replace: true });
+      }
       load();
     } catch (e) {
       toast({ title: "Checkout failed", description: getErrorMessage(e) || "" });
@@ -128,6 +152,30 @@ export default function PointOfSale() {
   return (
     <PortalLayout>
       <PortalHeader title="Point of Sale" subtitle="Sell treatments, products, and custom line items" />
+
+      {appointmentId && (
+        <div className="mb-4 rounded-xl border border-[#2f4a3a] bg-[#eaf2ec] px-4 py-3 flex items-center justify-between"
+             data-testid="pos-appointment-banner">
+          <div className="text-sm text-[#2f4a3a]">
+            <span className="font-medium">Appointment checkout</span> —
+            completing this sale will mark the appointment as completed and
+            record it against this visit.
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setAppointmentId(null);
+              const next = new URLSearchParams(searchParams);
+              next.delete("appointment_id");
+              setSearchParams(next, { replace: true });
+            }}
+            className="text-xs text-[#2f4a3a] hover:underline"
+            data-testid="pos-appointment-banner-clear"
+          >
+            Sell without linking
+          </button>
+        </div>
+      )}
 
       <div className="grid lg:grid-cols-3 gap-6">
         {/* Catalog */}

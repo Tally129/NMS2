@@ -279,6 +279,8 @@ class AppointmentOut(BaseModel):
     telehealth: Optional[Dict[str, Any]] = None
     created_at: datetime
     created_by: Optional[str] = None
+    # Set by pos_checkout when the visit is paid (handoff #4).
+    transaction_id: Optional[str] = None
 
 
 # --------- Availability (recurring weekly) ---------
@@ -464,6 +466,10 @@ class ThreadOut(BaseModel):
     last_message_preview: Optional[str] = None
     unread_for_me: int = 0
     created_at: datetime
+    # Set by POST /api/messages/threads/{id}/promote-to-task (handoff #6).
+    # Assignment / priority / due-date / status / escalation live on the
+    # linked task, not on the thread. This avoids duplicating task fields.
+    linked_task_id: Optional[str] = None
 
 
 class MessageIn(BaseModel):
@@ -543,6 +549,10 @@ class PosCheckoutIn(BaseModel):
     payment_method: PosPaymentMethod = "chase_pos"
     payment_ref: Optional[str] = None
     note: Optional[str] = None
+    # When present, POS completion marks the linked appointment as
+    # completed and writes the transaction id back onto the appointment
+    # so the two records stay in sync (handoff #4).
+    appointment_id: Optional[str] = None
 
 
 class PosLineOut(PosLine):
@@ -620,6 +630,14 @@ class FrontDeskOut(BaseModel):
     checked_in_at: Optional[datetime] = None
     checked_out_at: Optional[datetime] = None
     created_at: datetime
+    # Readiness signals hydrated by the front-desk router (handoff #2).
+    # These are computed at read time from existing collections — never
+    # persisted on the front-desk row.
+    intake_complete: Optional[bool] = None
+    forms_pending: Optional[int] = None
+    documents_ready: Optional[bool] = None
+    # Linked transaction id set by pos_checkout (handoff #4).
+    transaction_id: Optional[str] = None
 
 
 # Account / password

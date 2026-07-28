@@ -9,7 +9,7 @@ import { Textarea } from "../../components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
 import { useToast } from "../../hooks/use-toast";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../../components/ui/dialog";
-import { MessageSquare, Plus, Send, FileText, Paperclip } from "lucide-react";
+import { MessageSquare, Plus, Send, FileText, Paperclip, ClipboardPlus, CheckCircle2 } from "lucide-react";
 import { useAuth } from "../../lib/auth";
 
 export default function Messages() {
@@ -87,6 +87,34 @@ export default function Messages() {
     finally { setUploading(false); }
   };
 
+  // Handoff #6: promote a thread into the tasks system. Assignment,
+  // priority, due date, status and escalation live on the linked task; the
+  // thread only stores `linked_task_id`.
+  const promoteToTask = async (thread) => {
+    try {
+      const r = await api.post(
+        `/messages/threads/${thread.id}/promote-to-task`,
+        { priority: "normal", category: "message_followup" },
+      );
+      toast({
+        title: "Task created",
+        description: "Manage assignment, priority and due date in the Tasks page.",
+      });
+      // Reflect the linkage in the UI without a full reload round-trip.
+      setActive((cur) => (cur && cur.id === thread.id
+        ? { ...cur, linked_task_id: r.data?.id }
+        : cur));
+      loadThreads();
+    } catch (e) {
+      const code = e?.response?.data?.detail?.code;
+      if (code === "task_already_linked") {
+        toast({ title: "This thread already has a linked task." });
+      } else {
+        toast({ title: "Could not create task" });
+      }
+    }
+  };
+
   return (
     <PortalLayout>
       <PortalHeader
@@ -131,9 +159,30 @@ export default function Messages() {
             <div className="flex-1 flex items-center justify-center text-[#6a6a6a] text-sm">Select a conversation or start a new one.</div>
           ) : (
             <>
-              <div className="px-5 py-3 border-b border-[#e7dfc9]">
-                <div className="font-display text-lg text-[#1f2a22]">{active.subject}</div>
-                <div className="text-xs text-[#6a6a6a]">with {user?.role === "client" ? active.practitioner_name : active.client_name}</div>
+              <div className="px-5 py-3 border-b border-[#e7dfc9] flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="font-display text-lg text-[#1f2a22]">{active.subject}</div>
+                  <div className="text-xs text-[#6a6a6a]">with {user?.role === "client" ? active.practitioner_name : active.client_name}</div>
+                </div>
+                {user?.role !== "client" && (
+                  active.linked_task_id ? (
+                    <span
+                      className="inline-flex items-center gap-1 text-[11px] text-[#3d6b52] px-2 py-1 rounded-full bg-[#eaf2ec] border border-[#cfe0d3] flex-shrink-0"
+                      data-testid={`message-task-linked-${active.id}`}
+                    >
+                      <CheckCircle2 size={12} /> Task linked
+                    </span>
+                  ) : (
+                    <Button
+                      size="sm" variant="outline"
+                      className="h-8 rounded-full border-[#e6d38a] text-[#8a6a3c] flex-shrink-0"
+                      onClick={() => promoteToTask(active)}
+                      data-testid={`message-to-task-${active.id}`}
+                    >
+                      <ClipboardPlus size={13} className="mr-1" /> Create task
+                    </Button>
+                  )
+                )}
               </div>
               <div className="flex-1 overflow-y-auto p-5 space-y-3">
                 {messages.map((m) => {

@@ -956,3 +956,69 @@ disclaimer behavior.
   `test_bedrock_ai.py`)
 
 _Last updated: Feb 28, 2026 (Sprint 10A · AI Frontend Integration)_
+
+---
+
+## Sprint 11 · Staff Handoff Wiring (Feb 28, 2026)
+
+### Scope
+Closed the five staff handoffs and added a messages→tasks promotion path.
+No new pages, no new dashboards, no schema drift. Every fix is a small
+extension of an existing file. The single unifying change is that
+`front_desk_visits.status` now syncs onto `appointments.status`, plus POS
+checkout writes back onto the appointment.
+
+### Handoff wiring
+- **#1 Request → Confirmed** — `FrontDesk.jsx` now loads pending
+  `status=requested` appointments and renders a warning-tone "Requests"
+  card at the top of the queue with per-row **Confirm / Decline** buttons
+  that PATCH `/appointments/{id}`.
+- **#2 Today → Readiness** — `_hydrate_fd()` in `ops.py` computes
+  `intake_complete`, `forms_pending`, `documents_ready` from the existing
+  intakes/forms/files collections (never persisted). Rendered as three
+  tiny chips under each client name via a new `ReadinessChips` helper in
+  `FrontDesk.jsx`.
+- **#3 Checked-in → Roomed → Ready** — `front_desk_update` now maps
+  `checked_in → arrived`, `in_room → in_session`, `no_show → no_show`
+  onto the linked `appointments.status` via `_FD_TO_APPT_STATUS`. The
+  provider portal now sees front-desk state instantly.
+- **#4 Visit → Checkout** — `PosCheckoutIn` gained `appointment_id`.
+  `pos_checkout` writes `transaction_id` back onto the appointment and
+  marks it `completed` when the transaction is paid; it also flips the
+  front-desk row to `checked_out`. `FrontDesk.jsx` "Checkout" button now
+  navigates to `/portal/staff/pos?client_id=...&appointment_id=...`;
+  `PointOfSale.jsx` reads those params, shows a green banner, and clears
+  the URL after completion. `pos_checkout` role widened to include
+  `practitioner` so providers can close a visit.
+- **#5 Service/Product → Inventory** — left unchanged pending policy
+  clarification. Product sales already deduct correctly via
+  `line.type == "inventory"`.
+- **#6 Messages assignment/priority/due/status** — added
+  `linked_task_id` to `ThreadOut` and a new
+  `POST /api/messages/threads/{id}/promote-to-task` endpoint in
+  `health_track.py` that creates an `internal_tasks` row (reusing the
+  existing task assignment/priority/due-date/status/escalation model) and
+  stores the reverse link. `Messages.jsx` gained a "Create task" button
+  in the thread header that becomes a "Task linked" chip once promoted.
+
+### Files modified
+- `backend/models.py` — `PosCheckoutIn.appointment_id`,
+  `AppointmentOut.transaction_id`, `FrontDeskOut.intake_complete` /
+  `forms_pending` / `documents_ready` / `transaction_id`,
+  `ThreadOut.linked_task_id`.
+- `backend/routers/ops.py` — `_hydrate_fd()` readiness signals,
+  `front_desk_update` status sync, `pos_checkout` appointment link,
+  `pos_checkout` role widened.
+- `backend/routers/health_track.py` — new promote-to-task endpoint.
+- `frontend/src/pages/portal/FrontDesk.jsx` — requests card, readiness
+  chips, checkout-to-POS navigation.
+- `frontend/src/pages/portal/PointOfSale.jsx` — query-param intake,
+  appointment banner, `appointment_id` on checkout call.
+- `frontend/src/pages/portal/Messages.jsx` — promote-to-task button.
+
+### Files added
+- `backend/tests/test_staff_handoffs.py` — 5 focused end-to-end tests
+  covering handoffs 1, 2, 3, 4, and 6. All pass. 41/41 backend tests
+  green (Bedrock + features + handoffs).
+
+_Last updated: Feb 28, 2026 (Sprint 11 · Staff Handoff Wiring)_
