@@ -809,3 +809,273 @@ async def process_due_campaigns(worker_prefix: str = "scheduler") -> dict:
 async def scheduler_tick(user=Depends(require_roles("admin"))):
     """Admin-only manual sweep of due scheduled campaigns."""
     return await process_due_campaigns(worker_prefix="manual-tick")
+
+
+
+# =============================================================================
+#  AI Marketing Assistant — draft only. NEVER publishes, sends, or persists.
+# =============================================================================
+#
+# Design goals:
+#   * PHI isolation. This endpoint accepts ONLY business context supplied by
+#     the user. It does not read patient records, recipient lists, phone
+#     numbers, or email addresses. That isolation is a compliance-critical
+#     guardrail — do not add DB lookups here.
+#   * Single Bedrock call, via `llm_client.complete_text`. No provider
+#     fallback, no per-feature Bedrock client.
+#   * Central authorization function `_ai_marketing_drafter` so future
+#     role-based restrictions can be applied in ONE place.
+#   * Structured JSON envelope; `human_review_required` is force-set to
+#     True regardless of what the model returns.
+
+from llm_client import (  # noqa: E402
+    PromptTemplate as _LlmPromptTemplate,
+    run_template as _llm_run_template,
+    safe_extract_json as _llm_safe_extract_json,
+)
+
+
+_MARKETING_AI_ROLES = tuple(sorted({
+    "admin", "practitioner", "staff", "front_desk", "frontdesk",
+    "medical_assistant", "auditor",
+}))
+
+
+def _ai_marketing_drafter():
+    """Central dependency for AI marketing access.
+
+    Sprint 9 allows every authenticated workforce role. Future tightening
+    (e.g. `marketing_manager` only) is a single-line change here."""
+    return require_roles(*_MARKETING_AI_ROLES)
+
+
+AI_MARKETING_CONTENT_TYPES = (
+    "social_post", "social_series", "email", "email_sequence", "sms",
+    "blog_outline", "blog_article", "landing_page", "ad_copy",
+    "content_calendar", "short_video_script", "patient_education",
+    "service_description", "faq", "promotion", "campaign_strategy",
+)
+
+
+class AiMarketingDraftIn(BaseModel):
+    content_type: str = Field(..., min_length=2, max_length=64)
+    service_or_topic: str = Field(..., min_length=2, max_length=200)
+    audience: Optional[str] = Field(default=None, max_length=200)
+    platform: Optional[str] = Field(default=None, max_length=64)
+    tone: Optional[str] = Field(default=None, max_length=64)
+    objective: Optional[str] = Field(default=None, max_length=400)
+    call_to_action: Optional[str] = Field(default=None, max_length=200)
+    clinic_details: dict = Field(default_factory=dict)
+    compliance_notes: Optional[str] = Field(default=None, max_length=1000)
+    requested_length: Optional[str] = Field(default=None, max_length=64)
+    number_of_variations: int = Field(default=1, ge=1, le=5)
+
+
+MARKETING_AI_TEMPLATE = _LlmPromptTemplate(
+    feature="marketing",
+    system=(
+        "You are a compliance-aware marketing copywriter for a wellness / "
+        "functional medicine clinic. Draft only — a human will review "
+        "before anything is used or published.\n\n"
+        "Strict rules — never violate:\n"
+        "  * Do not guarantee outcomes or make cure claims.\n"
+        "  * Do not invent clinician credentials, certifications, "
+        "statistics, testimonials, patients, before/after photos, "
+        "pricing, or services the clinic did not describe.\n"
+        "  * Do not give individualized medical advice; recommend that "
+        "readers consult a qualified provider.\n"
+        "  * Distinguish educational information from clinical, wellness, "
+        "or cosmetic services. Do not conflate them.\n"
+        "  * Include an appropriate wellness / non-diagnostic disclaimer "
+        "when the topic touches on health outcomes.\n\n"
+        "Return STRICT JSON only — no prose, no markdown fences — matching "
+        "this shared envelope:\n"
+        "{\n"
+        '  "content_type": "",\n'
+        '  "title": "",\n'
+        '  "summary": "",\n'
+        '  "draft": "",\n'
+        '  "variations": [],\n'
+        '  "hashtags": [],\n'
+        '  "subject_lines": [],\n'
+        '  "calls_to_action": [],\n'
+        '  "compliance_notes": [],\n'
+        '  "disclaimer_suggestions": [],\n'
+        '  "provider_review_required": false,\n'
+        '  "human_review_required": true\n'
+        "}\n\n"
+        'For "content_calendar", add: "calendar_items": [{"date_or_week":"",'
+        '"platform":"","topic":"","content_format":"","caption_or_outline":"",'
+        '"call_to_action":""}].\n'
+        'For "email_sequence" and "social_series", populate "variations" '
+        "with an ordered list of individual pieces.\n"
+        'For "sms", keep each variation concise and note when the clinic '
+        "must add explicit opt-in / opt-out language."
+    ),
+    max_tokens=3072,
+    temperature=0.4,
+)
+
+
+MARKETING_AI_DISCLAIMER = (
+    "AI-generated marketing draft. Human review is required before use. "
+    "The clinic is responsible for verifying every claim, statistic, "
+    "credential, and service description before publishing."
+)
+
+
+def _build_marketing_ai_prompt(payload: "AiMarketingDraftIn") -> str:
+    """Assemble a business-only user prompt for Bedrock.
+
+    This function must never touch any patient collection, recipient list,
+    or contact detail. If a future caller tries to pass PHI in here, the
+    endpoint's Pydantic schema will drop it — this helper only reads from
+    the validated `AiMarketingDraftIn` instance."""
+    lines: list[str] = [
+        f"Content type: {payload.content_type}",
+        f"Service or topic: {payload.service_or_topic}",
+    ]
+    if payload.audience:
+        lines.append(f"Audience (generalized, non-PHI): {payload.audience}")
+    if payload.platform:
+        lines.append(f"Platform: {payload.platform}")
+    if payload.tone:
+        lines.append(f"Tone: {payload.tone}")
+    if payload.objective:
+        lines.append(f"Objective: {payload.objective}")
+    if payload.call_to_action:
+        lines.append(f"Preferred call to action: {payload.call_to_action}")
+    if payload.requested_length:
+        lines.append(f"Requested length: {payload.requested_length}")
+    lines.append(f"Number of variations: {payload.number_of_variations}")
+    if payload.clinic_details:
+        # Only keys the operator explicitly typed in. Do NOT pull from any
+        # patient collection.
+        cleaned = {
+            str(k)[:64]: str(v)[:400]
+            for k, v in payload.clinic_details.items()
+            if isinstance(k, str) and v is not None
+        }
+        if cleaned:
+            lines.append("Clinic-supplied details (do not invent additions):")
+            for k, v in cleaned.items():
+                lines.append(f"  - {k}: {v}")
+    if payload.compliance_notes:
+        lines.append("Compliance requirements from the clinic:")
+        lines.append(f"  {payload.compliance_notes}")
+    lines.append("")
+    lines.append("Return the JSON draft now.")
+    return "\n".join(lines)
+
+
+def _validate_marketing_ai_response(
+    data: Optional[dict], content_type: str
+) -> dict:
+    """Coerce Bedrock output onto the strict envelope; strip anything
+    outside the known keys so unexpected fields are never surfaced."""
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail={
+            "code": "invalid_model_response",
+            "message": "AI marketing draft could not be parsed.",
+        })
+
+    def _str(val, cap: int) -> str:
+        return str(val or "")[:cap]
+
+    def _str_list(val, cap_items: int = 25, cap_len: int = 400) -> list[str]:
+        if not isinstance(val, list):
+            return []
+        out: list[str] = []
+        for item in val[:cap_items]:
+            if isinstance(item, (str, int, float)):
+                out.append(str(item)[:cap_len])
+        return out
+
+    envelope = {
+        "content_type": content_type,
+        "title": _str(data.get("title"), 200),
+        "summary": _str(data.get("summary"), 800),
+        "draft": _str(data.get("draft"), 12000),
+        "variations": _str_list(data.get("variations"), 20, 6000),
+        "hashtags": _str_list(data.get("hashtags"), 30, 80),
+        "subject_lines": _str_list(data.get("subject_lines"), 15, 200),
+        "calls_to_action": _str_list(data.get("calls_to_action"), 15, 200),
+        "compliance_notes": _str_list(data.get("compliance_notes"), 15, 500),
+        "disclaimer_suggestions": _str_list(
+            data.get("disclaimer_suggestions"), 10, 500,
+        ),
+        "provider_review_required": False,
+        # Force-set. Guardrail regardless of what the model says.
+        "human_review_required": True,
+    }
+
+    if content_type == "content_calendar":
+        items = []
+        for row in (data.get("calendar_items") or [])[:60]:
+            if not isinstance(row, dict):
+                continue
+            items.append({
+                "date_or_week": _str(row.get("date_or_week"), 60),
+                "platform": _str(row.get("platform"), 60),
+                "topic": _str(row.get("topic"), 200),
+                "content_format": _str(row.get("content_format"), 60),
+                "caption_or_outline": _str(row.get("caption_or_outline"), 2000),
+                "call_to_action": _str(row.get("call_to_action"), 200),
+            })
+        envelope["calendar_items"] = items
+
+    return envelope
+
+
+@api.post("/campaigns/ai-draft")
+async def ai_campaign_draft(payload: AiMarketingDraftIn, request: Request,
+                            user=Depends(_ai_marketing_drafter())):
+    """Generate a marketing draft. Never publishes, sends, or saves.
+
+    The output is designed to populate the existing campaign editor. Any
+    persistence still goes through the existing `POST /api/campaigns` flow
+    with its normal RBAC, sanitization, and delivery-config gating.
+    """
+    if payload.content_type not in AI_MARKETING_CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail={
+            "code": "unsupported_content_type",
+            "allowed": list(AI_MARKETING_CONTENT_TYPES),
+        })
+
+    user_prompt = _build_marketing_ai_prompt(payload)
+    started = datetime.now(timezone.utc)
+    try:
+        raw = await _llm_run_template(
+            MARKETING_AI_TEMPLATE, user_prompt,
+            session_id=f"marketing.{payload.content_type}",
+        )
+    except RuntimeError as exc:
+        code = str(exc)
+        status = 503 if code in {
+            "ai_disabled", "bedrock_misconfigured", "bedrock_unavailable",
+            "model_access_denied", "request_timeout",
+        } else 502
+        raise HTTPException(status_code=status, detail={"code": code})
+
+    envelope = _validate_marketing_ai_response(
+        _llm_safe_extract_json(raw), payload.content_type,
+    )
+    envelope["disclaimer"] = MARKETING_AI_DISCLAIMER
+    envelope["human_review_required"] = True
+
+    latency_ms = int(
+        (datetime.now(timezone.utc) - started).total_seconds() * 1000
+    )
+    await log_audit(
+        db, user["id"], user["email"], "campaign.ai_draft_generated",
+        resource_type="campaign", resource_id=None,
+        metadata={
+            "feature": "marketing",
+            "content_type": payload.content_type,
+            "variations_requested": payload.number_of_variations,
+            "latency_ms": latency_ms,
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    return envelope

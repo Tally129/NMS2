@@ -826,3 +826,56 @@ enable Bedrock model access for the target region/model, then set
 - Frontend AI health panel
 
 _Last updated: Feb 28, 2026 (Sprint 9 · Bedrock AI Standardization)_
+
+---
+
+## Sprint 9.1 · Bedrock AI Features (Feb 28, 2026)
+
+### Scope (Parts 8–9 of the AI sprint charter — backend endpoints only)
+Added two AI features that reuse the Bedrock foundation. **No new AI
+infrastructure was created** — both endpoints call `run_template()` in
+`llm_client.py`, which routes through the single `complete_text()` entry
+point. All future AI features will plug in the same way: define a
+`PromptTemplate`, validate the JSON envelope, done.
+
+### New endpoints (draft-only — never save/publish/send)
+- **`POST /api/labs/{lab_id}/ai-review`** in `routers/lab_review.py`.
+  Central auth helper `_ai_lab_reviewer()` (currently all workforce roles;
+  future tightening is one-line). Sends minimum-necessary context only:
+  the selected lab + up to five prior values of the same test + client's
+  allergies, current supplements, age, and sex. Pseudonymises the patient
+  with their internal id — no name, phone, email, address, insurance, or
+  billing. Strict JSON envelope with mandatory disclaimer and
+  `provider_review_required=True` (force-set regardless of what the model
+  returns). Audit action `lab.ai_draft_generated` records feature id,
+  latency, and lab metadata — never the prompt or response.
+- **`POST /api/campaigns/ai-draft`** in `routers/campaigns.py`.
+  Central auth helper `_ai_marketing_drafter()`. Accepts business-only
+  input (`AiMarketingDraftIn`); no DB reads of patient / recipient /
+  message data occur inside the endpoint. Whitelist of 16 supported
+  `content_type` values; unsupported types return a safe 400. Strict JSON
+  envelope with `human_review_required=True` (force-set) and content-type
+  specific extensions for `content_calendar`. Audit action
+  `campaign.ai_draft_generated` records feature id, content type, and
+  latency — never the copy.
+
+### Files changed
+- `backend/routers/lab_review.py` — appended AI section (~280 lines).
+- `backend/routers/campaigns.py` — appended AI section (~230 lines).
+- `backend/tests/test_bedrock_features.py` — 18 new hermetic tests.
+
+### Guardrails verified by tests
+- PHI never enters the lab prompt (full name, email, phone, address,
+  unrelated notes all excluded even when present on the client doc).
+- `provider_review_required` and `human_review_required` are forced True
+  even when the model tries to disable them.
+- Extraneous top-level keys from the model (`auto_publish`,
+  `recipient_email`, `hidden_diagnosis`, etc.) are stripped from the
+  response envelope.
+- Lab AI does not add save/status endpoints; the existing review-note
+  workflow performs any persistence.
+- Marketing AI does not add publish/send endpoints.
+- Both features call `run_template()` in `llm_client.py` — no per-feature
+  Bedrock client, no per-feature service class.
+
+_Last updated: Feb 28, 2026 (Sprint 9.1 · Bedrock AI Features)_

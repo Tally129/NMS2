@@ -275,3 +275,297 @@ async def create_task_from_lab(lab_id: str, payload: LabTaskShortcut, request: R
                     metadata={"lab_id": lab_id, "client_id": lab.get("client_id")},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return _strip_id(task)
+
+
+
+# =============================================================================
+#  AI Lab Review — draft only. NEVER saves, notifies, or changes lab status.
+# =============================================================================
+#
+# Design goals:
+#   * One Bedrock call per request, routed through `llm_client.complete_text`.
+#     No provider fallback, no per-feature Bedrock client.
+#   * Central authorization function `_ai_lab_reviewer` so future role-based
+#     restrictions or delegation checks can be added in ONE place without
+#     touching the endpoint body.
+#   * Minimum-necessary context: this lab + up to five prior values of the
+#     same test + the client's allergies / supplements / age / sex only.
+#     Names, addresses, phone numbers, insurance, billing, unrelated notes
+#     are never sent to Bedrock.
+#   * Strict JSON output envelope with the mandatory disclaimer and
+#     `provider_review_required=True`. Existing review-note workflow performs
+#     any save; this endpoint returns a draft.
+
+from llm_client import PromptTemplate, run_template, safe_extract_json  # noqa: E402
+
+
+_LAB_AI_REVIEWER_ROLES = tuple(sorted({
+    "practitioner", "admin", "medical_assistant",
+    "staff", "front_desk", "frontdesk", "auditor",
+}))
+
+
+def _ai_lab_reviewer():
+    """Central dependency for AI lab-review access.
+
+    Sprint 9 allows every authenticated workforce role. Tightening the
+    permission (e.g. clinical-only, delegation-required) later means editing
+    this single function — no endpoint body changes.
+    """
+    return require_roles(*_LAB_AI_REVIEWER_ROLES)
+
+
+LAB_AI_TEMPLATE = PromptTemplate(
+    feature="lab_review",
+    system=(
+        "You are a clinical documentation assistant helping a licensed "
+        "provider draft a lab review note in a wellness / functional "
+        "medicine setting. You never diagnose, prescribe, discontinue, or "
+        "change treatment. Every draft is provisional and must be reviewed "
+        "by the provider.\n\n"
+        "Return STRICT JSON only — no prose, no markdown fences — matching "
+        "this schema exactly:\n"
+        "{\n"
+        '  "summary": "",\n'
+        '  "abnormal_findings": [\n'
+        '    {"test":"","value":"","reference_range":"","interpretation":""}\n'
+        "  ],\n"
+        '  "trends": [\n'
+        '    {"test":"","direction":"increasing|decreasing|stable|insufficient_data","explanation":""}\n'
+        "  ],\n"
+        '  "clinical_considerations": [],\n'
+        '  "patient_friendly_explanation": "",\n'
+        '  "suggested_follow_up_questions": [],\n'
+        '  "limitations": [],\n'
+        '  "provider_review_required": true\n'
+        "}\n\n"
+        "Frame every item in `clinical_considerations` as a question or "
+        "topic for the provider to consider — never as instructions, "
+        "orders, or definitive recommendations. Do not invent lab values "
+        "you were not given."
+    ),
+    max_tokens=2048,
+    temperature=0.1,
+)
+
+
+LAB_AI_DISCLAIMER = (
+    "AI-generated draft. Provider review and clinical judgment are required."
+)
+
+
+def _compute_age_years(dob: Optional[str]) -> Optional[int]:
+    """Best-effort age from YYYY-MM-DD string. Returns None on any parse
+    failure so the AI never receives a bogus number."""
+    if not dob or not isinstance(dob, str):
+        return None
+    try:
+        birth = datetime.strptime(dob[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    today = datetime.now(timezone.utc).date()
+    years = today.year - birth.year - (
+        (today.month, today.day) < (birth.month, birth.day)
+    )
+    return years if 0 < years < 130 else None
+
+
+def _format_reference_range(lab: dict) -> str:
+    lo = lab.get("reference_low")
+    hi = lab.get("reference_high")
+    if lo is None and hi is None:
+        return "not specified"
+    return f"{lo if lo is not None else '?'} – {hi if hi is not None else '?'}"
+
+
+def _abnormal_flag(lab: dict) -> str:
+    """Derive high/low/normal without depending on a stored flag."""
+    try:
+        v = float(lab.get("value"))
+    except (TypeError, ValueError):
+        return "unknown"
+    lo = lab.get("reference_low")
+    hi = lab.get("reference_high")
+    if lo is not None and v < float(lo):
+        return "low"
+    if hi is not None and v > float(hi):
+        return "high"
+    return "normal"
+
+
+def _build_lab_ai_prompt(lab: dict, client: dict, history: list[dict]) -> str:
+    """Assemble the minimum-necessary user prompt sent to Bedrock.
+
+    Pseudonymises the patient with the internal `client_id`. Never includes
+    names, contact info, address, insurance, billing, or unrelated chart
+    entries. Callers that add fields here MUST review this rule."""
+    parts: list[str] = []
+    parts.append(
+        f"Patient reference: {client.get('id', 'unknown')} (internal id "
+        "— do not attempt to identify the patient)."
+    )
+    age = _compute_age_years(client.get("dob"))
+    if age is not None:
+        parts.append(f"Age: {age}")
+    if client.get("sex"):
+        parts.append(f"Sex: {client['sex']}")
+    if client.get("allergies"):
+        parts.append(f"Allergies: {client['allergies']}")
+    if client.get("current_supplements"):
+        parts.append(f"Current supplements: {client['current_supplements']}")
+
+    parts.append("")
+    parts.append("Selected lab result:")
+    parts.append(f"- Test: {lab.get('test_name', 'unknown')}")
+    parts.append(
+        f"- Value: {lab.get('value')} "
+        f"{(lab.get('unit') or '').strip()}".rstrip()
+    )
+    parts.append(f"- Reference range: {_format_reference_range(lab)}")
+    parts.append(f"- Abnormal flag: {_abnormal_flag(lab)}")
+    parts.append(
+        f"- Collection date: {(lab.get('measured_at') or '').isoformat() if hasattr(lab.get('measured_at'), 'isoformat') else lab.get('measured_at') or 'unknown'}"
+    )
+
+    if history:
+        parts.append("")
+        parts.append(
+            "Previous values for the same test (most recent first, "
+            f"up to {len(history)}):"
+        )
+        for h in history:
+            when = h.get("measured_at")
+            when_s = when.isoformat() if hasattr(when, "isoformat") else str(when or "")
+            parts.append(
+                f"- {when_s[:10]}: {h.get('value')} "
+                f"{(h.get('unit') or '').strip()}".rstrip()
+            )
+
+    parts.append("")
+    parts.append("Return the JSON draft now.")
+    return "\n".join(parts)
+
+
+def _validate_lab_ai_response(data: Optional[dict]) -> dict:
+    """Coerce Bedrock output onto the strict envelope. Missing fields are
+    replaced with safe defaults; extraneous top-level keys are dropped so no
+    unexpected content is echoed back to the frontend."""
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail={
+            "code": "invalid_model_response",
+            "message": "AI draft could not be parsed.",
+        })
+
+    def _str_list(val) -> list[str]:
+        if not isinstance(val, list):
+            return []
+        return [str(x).strip()[:500] for x in val if isinstance(x, (str, int, float))]
+
+    findings = []
+    for row in (data.get("abnormal_findings") or []):
+        if not isinstance(row, dict):
+            continue
+        findings.append({
+            "test": str(row.get("test") or "")[:200],
+            "value": str(row.get("value") or "")[:120],
+            "reference_range": str(row.get("reference_range") or "")[:120],
+            "interpretation": str(row.get("interpretation") or "")[:800],
+        })
+
+    trends = []
+    for row in (data.get("trends") or []):
+        if not isinstance(row, dict):
+            continue
+        direction = str(row.get("direction") or "").lower().strip()
+        if direction not in {"increasing", "decreasing", "stable", "insufficient_data"}:
+            direction = "insufficient_data"
+        trends.append({
+            "test": str(row.get("test") or "")[:200],
+            "direction": direction,
+            "explanation": str(row.get("explanation") or "")[:800],
+        })
+
+    return {
+        "summary": str(data.get("summary") or "")[:2000],
+        "abnormal_findings": findings,
+        "trends": trends,
+        "clinical_considerations": _str_list(data.get("clinical_considerations")),
+        "patient_friendly_explanation": str(
+            data.get("patient_friendly_explanation") or ""
+        )[:2000],
+        "suggested_follow_up_questions": _str_list(
+            data.get("suggested_follow_up_questions")
+        ),
+        "limitations": _str_list(data.get("limitations")),
+        # Always true regardless of what the model says. Guardrail.
+        "provider_review_required": True,
+    }
+
+
+@api.post("/labs/{lab_id}/ai-review")
+async def ai_lab_review_draft(lab_id: str, request: Request,
+                              user=Depends(_ai_lab_reviewer())):
+    """Generate an AI draft note for a single lab result.
+
+    Draft-only. Never modifies the lab record, review status, chart, or
+    patient. The existing review-note workflow performs any save.
+    """
+    lab = await db.lab_values.find_one({"id": lab_id})
+    if not lab:
+        raise HTTPException(status_code=404, detail="Lab not found")
+
+    client = await db.clients.find_one(
+        {"id": lab.get("client_id")},
+        # Minimum-necessary projection — no name, phone, email, address,
+        # insurance, notes, or unrelated chart data.
+        {"id": 1, "dob": 1, "sex": 1, "allergies": 1, "current_supplements": 1},
+    ) or {"id": lab.get("client_id")}
+
+    # Up to five prior values for the SAME test only.
+    history_cursor = db.lab_values.find(
+        {
+            "client_id": lab.get("client_id"),
+            "test_name": lab.get("test_name"),
+            "id": {"$ne": lab_id},
+        },
+        {"value": 1, "unit": 1, "measured_at": 1},
+    ).sort("measured_at", -1).limit(5)
+    history = await history_cursor.to_list(5)
+
+    user_prompt = _build_lab_ai_prompt(lab, client, history)
+
+    started = datetime.now(timezone.utc)
+    try:
+        raw = await run_template(LAB_AI_TEMPLATE, user_prompt,
+                                 session_id=f"lab_review.{lab_id}")
+    except RuntimeError as exc:
+        # Safe categories from llm_client — never expose AWS internals.
+        code = str(exc)
+        status = 503 if code in {
+            "ai_disabled", "bedrock_misconfigured", "bedrock_unavailable",
+            "model_access_denied", "request_timeout",
+        } else 502
+        raise HTTPException(status_code=status, detail={"code": code})
+
+    payload = _validate_lab_ai_response(safe_extract_json(raw))
+    payload["disclaimer"] = LAB_AI_DISCLAIMER
+    payload["provider_review_required"] = True
+    latency_ms = int(
+        (datetime.now(timezone.utc) - started).total_seconds() * 1000
+    )
+
+    # Safe audit metadata: never store the prompt, response, or PHI.
+    await log_audit(
+        db, user["id"], user["email"], "lab.ai_draft_generated",
+        resource_type="lab", resource_id=lab_id,
+        metadata={
+            "feature": "lab_review",
+            "client_id": lab.get("client_id"),
+            "test_name": lab.get("test_name"),
+            "latency_ms": latency_ms,
+            "history_size": len(history),
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    return payload
