@@ -115,6 +115,7 @@ const NAV = {
       items: [
         { to: "/portal/provider/account", label: "My Account", icon: UserCircle },
         { to: "/portal/provider/security", label: "Security", icon: ShieldCheck },
+        { to: "/legal", label: "Legal & Policies", icon: Scale },
       ],
     },
   ],
@@ -156,6 +157,7 @@ const NAV = {
       items: [
         { to: "/portal/staff/account", label: "My Account", icon: UserCircle },
         { to: "/portal/staff/security", label: "Security", icon: ShieldCheck },
+        { to: "/legal", label: "Legal & Policies", icon: Scale },
       ],
     },
   ],
