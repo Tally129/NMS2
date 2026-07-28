@@ -1022,3 +1022,49 @@ checkout writes back onto the appointment.
   green (Bedrock + features + handoffs).
 
 _Last updated: Feb 28, 2026 (Sprint 11 · Staff Handoff Wiring)_
+
+---
+
+## Sprint 11.1 · Privacy-Safe Secure-Message Alerts (Feb 28, 2026)
+
+### Scope
+Replaced the leaky per-message push loop with a single privacy-safe
+notification helper that sends BOTH web push and email alerts without
+ever including the sender name, subject, message body, or attachment
+details. Message content stays inside the portal.
+
+### Changes
+- **`backend/routers/health_track.py`** — new helpers
+  `_message_recipient` (resolves the other portal user for a two-party
+  thread), `_message_portal_path`, and `_notify_new_secure_message`
+  (fires push + SendGrid email through the existing `notifiers`). Both
+  channels wrap the actual send in `try/except` so the message insert
+  always succeeds even if the alert channels fail. Email uses
+  `redact_recipient=True` so the audit log stores only a SHA-256 prefix.
+  `create_thread` fires the helper on the first message; `post_message`
+  replaces the old per-participant push loop with a single call.
+- **`backend/routers/health_track.py`** — links use `FRONTEND_ORIGIN`
+  (matching the rest of the codebase) instead of `FRONTEND_URL`.
+- **`frontend/public/service-worker.js`** — VERSION bumped to
+  `nms-v9-2026-07-28-secure-message-push`; `renotify: true` added so
+  successive alerts with the same tag surface fresh notifications
+  instead of being silently coalesced.
+- **`frontend/src/components/PushOptInBanner.jsx`** — copy updated to
+  advertise secure-message alerts and to reassure users that message
+  details stay inside the portal.
+- **`frontend/src/pages/portal/Messages.jsx`** — header subtitle
+  clarifies that email alerts never include message details.
+
+### Guardrails verified
+- Push payload is a fixed generic string ("You have a new secure
+  message.") — no sender identity, subject, or body.
+- Email HTML + plain-text bodies contain only a generic sender label
+  ("your care team" or "a patient"), a portal link, and a
+  non-monitoring/911 disclaimer — no PHI.
+- Audit trail records only the thread id via `payload_metadata`; the
+  recipient email is hashed via `redact_recipient=True`.
+- 41/41 backend tests still pass. Live smoke: creating a thread and
+  sending a follow-up both return 200; SendGrid failures are caught
+  without failing the message insert.
+
+_Last updated: Feb 28, 2026 (Sprint 11.1 · Privacy-Safe Secure-Message Alerts)_

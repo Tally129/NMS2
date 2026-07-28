@@ -42,7 +42,7 @@ export default function PushOptInBanner() {
     try {
       const ok = await ensurePushSubscription();
       if (ok) {
-        toast({ title: "Notifications enabled", description: "We'll ping you for visits, forms, and protocol updates." });
+        toast({ title: "Notifications enabled", description: "We'll alert you to secure messages, visits, forms, and protocol updates." });
         try { localStorage.setItem(DISMISS_KEY, "granted"); } catch {}
         setShow(false);
       } else {
@@ -69,7 +69,7 @@ export default function PushOptInBanner() {
       <div className="flex-1 min-w-0">
         <div className="font-display text-base text-[#1f2a22] leading-tight">Stay in the loop</div>
         <p className="text-xs text-[#5a5a5a] mt-1">
-          Enable browser notifications for visit reminders, new forms, and protocol updates. We never push marketing.
+          Enable app notifications for secure messages, visit reminders, new forms, and protocol updates. Message details stay inside the portal.
         </p>
         <div className="flex items-center gap-2 mt-3">
           <button

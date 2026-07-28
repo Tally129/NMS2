@@ -6,12 +6,13 @@ Extracted from server.py during Phase 16 refactor.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import os
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, HTTPException, Query, Request
 
 from audit import get_client_ip, log_audit
-from notifiers import push_to_user
+from notifiers import push_to_user, send_email
 from deps import (
     _resolve_self_client, _strip_id, api, db, get_current_user, require_roles,
 )
@@ -145,6 +146,78 @@ async def delete_lab(lab_id: str, request: Request, user=Depends(require_roles("
     return {"ok": True}
 
 
+async def _message_recipient(thread: dict, sender: dict) -> Optional[dict]:
+    """Resolve the other portal user for a two-party patient/care-team thread."""
+    if sender.get("role") == "client":
+        return await db.users.find_one({"id": thread.get("practitioner_id"), "is_active": {"$ne": False}})
+
+    client = await db.clients.find_one({"id": thread.get("client_id")})
+    if not client or not client.get("user_id"):
+        return None
+    return await db.users.find_one({"id": client["user_id"], "is_active": {"$ne": False}})
+
+
+def _message_portal_path(recipient: dict) -> str:
+    return (
+        "/portal/patient/messages"
+        if recipient.get("role") == "client"
+        else "/portal/provider/messages"
+    )
+
+
+async def _notify_new_secure_message(thread: dict, sender: dict) -> dict:
+    """Send privacy-safe push and email alerts; message content stays in the portal."""
+    recipient = await _message_recipient(thread, sender)
+    if not recipient:
+        return {"push": 0, "email": "skipped"}
+
+    portal_path = _message_portal_path(recipient)
+
+    # Never include sender identity, thread subject, message body, attachments,
+    # diagnosis, treatment, or other PHI in a lock-screen notification.
+    push_count = 0
+    try:
+        push_count = await push_to_user(
+            recipient["id"],
+            "Natural Medical Solutions",
+            "You have a new secure message.",
+            url=portal_path,
+            tag="secure-message",
+        )
+    except Exception:
+        # The in-app message must still save if web push is unavailable.
+        push_count = 0
+
+    email_status = "skipped"
+    if recipient.get("email"):
+        app_url = os.environ.get("FRONTEND_ORIGIN", "").rstrip("/")
+        portal_url = f"{app_url}{portal_path}" if app_url else portal_path
+        sender_label = "your care team" if sender.get("role") != "client" else "a patient"
+        try:
+            email_status = await send_email(
+                db,
+                recipient["email"],
+                "New secure message available",
+                (
+                    "<p>You have a new secure message from " + sender_label + ".</p>"
+                    "<p>For your privacy, message details are not included in this email.</p>"
+                    f'<p><a href="{portal_url}">Sign in to the secure portal</a> to read and respond.</p>'
+                    "<p>This inbox is not monitored for emergencies. Call 911 for an emergency.</p>"
+                ),
+                plain_text=(
+                    "You have a new secure message. For your privacy, message details are not "
+                    f"included in this email. Sign in to the secure portal: {portal_url}"
+                ),
+                action="message.secure_alert",
+                payload_metadata={"thread_id": thread.get("id")},
+                redact_recipient=True,
+            )
+        except Exception:
+            email_status = "failed"
+
+    return {"push": push_count, "email": email_status}
+
+
 # ---------- Secure Messaging ----------
 MESSAGE_TEMPLATES = [
     {"id": "follow_up", "label": "Follow-up reminder", "body": "This is a friendly reminder about your follow-up visit. Please log in to the portal to schedule."},
@@ -241,6 +314,7 @@ async def create_thread(payload: ThreadIn, request: Request, user=Depends(get_cu
             "last_message_at": msg["created_at"],
             "last_message_preview": payload.first_message[:140],
         }})
+        await _notify_new_secure_message(doc, user)
 
     await log_audit(db, user["id"], user["email"], "message.thread_create",
                     resource_type="thread", resource_id=doc["id"],
@@ -300,18 +374,9 @@ async def post_message(thread_id: str, payload: MessageIn, request: Request, use
         "last_message_at": now,
         "last_message_preview": payload.body[:140],
     }})
-    # Push: notify other thread participants
+    # Privacy-safe push + email alerts. Message details remain inside the portal.
     thread = await db.message_threads.find_one({"id": thread_id})
-    sender_name = user.get("full_name") or user.get("email", "")
-    for pid in (thread or {}).get("participant_ids", []):
-        if pid != user["id"]:
-            await push_to_user(
-                pid,
-                f"New message from {sender_name}",
-                payload.body[:120],
-                url="/portal/patient/messages" if (await db.users.find_one({"id": pid}) or {}).get("role") == "client" else "/portal/provider/messages",
-                tag=f"msg-{thread_id}",
-            )
+    await _notify_new_secure_message(thread or t, user)
     await log_audit(db, user["id"], user["email"], "message.send",
                     resource_type="thread", resource_id=thread_id,
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))

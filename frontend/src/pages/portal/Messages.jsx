@@ -119,7 +119,7 @@ export default function Messages() {
     <PortalLayout>
       <PortalHeader
         title="Messages"
-        subtitle="Secure, PHI-free notes between you and your care team."
+        subtitle="Secure messages between patients and the care team. Email alerts never include message details."
         actions={<Button onClick={() => setNewOpen(true)} className="rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]"><Plus size={14} className="mr-2" /> New message</Button>}
       />
 

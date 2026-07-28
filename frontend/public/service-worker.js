@@ -1,7 +1,7 @@
 /* Natural Medical Solutions — service worker
  * Network-first for /api (fresh PHI), cache-first for static assets.
  */
-const VERSION = "nms-v8-2026-07-24-legal-policies";
+const VERSION = "nms-v9-2026-07-28-secure-message-push";
 const STATIC_CACHE = `${VERSION}-static`;
 const ASSET_PATTERNS = [/\.css$/, /\.js$/, /\.woff2?$/, /\.png$/, /\.svg$/, /\.ico$/];
 
@@ -67,6 +67,7 @@ self.addEventListener("push", (event) => {
     badge: "/icons/icon-192.png",
     data: { url: data.url || "/portal" },
     tag: data.tag || "natmedsol-notification",
+    renotify: true,
   };
   event.waitUntil(self.registration.showNotification(title, options));
 });
