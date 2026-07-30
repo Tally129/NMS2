@@ -4,7 +4,7 @@
 HIPAA-aligned wellness EMR for `natmedsol.com` (Natural Medical Solutions Wellness Center). Wellness office, **not** a medical practice. Single-tenant private app, not SaaS. Aesthetic adapted from medspa-concierge to NatMedSol's deep-green / parchment / gold palette.
 
 ## Personas
-- **Client:** PWA-installable; schedule, intake, chart/labs/plan, secure messaging, billing. Sign in with **email or Google**.
+- **Client:** PWA-installable; schedule, intake, chart/labs/plan, secure messaging, billing. Sign in with **email + password + MFA** (Google SSO was removed 2026-07-30, Session 2a).
 - **Practitioner:** schedule (full EHR view), charts, telehealth (live SOAP sidebar + AI draft), messaging, treatments, time clock, analytics.
 - **Staff:** front desk, POS, transactions, inventory (lots/expiry), time clock.
 - **Admin:** all of the above + user mgmt, audit, CSV import, EOD reports, manual time-clock edits.
@@ -1172,3 +1172,95 @@ every route path / schema / cookie / MFA behaviour is unchanged, and
   HttpOnly refresh cookie; refresh rotates the cookie.
 
 _Last updated: Feb 28, 2026 (Sprint 12.5 · Auth Router Refactor)_
+
+
+---
+
+## Sprint 12.6 · Session 2a — Google OAuth Removal (2026-07-30) ✅
+
+**Branch**: `auth-remove-google` (forked from `auth-refactor-session-1-1785441186`)
+
+**Scope**: Remove Google SSO (Emergent-managed session exchange + direct
+Google OAuth authorize/callback/exchange) end-to-end. MongoDB-backed
+password/MFA runtime is preserved. The PostgreSQL runtime cutover is
+NOT part of this session.
+
+### Deleted
+- `backend/routers/auth_impl/oauth.py`
+- `backend/postgres_models/oauth.py`
+- `backend/repositories/oauth.py`
+- `frontend/src/pages/OAuthComplete.jsx`
+- `backend/tests/test_sprint2_oauth_exchange.py`
+- `auth_testing.md` (repo-root Google-flow doc)
+
+### Modified — Backend
+- `routers/auth_impl/__init__.py` — dropped `from . import oauth`
+- `postgres_models/__init__.py` — dropped `OAuthState` / `OAuthHandoff` exports
+- `alembic/env.py` — dropped OAuth model imports
+- `server.py` — `/api/health` integrations dict no longer reports
+  `google_oauth_direct`. Removed the empty "Emergent-managed Google SSO"
+  section marker.
+- `routers/compliance.py` — BAA checklist defaults now 7 rows
+  (`google_workspace` entry removed).
+- `routers/auth_impl/registration.py` — comment about Google-satisfies-MFA
+  reworded; `mfa_bypass` field kept on user docs but no code path sets
+  it now.
+- `backend/.env` and `backend/.env.example` — removed
+  `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` / `_REDIRECT_URI` variables.
+
+### Modified — Frontend
+- `components/AuthCard.jsx` — removed the "Continue with Google" button,
+  the `googleDirectOn` / `googleSignInEmergent` / `googleSignInDirect`
+  callbacks, the `#session_id=` hash callback handler, and the
+  `redirectPath` prop.
+- `lib/auth.jsx` — dropped `loginWithGoogleSession`,
+  `beginGoogleOAuthDirect`, and `completeOAuthFromTokens` from the auth
+  context.
+- `App.js` — removed `OAuthComplete` import + the `/oauth-complete` route.
+- `pages/Home.jsx` — removed the Google SSO button from the footer sign-in
+  strip; replaced with a "Staff Sign In" link.
+- `pages/Login.jsx` + `pages/StaffLogin.jsx` — removed the unused
+  `redirectPath` prop.
+
+### New Alembic migration (forward-only)
+- `backend/alembic/versions/2026_07_30_2131-af896f736c94_drop_oauth_tables.py`
+  drops `auth_oauth_handoffs` and `auth_oauth_states` (plus their indexes).
+  Downgrade recreates them. The initial revision was NOT rewritten.
+  Applied against the dev PostgreSQL instance (`alembic current` reports
+  `af896f736c94 (head)`).
+
+### Tests updated to expect 404
+- `test_auth_refactor_characterization.py` — added `TestGoogleOAuthRemoved`;
+  the "≥20 auth routes" assertion is now "≥16" AND explicitly asserts
+  `google_routes == set()`.
+- `test_iter16_phase16.py` — health check no longer asserts
+  `google_oauth_direct`; the 503 tests are replaced by 404 assertions.
+- `test_p0_login_fix.py` — item 5 flipped from 503 → 404.
+- `test_uat_final_pass.py` — replaced `TestOAuthExchange` with
+  `TestOAuthRoutesRemoved`.
+- `test_phase8.py` — replaced `TestGoogleSession` with `TestGoogleSsoRemoved`.
+- `test_sprint4_rbac_inventory.py` — dropped the Google routes from
+  `PUBLIC_ROUTES` (they no longer exist to gate).
+- `test_phase15_hipaa.py` — BAA row count 8 → 7; removed `google_workspace`
+  from expected keys; replaced `anthropic` with `aws_bedrock` to match the
+  Bedrock migration.
+- `test_pg_auth_foundation.py` — dropped OAuth model/repo imports and the
+  `TestOAuth` class.
+
+### Verification
+- Testing agent report `/app/test_reports/iteration_25.json`:
+  **11/11 pass** for the new `test_session2a_google_removal.py` suite;
+  **13/13 pass** for the updated characterization suite.
+- Frontend Playwright: Home, `/staff-login`, `/login`, `/oauth-complete`
+  all render as expected (no Google button, `/oauth-complete` falls
+  through to the router's default handling).
+- End-to-end MFA login smoke (admin + TOTP) → `/portal/admin` succeeds.
+- BAA checklist returns 7 rows with the expected key set after purging
+  the two legacy Mongo rows (`google_workspace`, `anthropic`).
+
+### Non-goals confirmed
+- No PostgreSQL runtime cutover.
+- No rewrite of the initial Alembic revision.
+- No admin bootstrap changes.
+
+_Last updated: 2026-07-30 (Session 2a · Google OAuth Removal)_
