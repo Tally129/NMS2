@@ -256,11 +256,6 @@ async def health():
             "llm": llm_client.provider(),
             "email": notifiers.email_status(),
             "sms": notifiers.sms_status(),
-            "google_oauth_direct": bool(
-                os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
-                and os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
-                and os.environ.get("GOOGLE_OAUTH_REDIRECT_URI")
-            ),
         },
     }
 
@@ -460,10 +455,6 @@ async def _expiring_inventory_loop():
         except Exception as e:
             logger.warning("expiring loop tick failed: %s", e)
         await _asyncio.sleep(60 * 60 * 24)  # daily
-
-
-# ---------- Emergent-managed Google SSO ----------
-
 
 
 # =================== STARTUP ===================

@@ -26,7 +26,6 @@ async def get_baa_checklist(user=Depends(require_roles("admin"))):
         {"key": "aws_bedrock",      "vendor": "AWS (Amazon Bedrock)",   "purpose": "AI SOAP drafting, form transcription, protocol AI (BAA-covered under the AWS BAA)",     "required": True,  "docs_url": "https://aws.amazon.com/compliance/hipaa-compliance/"},
         {"key": "twilio",           "vendor": "Twilio",                 "purpose": "Appointment reminder SMS + patient link delivery",       "required": True,  "docs_url": "https://www.twilio.com/legal/baa"},
         {"key": "sendgrid",         "vendor": "SendGrid (Twilio)",      "purpose": "Transactional email — form links, receipts",              "required": True,  "docs_url": "https://sendgrid.com/en-us/policies/legal/hipaa"},
-        {"key": "google_workspace", "vendor": "Google Workspace + OAuth","purpose": "Direct Google SSO replacing Emergent-managed SSO",       "required": True,  "docs_url": "https://support.google.com/a/answer/3407054"},
         {"key": "stripe",           "vendor": "Stripe",                 "purpose": "Card processing (Stripe does NOT sign BAAs — safe if no PHI in metadata)", "required": False, "docs_url": "https://support.stripe.com/questions/hipaa-compliance-and-stripe"},
         {"key": "emergent_migration","vendor": "Emergent (hosting)",    "purpose": "Application has migrated to AWS EC2 with an instance IAM role for Bedrock. Mark this row as not_applicable once the AWS environment is confirmed.", "required": False, "docs_url": None},
     ]

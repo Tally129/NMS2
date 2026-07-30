@@ -14,13 +14,12 @@ import { getErrorMessage } from "../lib/errors";
  * the Staff & Provider Portal (`/staff-login`).
  *
  * Both pages render an identical layout, typography, spacing, branding and
- * animations — the only differences are the title, subtitle, the cross-portal
- * link at the bottom, and (for the Google Emergent flow) which URL the OAuth
- * provider redirects back to.
+ * animations — the only differences are the title, subtitle and the
+ * cross-portal link at the bottom.
  *
- * All authentication logic — email/password login, MFA challenge, Google OAuth
- * (both Emergent-managed and direct backend flows), workforce vs. client
- * routing — is centralized here so the two portals cannot drift apart.
+ * All authentication logic — email/password login, MFA challenge, workforce
+ * vs. client routing — is centralized here so the two portals cannot drift
+ * apart.
  */
 export default function AuthCard({
   variant,          // "patient" | "staff"
@@ -29,14 +28,11 @@ export default function AuthCard({
   crossPortalTo,    // where to send a user who chose the "wrong" portal link
   crossPortalLabel,
   crossPortalLinkText,
-  redirectPath,     // where the Emergent OAuth flow returns to (usually this page)
 }) {
   const { toast } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
-  const {
-    loginWithPassword, loginWithGoogleSession, beginGoogleOAuthDirect,
-  } = useAuth();
+  const { loginWithPassword } = useAuth();
 
   const [form, setForm] = React.useState(() => {
     let last = "";
@@ -84,45 +80,6 @@ export default function AuthCard({
     } finally { setBusy(false); }
   };
 
-  // --- Google: Emergent-managed by default; use direct backend flow if wired.
-  const [googleDirectOn, setGoogleDirectOn] = React.useState(false);
-  React.useEffect(() => {
-    import("../lib/api").then(({ api }) =>
-      api.get("/health")
-        .then((r) => setGoogleDirectOn(Boolean(r.data?.integrations?.google_oauth_direct)))
-        .catch(() => setGoogleDirectOn(false)),
-    );
-  }, []);
-
-  const googleSignInEmergent = () => {
-    const redirect = `${window.location.origin}${redirectPath || "/login"}`;
-    window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirect)}`;
-  };
-  const googleSignInDirect = async () => {
-    try {
-      await beginGoogleOAuthDirect();
-    } catch (e) {
-      toast({ title: "Google sign-in unavailable", description: getErrorMessage(e) || e.message });
-    }
-  };
-
-  // Handle Emergent Google callback: `#session_id=...` fragment.
-  React.useEffect(() => {
-    const hash = window.location.hash || "";
-    const m = hash.match(/session_id=([^&]+)/);
-    if (!m) return;
-    (async () => {
-      try {
-        const res = await loginWithGoogleSession(m[1]);
-        window.history.replaceState({}, document.title, window.location.pathname);
-        finishLogin(res);
-      } catch (err) {
-        toast({ title: "Google sign-in failed", description: getErrorMessage(err) || "Try email sign-in instead." });
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   return (
     <div className="page-fade min-h-screen bg-gradient-to-b from-white via-[#f4f7f2] to-[#eef3ec] font-body" data-testid={`${variant}-login-page`}>
       <div className="h-1 w-full bg-gradient-to-r from-[#7fa48b] via-[#c19a4b] to-[#7fa48b]" />
@@ -153,28 +110,6 @@ export default function AuthCard({
 
       <section className="max-w-md mx-auto px-6 mt-8 pb-10">
         <div className="rounded-3xl border border-[#e2ebe4] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04),0_10px_30px_-15px_rgba(47,106,74,0.15)] p-7 sm:p-8 animate-[fadeIn_.45s_ease-out]">
-          <Button
-            type="button"
-            data-testid={`${variant}-google-sso`}
-            onClick={googleDirectOn ? googleSignInDirect : googleSignInEmergent}
-            variant="outline"
-            className="btn-lift h-11 w-full rounded-full border-[#cfe0d3] bg-white text-slate-700 hover:bg-[#f6faf7] hover:border-[#7fa48b] transition-all"
-          >
-            <svg width="16" height="16" viewBox="0 0 48 48" className="mr-2">
-              <path fill="#FFC107" d="M43.611,20.083H42V20H24v8h11.303c-1.649,4.657-6.08,8-11.303,8c-6.627,0-12-5.373-12-12s5.373-12,12-12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C12.955,4,4,12.955,4,24s8.955,20,20,20s20-8.955,20-20C44,22.659,43.862,21.35,43.611,20.083z"/>
-              <path fill="#FF3D00" d="M6.306,14.691l6.571,4.819C14.655,15.108,18.961,12,24,12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C16.318,4,9.656,8.337,6.306,14.691z"/>
-              <path fill="#4CAF50" d="M24,44c5.166,0,9.86-1.977,13.409-5.192l-6.19-5.238C29.211,35.091,26.715,36,24,36c-5.202,0-9.619-3.317-11.283-7.946l-6.522,5.025C9.505,39.556,16.227,44,24,44z"/>
-              <path fill="#1976D2" d="M43.611,20.083H42V20H24v8h11.303c-0.792,2.237-2.231,4.166-4.087,5.571l6.19,5.238C36.971,39.205,44,34,44,24C44,22.659,43.862,21.35,43.611,20.083z"/>
-            </svg>
-            Continue with Google
-          </Button>
-
-          <div className="flex items-center gap-3 my-5">
-            <div className="flex-1 h-px bg-[#e2ebe4]" />
-            <span className="text-[11px] tracking-widest uppercase text-slate-400">or</span>
-            <div className="flex-1 h-px bg-[#e2ebe4]" />
-          </div>
-
           <form onSubmit={submit} className="space-y-4">
             <div>
               <Label htmlFor={`${variant}-email`} className="text-slate-700">Email</Label>

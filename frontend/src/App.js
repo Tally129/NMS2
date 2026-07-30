@@ -55,7 +55,6 @@ import LabReviewQueue from "./pages/portal/LabReviewQueue";
 import CampaignCenter from "./pages/portal/CampaignCenter";
 import Accounting from "./pages/portal/Accounting";
 import StaffLogin from "./pages/StaffLogin";
-import OAuthComplete from "./pages/OAuthComplete";
 import MfaChallenge from "./pages/MfaChallenge";
 import ChangePassword from "./pages/ChangePassword";
 import Unsubscribe from "./pages/Unsubscribe";
@@ -94,7 +93,6 @@ function App() {
             <Route path="/login" element={<Login />} />
             <Route path="/patient-login" element={<Login />} />
             <Route path="/staff-login" element={<StaffLogin />} />
-            <Route path="/oauth-complete" element={<OAuthComplete />} />
             <Route path="/mfa-challenge" element={<MfaChallenge />} />
             <Route path="/change-password" element={<Protected><ChangePassword /></Protected>} />
             <Route path="/unsubscribe" element={<Unsubscribe />} />

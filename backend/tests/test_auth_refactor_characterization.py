@@ -38,7 +38,12 @@ class TestRouterStructureUnchanged:
             "/api/auth/sessions", "/api/auth/me",
         }
         assert expected.issubset(paths), f"missing: {expected - paths}"
-        assert len(paths) >= 20, f"expected ≥20 auth routes, got {len(paths)}"
+        # Session 2a removed the four Google OAuth routes; the surface is now
+        # ≥16 auth endpoints. Assert a floor so accidental deletions still trip.
+        assert len(paths) >= 16, f"expected ≥16 auth routes, got {len(paths)}"
+        # And confirm every Google endpoint has been removed.
+        google_routes = {p for p in paths if "/google" in p}
+        assert google_routes == set(), f"Google routes must be gone: {google_routes}"
 
     def test_helpers_still_exposed_on_routers_auth(self):
         from routers.auth import (  # noqa: F401
@@ -113,3 +118,25 @@ class TestPasswordResetContract:
                           timeout=15)
         # Generic success — never a 4xx that could enumerate accounts.
         assert r.status_code == 200, r.text[:200]
+
+
+class TestGoogleOAuthRemoved:
+    """Session 2a — every Google OAuth surface must return 404."""
+
+    def test_authorize_route_removed(self):
+        r = requests.get(f"{API}/auth/google/oauth/authorize", timeout=15)
+        assert r.status_code == 404, r.text[:200]
+
+    def test_callback_route_removed(self):
+        r = requests.get(f"{API}/auth/google/oauth/callback",
+                         params={"code": "x", "state": "y"}, timeout=15)
+        assert r.status_code == 404, r.text[:200]
+
+    def test_exchange_route_removed(self):
+        r = requests.post(f"{API}/auth/google/oauth/exchange",
+                          json={"handoff_id": "x"}, timeout=15)
+        assert r.status_code == 404, r.text[:200]
+
+    def test_emergent_session_route_removed(self):
+        r = requests.post(f"{API}/auth/google/session", timeout=15)
+        assert r.status_code == 404, r.text[:200]

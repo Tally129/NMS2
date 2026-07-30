@@ -31,12 +31,11 @@ if not os.environ.get("DATABASE_URL"):
 
 from postgres_db import AsyncSessionLocal  # noqa: E402
 from postgres_models import (  # noqa: E402
-    AuditLog, Client, LoginContinuation, LoginHistory, OAuthHandoff,
-    OAuthState, PasswordResetToken, RefreshToken, User, UserSession,
+    AuditLog, Client, LoginContinuation, LoginHistory,
+    PasswordResetToken, RefreshToken, User, UserSession,
 )
 from repositories import audit as audit_repo  # noqa: E402
 from repositories import login as login_repo  # noqa: E402
-from repositories import oauth as oauth_repo  # noqa: E402
 from repositories import password_reset as pr_repo  # noqa: E402
 from repositories import refresh_tokens as tokens_repo  # noqa: E402
 from repositories import user_sessions as sessions_repo  # noqa: E402
@@ -224,35 +223,10 @@ class TestPasswordReset:
 
 
 # ---------------------------------------------------------------- oauth #
-
-class TestOAuth:
-    @pytest.mark.asyncio
-    async def test_state_is_single_use(self, db_session):
-        state = secrets.token_urlsafe(32)
-        async with db_session.begin():
-            await oauth_repo.create_state(
-                db_session, state=state,
-                expires_at=_now() + timedelta(minutes=10),
-            )
-        async with db_session.begin():
-            assert await oauth_repo.consume_state(db_session, state) is True
-        async with db_session.begin():
-            assert await oauth_repo.consume_state(db_session, state) is False
-
-    @pytest.mark.asyncio
-    async def test_handoff_deletes_after_consume(self, db_session, sample_user):
-        hid = secrets.token_urlsafe(24)
-        async with db_session.begin():
-            await oauth_repo.create_handoff(
-                db_session, handoff_id=hid, user_id=sample_user["id"],
-                access_token="access-abc", refresh_cookie_value="refresh-xyz",
-            )
-        async with db_session.begin():
-            payload = await oauth_repo.consume_handoff(db_session, hid)
-            assert payload is not None
-            assert payload["access_token"] == "access-abc"
-        async with db_session.begin():
-            assert await oauth_repo.consume_handoff(db_session, hid) is None
+# OAuth support was removed in Session 2a (auth-remove-google branch).
+# The auth_oauth_states / auth_oauth_handoffs tables were dropped by the
+# `drop oauth tables` Alembic migration, and the corresponding repository
+# and model have been deleted. No test coverage remains here.
 
 
 # ---------------------------------------------------------------- audit chain #

@@ -11,7 +11,7 @@ Scope (do NOT expand):
   2. POST /api/auth/login (no MFA) 200 + mfa_required=true
   3. POST /api/auth/login (+TOTP)  200 + JWT + Set-Cookie nms_rt
   4. POST /api/auth/refresh        200 + rotated nms_rt, no refresh_token in body
-  5. GET  /api/auth/google/oauth/authorize -> 503 "Direct Google OAuth not configured"
+  5. GET  /api/auth/google/oauth/authorize -> 404 (route removed in Session 2a)
   6. Concurrency: 10 parallel bad-login attempts finish <5s each, no hangs.
 """
 from __future__ import annotations
@@ -150,25 +150,18 @@ def test_refresh_returns_new_access_and_rotates_cookie():
     )
 
 
-# --- 5. Direct Google OAuth authorize -> 503 by design --------------------
+# --- 5. Direct Google OAuth authorize -> 404 (route removed) --------------
 
 
-def test_google_oauth_authorize_returns_503_by_design():
+def test_google_oauth_authorize_route_removed():
     r = requests.get(
         f"{BASE_URL}/api/auth/google/oauth/authorize",
         timeout=10,
         allow_redirects=False,
     )
-    assert r.status_code == 503, (
-        f"expected 503 (direct OAuth not configured), got {r.status_code}: {r.text[:300]}"
-    )
-    try:
-        body = r.json()
-    except Exception:
-        body = {}
-    detail = (body.get("detail") or "").lower()
-    assert "google" in detail and ("not configured" in detail or "configured" in detail), (
-        f"detail body should mention Google not configured, got: {body}"
+    assert r.status_code == 404, (
+        f"expected 404 (Google OAuth removed in Session 2a), "
+        f"got {r.status_code}: {r.text[:300]}"
     )
 
 

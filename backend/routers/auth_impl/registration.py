@@ -138,8 +138,8 @@ async def login(payload: LoginIn, request: Request):
                     resource_type="user", resource_id=user["id"],
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
 
-    # `mfa_bypass=true` accounts (e.g. Google-authenticated admins whose
-    # Google account already enforces 2FA) skip the internal TOTP gate.
+    # `mfa_bypass=true` accounts skip the internal TOTP gate (legacy flag
+    # retained on user documents; no runtime path currently sets it).
     starts_satisfied = mfa_satisfied_now or (role not in WORKFORCE_ROLES) or bool(user.get("mfa_bypass"))
     sid, family_id, raw_refresh = await _create_session(user, request, mfa_satisfied=starts_satisfied)
     access = make_access_token(user["id"], role, sid, session_version=user.get("session_version", 1))

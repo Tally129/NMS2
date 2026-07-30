@@ -15,4 +15,3 @@ from . import sessions  # noqa: F401
 from . import mfa  # noqa: F401
 from . import profile  # noqa: F401
 from . import password_reset  # noqa: F401
-from . import oauth  # noqa: F401

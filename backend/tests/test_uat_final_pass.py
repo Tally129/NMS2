@@ -11,7 +11,7 @@ Covers the explicit checklist items from the review_request:
   * Cross-tab logout: /auth/logout-all revokes cookie + access token
   * File upload: clean text (200 clean), EICAR (200 infected) + 451 on download
   * Break-glass activate + list + client 403
-  * OAuth /oauth-complete + exchange endpoint contract
+  * Google OAuth routes are gone (Session 2a) — must 404
 """
 from __future__ import annotations
 
@@ -345,50 +345,24 @@ class TestBreakGlass:
 
 
 # --------------------------------------------------------------------------- #
-# 9. OAuth exchange contract (no real Google — just contract shape)
+# 9. Google OAuth removed (Session 2a) — every legacy route must 404
 # --------------------------------------------------------------------------- #
-class TestOAuthExchange:
-    def test_exchange_rejects_unknown_handoff(self):
-        # Public endpoint. An unknown handoff must not 500; expect 400/401/404.
+class TestOAuthRoutesRemoved:
+    def test_exchange_returns_404(self):
         s = requests.Session()
         r = s.post(f"{API}/auth/google/oauth/exchange",
                    json={"handoff_id": f"not-a-real-handoff-{uuid.uuid4().hex}"})
-        assert r.status_code in (400, 401, 404), r.text
-        # Contract: NEVER 500 for a bad handoff.
-        assert r.status_code < 500
+        assert r.status_code == 404, r.text
 
-    def test_exchange_valid_handoff_returns_access_token_and_sets_cookie(self):
-        """We synthesize a handoff row directly (simulating post-Google callback)
-        and verify the exchange endpoint contract: JSON body has access_token +
-        user, and Set-Cookie contains nms_rt."""
-        db = _db()
-        # Pick an existing admin user for the handoff subject
-        user = db.users.find_one({"email": ADMIN[0]})
-        assert user, "seed admin missing"
-        from datetime import datetime, timedelta, timezone
-        handoff_id = f"h_{uuid.uuid4().hex}"
-        db.oauth_handoffs.insert_one({
-            "id": handoff_id,
-            "user_id": user["id"],
-            "created_at": datetime.now(timezone.utc),
-            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
-            "consumed_at": None,
-        })
-        try:
-            s = requests.Session()
-            r = s.post(f"{API}/auth/google/oauth/exchange",
-                       json={"handoff_id": handoff_id})
-            # Contract: 200 + access_token + user; Set-Cookie has nms_rt HttpOnly.
-            if r.status_code == 200:
-                body = r.json()
-                assert "access_token" in body
-                assert body.get("user", {}).get("email") == ADMIN[0]
-                raw = r.headers.get("Set-Cookie", "")
-                assert "nms_rt=" in raw
-                assert "HttpOnly" in raw or "httponly" in raw.lower()
-            else:
-                # If not 200, the shape must still be a clean 4xx (never 500)
-                assert r.status_code < 500, r.text
-                pytest.skip(f"handoff shape rejected ({r.status_code}); acceptable — record schema mismatch")
-        finally:
-            db.oauth_handoffs.delete_one({"id": handoff_id})
+    def test_authorize_returns_404(self):
+        r = requests.get(f"{API}/auth/google/oauth/authorize")
+        assert r.status_code == 404, r.text
+
+    def test_callback_returns_404(self):
+        r = requests.get(f"{API}/auth/google/oauth/callback",
+                         params={"code": "x", "state": "y"})
+        assert r.status_code == 404, r.text
+
+    def test_session_exchange_returns_404(self):
+        r = requests.post(f"{API}/auth/google/session")
+        assert r.status_code == 404, r.text

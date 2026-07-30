@@ -238,14 +238,14 @@ class TestDisclosures:
 # ---------- (G) BAA checklist ----------
 
 class TestBAAChecklist:
-    def test_admin_get_baa_returns_8_rows(self, admin_token):
+    def test_admin_get_baa_returns_7_rows(self, admin_token):
         r = requests.get(f"{API}/compliance/baa-checklist", headers=_headers(admin_token), timeout=15)
         assert r.status_code == 200
         rows = r.json()
-        assert len(rows) == 8, f"expected 8 rows, got {len(rows)}"
+        assert len(rows) == 7, f"expected 7 rows, got {len(rows)}"
         keys = {row["key"] for row in rows}
-        expected_keys = {"mongodb_atlas", "aws", "anthropic", "twilio", "sendgrid",
-                         "google_workspace", "stripe", "emergent_migration"}
+        expected_keys = {"mongodb_atlas", "aws", "aws_bedrock", "twilio", "sendgrid",
+                         "stripe", "emergent_migration"}
         assert keys == expected_keys, f"got keys: {keys}"
 
     def test_practitioner_get_baa_forbidden(self, prac_token):

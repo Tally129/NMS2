@@ -28,7 +28,6 @@ from postgres_models import (  # noqa: E402,F401
     User, Client, UserSession, RefreshToken,
     LoginHistory, LoginContinuation,
     PasswordResetAttempt, PasswordResetToken,
-    OAuthState, OAuthHandoff,
     AuditLog, SecurityEvent,
 )
 

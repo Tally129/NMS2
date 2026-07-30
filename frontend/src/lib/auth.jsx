@@ -100,37 +100,10 @@ export function AuthProvider({ children }) {
     return { user: data.user };
   }
 
-  async function loginWithGoogleSession(sessionId) {
-    const { data } = await api.post("/auth/google/session", null, { headers: { "X-Session-ID": sessionId } });
-    setAccessToken(data.access_token);
-    localStorage.setItem(LS.user, JSON.stringify(data.user));
-    touchActivity();
-    setUser(data.user);
-    return { user: data.user };
-  }
-
-  async function beginGoogleOAuthDirect() {
-    const { data } = await api.get("/auth/google/oauth/authorize");
-    window.location.href = data.authorize_url;
-  }
-
-  async function completeOAuthFromTokens(accessToken, user) {
-    // Sprint 2: refresh token is delivered via the `nms_rt` HttpOnly cookie
-    // by the /auth/google/oauth/exchange response. We only receive the
-    // memory-bound access token and the user profile here.
-    if (!accessToken || !user) throw new Error("OAuth exchange returned no token");
-    setAccessToken(accessToken);
-    localStorage.setItem(LS.user, JSON.stringify(user));
-    touchActivity();
-    setUser(user);
-    return { user };
-  }
-
   return (
     <AuthContext.Provider
       value={{
         user, loading, logout, logoutAll, loginWithPassword, loginContinue, registerNew, refreshMe, setUser,
-        loginWithGoogleSession, beginGoogleOAuthDirect, completeOAuthFromTokens,
       }}
     >
       {children}
