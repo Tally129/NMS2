@@ -1,6 +1,6 @@
-"""sessions — split from routers/auth.py during Session 1 of the PG migration.
-Behaviour is unchanged. All helpers are shared via _common."""
+"""sessions — Session 2b PostgreSQL runtime cutover."""
 from ._common import *  # noqa: F401,F403
+
 
 @api.post("/auth/logout")
 async def logout(request: Request, response: Response, user=Depends(get_authenticated_user)):
@@ -34,8 +34,9 @@ async def list_my_sessions(user=Depends(get_authenticated_user)):
 
 @api.delete("/auth/sessions/{session_id}")
 async def revoke_my_session(session_id: str, request: Request, user=Depends(get_authenticated_user)):
-    target = await db.user_sessions.find_one({"id": session_id, "user_id": user["id"]})
-    if not target:
+    async with AsyncSessionLocal() as pg:
+        target = await sessions_repo.get(pg, session_id)
+    if not target or target.get("user_id") != user["id"]:
         raise HTTPException(status_code=404, detail="Session not found")
     await _revoke_session(session_id, "user_revoked")
     await log_audit(db, user["id"], user["email"], "auth.session_revoked",
@@ -47,4 +48,3 @@ async def revoke_my_session(session_id: str, request: Request, user=Depends(get_
 @api.get("/auth/me", response_model=UserOut)
 async def me(user=Depends(get_authenticated_user)):
     return to_user_out(user)
-

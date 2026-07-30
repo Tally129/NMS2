@@ -1,13 +1,14 @@
-"""refresh — split from routers/auth.py during Session 1 of the PG migration.
-Behaviour is unchanged. All helpers are shared via _common."""
+"""refresh — Session 2b PostgreSQL runtime cutover.
+Uses PostgreSQL for user + refresh-token rotation. Cookie semantics preserved.
+"""
 from ._common import *  # noqa: F401,F403
+
 
 @api.post("/auth/refresh")
 async def refresh_endpoint(request: Request):
     """Sprint 2: opaque refresh token, atomic rotation with concurrency grace,
     family reuse detection. Reads the token from the `nms_rt` HttpOnly cookie ONLY.
     """
-    # Origin allowlist check (CSRF defense).
     allowed = [o.strip() for o in (os.environ.get("ALLOWED_ORIGINS") or "").split(",") if o.strip()]
     origin = request.headers.get("origin") or request.headers.get("referer") or ""
     if allowed and origin:
@@ -29,7 +30,6 @@ async def refresh_endpoint(request: Request):
         return resp
 
     if outcome.kind == "reuse_detected":
-        # Family + session already burned by rotate_refresh().
         await log_audit(db, outcome.user_id, None, "auth.refresh_reuse_detected",
                         metadata={"family_id": outcome.family_id, "severity": "high"},
                         ip=ip, user_agent=ua)
@@ -39,17 +39,15 @@ async def refresh_endpoint(request: Request):
         return resp
 
     if outcome.kind == "concurrency_grace":
-        # Legitimate concurrent refresh — do NOT burn family, do NOT clear cookie.
         await log_audit(db, outcome.user_id, None, "auth.refresh_concurrency_detected",
                         metadata={"family_id": outcome.family_id, "severity": "info"},
                         ip=ip, user_agent=ua)
-        # 409 Conflict signals the client to just retry with the cookie the
-        # winning request already installed.
         return Response(content=b'{"detail":"concurrency_retry"}', status_code=409,
                         media_type="application/json")
 
     # outcome.kind == "rotated"
-    user = await db.users.find_one({"id": outcome.user_id})
+    async with AsyncSessionLocal() as pg:
+        user = await users_repo.get_by_id(pg, outcome.user_id)
     if not user or not user.get("is_active", True):
         resp = Response(content=b'{"detail":"User disabled"}', status_code=401,
                         media_type="application/json")
@@ -63,5 +61,3 @@ async def refresh_endpoint(request: Request):
     resp = Response(content=json_dumps_body(body), media_type="application/json")
     _set_refresh_cookie(resp, outcome.raw)
     return resp
-
-

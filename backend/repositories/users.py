@@ -3,7 +3,7 @@ compatible with the pre-migration Mongo shape."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -114,6 +114,13 @@ async def touch_last_login(session: AsyncSession, user_id: str) -> None:
         update(User).where(User.id == user_id)
         .values(last_login_at=datetime.now(timezone.utc)),
     )
+
+
+
+async def list_recent(session: AsyncSession, *, limit: int = 200) -> List[Dict[str, Any]]:
+    """List users newest-first — used by the admin user directory."""
+    stmt = select(User).order_by(User.created_at.desc()).limit(min(max(1, limit), 5000))
+    return [user_to_dict(u) for u in (await session.execute(stmt)).scalars().all()]
 
 
 # ---------- Client ---------- #

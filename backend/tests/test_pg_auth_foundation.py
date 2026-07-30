@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 
 BACKEND = str(Path(__file__).resolve().parents[1])
 if BACKEND not in sys.path:
@@ -232,6 +233,24 @@ class TestPasswordReset:
 # ---------------------------------------------------------------- audit chain #
 
 class TestAuditChain:
+    @pytest_asyncio.fixture(autouse=True)
+    async def _isolate_chain(self):
+        """These primitive tests deliberately insert rows with fake hashes to
+        exercise the advisory lock + seq ordering. Wipe the chain before AND
+        after so the UAT-level `verify_audit_chain` test (which relies on
+        real log_audit() hashes) is not contaminated by our fake rows.
+
+        Uses its own AsyncSessionLocal to avoid clashing with the test's
+        pre-open `db_session` fixture transactions."""
+        async def _wipe():
+            async with AsyncSessionLocal() as s:
+                async with s.begin():
+                    await s.execute(text("DELETE FROM auth_security_events"))
+                    await s.execute(text("DELETE FROM auth_audit_logs"))
+        await _wipe()
+        yield
+        await _wipe()
+
     @pytest.mark.asyncio
     async def test_advisory_lock_and_prev_hash(self, db_session):
         async with db_session.begin():

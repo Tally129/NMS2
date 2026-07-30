@@ -1,13 +1,9 @@
 """Shared imports + helpers for the split auth submodules.
 
-Every route in `routers/auth.py` was moved into a topical file under
-`routers/auth_impl/` during Session 1 of the PG migration. Behaviour is
-identical to the pre-refactor code — this file merely centralises the
-imports and helper functions so each submodule stays small.
-
-DO NOT change persistence semantics here without a matching update to the
-tests. This module still targets MongoDB. The runtime cutover to
-PostgreSQL is a separate task (Session 2).
+Session 2b (PostgreSQL runtime cutover): every persistence call the auth
+routes make now targets PostgreSQL via `repositories/*`. Motor (`db`) is
+still re-exported because the client-signup path also writes a Mongo
+`clients` row (business data hasn't migrated yet).
 """
 # `import *` skips underscore-prefixed names by default; the auth submodules
 # rely on `_email_hash`, `_hash_token`, `_create_session`, etc. Listing every
@@ -32,6 +28,9 @@ __all__ = [
     "list_active_sessions_sanitized", "refresh_cookie_kwargs",
     "revoke_all_user_sessions", "revoke_family", "rotate_refresh",
     "session_policy_for",
+    # PostgreSQL access layer
+    "AsyncSessionLocal", "users_repo", "sessions_repo", "tokens_repo",
+    "login_repo", "pr_repo", "audit_repo",
     # module-local constants + helpers
     "SESSION_TTL", "RESET_TOKEN_TTL_MIN",
     "_hipaa_mode", "_email_hash", "_hash_token", "_create_session",
@@ -65,6 +64,13 @@ from models import (
     LoginIn, MfaVerifyIn, PasswordChange, ProfileUpdate, RefreshIn, TokenOut,
     UserCreate, UserOut, new_id,
 )
+from postgres_db import AsyncSessionLocal
+from repositories import audit as audit_repo
+from repositories import login as login_repo
+from repositories import password_reset as pr_repo
+from repositories import refresh_tokens as tokens_repo
+from repositories import user_sessions as sessions_repo
+from repositories import users as users_repo
 from sessions import (
     check_and_touch_session, clear_refresh_cookie_kwargs,
     enforce_active_session_limit, hash_refresh_token, issue_first_refresh,
@@ -92,10 +98,8 @@ def _hash_token(raw: str) -> str:
 
 
 async def _create_session(user_doc: dict, request: Request, *, mfa_satisfied: bool) -> tuple[str, str, str]:
-    """Insert a new user_sessions row + first opaque refresh token.
-    Returns (sid, family_id, raw_refresh_token). The RAW token is meant only
-    for the immediate Set-Cookie header — it is never persisted plaintext.
-    """
+    """Insert a new user_sessions row + first opaque refresh token into
+    PostgreSQL. Returns (sid, family_id, raw_refresh_token)."""
     now = datetime.now(timezone.utc)
     sid = new_id()
     family_id = new_id()
@@ -104,25 +108,26 @@ async def _create_session(user_doc: dict, request: Request, *, mfa_satisfied: bo
     role = user_doc.get("role") or "client"
     idle_min, absolute_lifetime = session_policy_for(role)
     absolute_expires_at = now + absolute_lifetime
-    await db.user_sessions.insert_one({
-        "id": sid,
-        "user_id": user_doc["id"],
-        "created_at": now,
-        "last_used_at": now,
-        # legacy field kept for backwards-compat readers
-        "expires_at": absolute_expires_at,
-        # Sprint 2: explicit policy fields (frozen at session creation)
-        "idle_timeout_minutes": idle_min,
-        "absolute_expires_at": absolute_expires_at,
-        "revoked_at": None,
-        "revoke_reason": None,
-        "session_version": int(user_doc.get("session_version") or 1),
-        "ip_first": ip,
-        "ip_last": ip,
-        "user_agent": ua,
-        "mfa_satisfied_at": now if mfa_satisfied else None,
-        "family_id": family_id,
-    })
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sessions_repo.create(
+                pg,
+                id=sid,
+                user_id=user_doc["id"],
+                created_at=now,
+                last_used_at=now,
+                expires_at=absolute_expires_at,
+                idle_timeout_minutes=idle_min,
+                absolute_expires_at=absolute_expires_at,
+                revoked_at=None,
+                revoke_reason=None,
+                session_version=int(user_doc.get("session_version") or 1),
+                ip_first=ip,
+                ip_last=ip,
+                user_agent=ua,
+                mfa_satisfied_at=now if mfa_satisfied else None,
+                family_id=family_id,
+            )
     raw = await issue_first_refresh(
         user_id=user_doc["id"], session_id=sid, family_id=family_id,
         expires_at=absolute_expires_at, ip=ip, user_agent=ua,
@@ -144,14 +149,10 @@ async def _revoke_all_sessions(user_id: str, reason: str) -> int:
 
 
 async def _revoke_session(sid: str, reason: str) -> None:
-    await db.user_sessions.update_one(
-        {"id": sid, "revoked_at": None},
-        {"$set": {"revoked_at": datetime.now(timezone.utc), "revoke_reason": reason}},
-    )
-    await db.refresh_tokens.update_many(
-        {"session_id": sid, "revoked_at": None},
-        {"$set": {"revoked_at": datetime.now(timezone.utc), "revoke_reason": reason}},
-    )
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sessions_repo.revoke_by_id(pg, sid, reason)
+            await tokens_repo.revoke_by_session(pg, sid, reason)
 
 
 def json_dumps_body(obj) -> bytes:

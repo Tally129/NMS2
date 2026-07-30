@@ -1,10 +1,11 @@
-"""password_reset — split from routers/auth.py during Session 1 of the PG migration.
-Behaviour is unchanged. All helpers are shared via _common."""
+"""password_reset — Session 2b PostgreSQL runtime cutover.
+
+Reset attempts, tokens, and rate-limit counters now live in PostgreSQL.
+Response semantics (uniform "if that email is registered" text) unchanged.
+"""
 from ._common import *  # noqa: F401,F403
 
-# --------------------------------------------------------------------------- #
-# Password reset — Sprint 1                                                    #
-# --------------------------------------------------------------------------- #
+
 _RESET_WINDOW_MIN = 15
 _RESET_MAX_PER_EMAIL_WINDOW = 3      # per (email_hash, window)
 _RESET_MAX_PER_IP_WINDOW = 10        # per IP, window
@@ -13,16 +14,23 @@ _RESET_GLOBAL_ABUSE_THRESHOLD = 200  # per window (blocks system-wide brute forc
 
 async def _reset_rate_limit_ok(email_hash: str, ip: Optional[str]) -> bool:
     since = datetime.now(timezone.utc) - timedelta(minutes=_RESET_WINDOW_MIN)
-    global_ct = await db.password_reset_attempts.count_documents({"ts": {"$gte": since}})
-    if global_ct >= _RESET_GLOBAL_ABUSE_THRESHOLD:
-        return False
-    email_ct = await db.password_reset_attempts.count_documents({"email_hash": email_hash, "ts": {"$gte": since}})
-    if email_ct >= _RESET_MAX_PER_EMAIL_WINDOW:
-        return False
-    if ip:
-        ip_ct = await db.password_reset_attempts.count_documents({"ip": ip, "ts": {"$gte": since}})
-        if ip_ct >= _RESET_MAX_PER_IP_WINDOW:
+    async with AsyncSessionLocal() as pg:
+        # Approximate "global abuse" via the sum of per-email + per-ip windows
+        # is too fuzzy; instead count all attempts newer than `since`.
+        from postgres_models import PasswordResetAttempt
+        from sqlalchemy import func, select
+        global_ct = int((await pg.execute(
+            select(func.count(PasswordResetAttempt.id)).where(PasswordResetAttempt.ts >= since)
+        )).scalar_one())
+        if global_ct >= _RESET_GLOBAL_ABUSE_THRESHOLD:
             return False
+        email_ct = await pr_repo.count_recent_by_email(pg, email_hash, since)
+        if email_ct >= _RESET_MAX_PER_EMAIL_WINDOW:
+            return False
+        if ip:
+            ip_ct = await pr_repo.count_recent_by_ip(pg, ip, since)
+            if ip_ct >= _RESET_MAX_PER_IP_WINDOW:
+                return False
     return True
 
 
@@ -36,42 +44,45 @@ async def forgot_password(payload: dict, request: Request):
     email_hash = _email_hash(email) if email else ""
     now = datetime.now(timezone.utc)
 
-    # Record every attempt (used for rate limiting). Never store the raw email.
-    await db.password_reset_attempts.insert_one({
-        "email_hash": email_hash, "ip": ip, "ts": now,
-    })
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await pr_repo.record_attempt(
+                pg, attempt_id=new_id(), email_hash=email_hash, ip=ip,
+            )
 
-    # Uniform response regardless of what we do below.
     generic = {"ok": True, "message": "If that email is registered, a reset link is on the way."}
 
     if not email or not email_hash:
         return generic
     if not await _reset_rate_limit_ok(email_hash, ip):
-        # Same response body — attackers can't distinguish rate limit from unknown email.
         return generic
 
-    user = await db.users.find_one({"email": email})
+    async with AsyncSessionLocal() as pg:
+        user = await users_repo.get_by_email(pg, email)
     if not user or not user.get("is_active", True):
         return generic
 
-    # Generate a high-entropy token; store only its SHA-256.
     raw_token = secrets.token_urlsafe(48)
     token_hash = _hash_token(raw_token)
     expires_at = now + timedelta(minutes=RESET_TOKEN_TTL_MIN)
-    await db.password_reset_tokens.insert_one({
-        "id": new_id(),
-        "token_hash": token_hash,
-        "user_id": user["id"],
-        "email_hash": email_hash,
-        "created_at": now,
-        "expires_at": expires_at,
-        "consumed_at": None,
-        "ip": ip,
-    })
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await pr_repo.create_token(
+                pg,
+                token_id=new_id(),
+                token_hash=token_hash,
+                user_id=user["id"],
+                email_hash=email_hash,
+                expires_at=expires_at,
+                ip=ip,
+            )
 
-    # Build the reset link — kept in-memory only, never logged.
     frontend_origin = os.environ.get("FRONTEND_ORIGIN") or ""
-    reset_url = f"{frontend_origin.rstrip('/')}/reset-password?token={raw_token}" if frontend_origin else f"[configure FRONTEND_ORIGIN]?token={raw_token}"
+    reset_url = (
+        f"{frontend_origin.rstrip('/')}/reset-password?token={raw_token}"
+        if frontend_origin
+        else f"[configure FRONTEND_ORIGIN]?token={raw_token}"
+    )
 
     from notifiers import send_email as notify_email
     subject = "Reset your NatMedSol password"
@@ -83,15 +94,12 @@ async def forgot_password(payload: dict, request: Request):
         "<p>If you didn't request this, you can safely ignore this email.</p>"
         "<p>— NatMedSol Security</p>"
     )
-    # redact_recipient=True → integration_log only stores sha256:<prefix>, not the email.
-    # No payload_metadata carries the token or URL.
     await notify_email(
         db, email, subject, html,
         action="auth.password_reset_dispatch",
         redact_recipient=True,
     )
 
-    # Redacted audit event — no email, no token, no URL.
     await log_audit(
         db, user["id"], user_email=None, action="auth.password_reset_requested",
         resource_type="user", resource_id=user["id"],
@@ -111,14 +119,11 @@ async def reset_password(payload: dict, request: Request):
         raise HTTPException(status_code=400, detail="Missing token or new_password")
 
     token_hash = _hash_token(raw_token)
-    now = datetime.now(timezone.utc)
 
-    # ATOMIC consume: only succeeds if the token is unconsumed AND unexpired
-    # (we do NOT rely on the TTL index — TTL cleanup is asynchronous).
-    row = await db.password_reset_tokens.find_one_and_update(
-        {"token_hash": token_hash, "consumed_at": None, "expires_at": {"$gt": now}},
-        {"$set": {"consumed_at": now, "consumed_ip": ip}},
-    )
+    # Atomic single-use consume in PostgreSQL.
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            row = await pr_repo.consume_token(pg, token_hash, ip)
     if not row:
         await log_audit(
             db, user_id=None, user_email=None, action="auth.password_reset_denied",
@@ -127,26 +132,32 @@ async def reset_password(payload: dict, request: Request):
         )
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
 
-    user = await db.users.find_one({"id": row["user_id"]})
+    async with AsyncSessionLocal() as pg:
+        user = await users_repo.get_by_id(pg, row["user_id"])
     if not user or not user.get("is_active", True):
         raise HTTPException(status_code=400, detail="Account not eligible for reset")
 
     reason = validate_password_strength(new_pw, email=user["email"], full_name=user.get("full_name") or "")
     if reason:
         # Roll back the token consumption so the user can try again.
-        await db.password_reset_tokens.update_one(
-            {"id": row["id"]},
-            {"$set": {"consumed_at": None, "consumed_ip": None}},
-        )
+        async with AsyncSessionLocal() as pg:
+            async with pg.begin():
+                from sqlalchemy import update
+                from postgres_models import PasswordResetToken
+                await pg.execute(
+                    update(PasswordResetToken)
+                    .where(PasswordResetToken.id == row["id"])
+                    .values(consumed_at=None, consumed_ip=None)
+                )
         raise HTTPException(status_code=400, detail=reason)
 
-    await db.users.update_one(
-        {"id": user["id"]},
-        {
-            "$set": {"password_hash": hash_password(new_pw), "password_changed_at": now},
-            "$inc": {"session_version": 1},
-        },
-    )
+    now = datetime.now(timezone.utc)
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await users_repo.update_fields(pg, user["id"], {
+                "password_hash": hash_password(new_pw),
+                "password_changed_at": now,
+            })
     revoked_ct = await _revoke_all_sessions(user["id"], reason="password_reset")
 
     await log_audit(
@@ -170,21 +181,21 @@ async def dev_reset_token(payload: dict):
     email = str(payload.get("email") or "").strip().lower()
     if not email:
         raise HTTPException(status_code=400, detail="Missing email")
-    user = await db.users.find_one({"email": email})
+    async with AsyncSessionLocal() as pg:
+        user = await users_repo.get_by_email(pg, email)
     if not user or not user.get("is_active", True):
         raise HTTPException(status_code=404, detail="No such user")
-    # Directly issue a fresh reset token — no rate limit, no email dispatch.
     raw = secrets.token_urlsafe(48)
     now = datetime.now(timezone.utc)
-    await db.password_reset_tokens.insert_one({
-        "id": new_id(),
-        "token_hash": _hash_token(raw),
-        "user_id": user["id"],
-        "email_hash": _email_hash(email),
-        "created_at": now,
-        "expires_at": now + timedelta(minutes=RESET_TOKEN_TTL_MIN),
-        "consumed_at": None,
-        "ip": None,
-    })
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await pr_repo.create_token(
+                pg,
+                token_id=new_id(),
+                token_hash=_hash_token(raw),
+                user_id=user["id"],
+                email_hash=_email_hash(email),
+                expires_at=now + timedelta(minutes=RESET_TOKEN_TTL_MIN),
+                ip=None,
+            )
     return {"dev_reset_token": raw, "expires_in_min": RESET_TOKEN_TTL_MIN}
-

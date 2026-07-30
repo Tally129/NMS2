@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 
+from dotenv import load_dotenv
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -17,6 +19,11 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+
+# Defensive: postgres_db can be imported before other modules have loaded the
+# `.env` (e.g. Alembic env, tests). Load it here idempotently so DATABASE_URL
+# is present regardless of import order.
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
 def _get_database_url() -> str:

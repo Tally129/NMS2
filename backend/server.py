@@ -605,6 +605,15 @@ async def seed_demo():
         await db.users.update_one({"id": ma_doc["id"]}, {"$set": {"role": "medical_assistant"}})
         logger.info("Self-healed medical assistant role for ma@natmedsol.local.")
 
+    # Session 2b: mirror any MongoDB user rows into PostgreSQL so the PG-backed
+    # auth stack can authenticate them. Idempotent — only inserts missing rows
+    # and refreshes password_hash/mfa fields when Mongo is ahead.
+    try:
+        from pg_bootstrap import sync_mongo_users_to_pg
+        await sync_mongo_users_to_pg(db)
+    except Exception as _e:
+        logger.warning("PG auth sync at startup failed: %s", _e)
+
     # Legal & Policies: seed the nine default policies (idempotent).
     try:
         from routers.legal import seed_default_policies

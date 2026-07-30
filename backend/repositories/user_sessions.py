@@ -95,6 +95,18 @@ async def list_active_for_user(session: AsyncSession, user_id: str, limit: int =
     return [session_to_dict(r) for r in rows]
 
 
+
+async def list_active_for_admin(session: AsyncSession, *, user_id: Optional[str] = None,
+                                  limit: int = 200) -> List[Dict[str, Any]]:
+    """Session explorer feed for /api/admin/sessions."""
+    stmt = select(UserSession).where(UserSession.revoked_at.is_(None))
+    if user_id:
+        stmt = stmt.where(UserSession.user_id == user_id)
+    stmt = stmt.order_by(UserSession.last_used_at.desc().nullslast()).limit(min(max(1, limit), 500))
+    rows = (await session.execute(stmt)).scalars().all()
+    return [session_to_dict(r) for r in rows]
+
+
 async def touch(session: AsyncSession, sid: str, ip: Optional[str]) -> None:
     """Throttled touch is done at the sessions.py level. This just writes."""
     await session.execute(

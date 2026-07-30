@@ -81,3 +81,18 @@ async def insert_security_event(session: AsyncSession, event: Dict[str, Any]) ->
 async def list_ordered(session: AsyncSession, limit: int = 5000) -> List[Dict[str, Any]]:
     stmt = select(AuditLog).order_by(AuditLog.seq.asc()).limit(limit)
     return [audit_to_dict(r) for r in (await session.execute(stmt)).scalars().all()]
+
+
+
+async def list_recent(session: AsyncSession, *, limit: int = 100,
+                       user_id: Optional[str] = None,
+                       action: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List audit rows newest-first with optional filters — used by the admin
+    audit viewer at GET /api/admin/audit."""
+    stmt = select(AuditLog)
+    if user_id:
+        stmt = stmt.where(AuditLog.user_id == user_id)
+    if action:
+        stmt = stmt.where(AuditLog.action == action)
+    stmt = stmt.order_by(AuditLog.ts.desc()).limit(min(max(1, limit), 500))
+    return [audit_to_dict(r) for r in (await session.execute(stmt)).scalars().all()]

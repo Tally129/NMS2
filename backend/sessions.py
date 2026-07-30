@@ -1,5 +1,5 @@
 """
-Session lifecycle helpers — Sprint 2.
+Session lifecycle helpers — Session 2b PostgreSQL runtime cutover.
 
 Central home for:
   * `revoke_all_user_sessions()` — single choke-point used by password change /
@@ -7,6 +7,11 @@ Central home for:
     logout-all, and suspected-compromise flows.
   * Opaque refresh-token issue + atomic rotation with concurrency grace.
   * Session touch (idle-timeout aware, throttled to 1 write per minute).
+
+Every persistence call now flows through the SQLAlchemy repositories in
+`repositories/*`. This module opens its own PG transaction per call so
+individual routers keep their pre-migration ergonomics ("await X" without
+managing sessions).
 
 None of this file's helpers ever store or log a raw refresh token — only
 `sha256(raw_token)` is persisted.
@@ -19,8 +24,10 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 
-from audit import log_audit
-from deps import db
+from postgres_db import AsyncSessionLocal
+from repositories import refresh_tokens as tokens_repo
+from repositories import user_sessions as sessions_repo
+from repositories import users as users_repo
 
 REFRESH_TTL_DAYS = int(os.environ.get("REFRESH_TOKEN_TTL_DAYS", "7"))
 REFRESH_GRACE_SECONDS = int(os.environ.get("REFRESH_CONCURRENCY_GRACE_SECONDS", "10"))
@@ -30,13 +37,10 @@ CLIENT_IDLE_TIMEOUT_MIN = int(os.environ.get("CLIENT_IDLE_TIMEOUT_MIN", "60"))
 CLIENT_ABSOLUTE_DAYS = int(os.environ.get("CLIENT_ABSOLUTE_SESSION_DAYS", "7"))
 MAX_ACTIVE_WORKFORCE_SESSIONS = int(os.environ.get("MAX_ACTIVE_WORKFORCE_SESSIONS", "5"))
 MAX_ACTIVE_CLIENT_SESSIONS = int(os.environ.get("MAX_ACTIVE_CLIENT_SESSIONS", "10"))
-TOUCH_THROTTLE_SECONDS = 60  # only re-write last_used_at once per minute
+TOUCH_THROTTLE_SECONDS = 60
 WORKFORCE_ROLES = {"admin", "practitioner", "staff", "front_desk", "frontdesk", "medical_assistant", "auditor"}
 
 
-# --------------------------------------------------------------------------- #
-# Utility                                                                      #
-# --------------------------------------------------------------------------- #
 def now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -52,7 +56,6 @@ def hash_refresh_token(raw: str) -> str:
 
 
 def generate_opaque_refresh_token() -> str:
-    """256 bits of entropy encoded as URL-safe base64 (43 chars)."""
     return secrets.token_urlsafe(32)
 
 
@@ -60,7 +63,6 @@ def generate_opaque_refresh_token() -> str:
 # Session policy resolution                                                    #
 # --------------------------------------------------------------------------- #
 def session_policy_for(role: str) -> Tuple[int, timedelta]:
-    """Return (idle_timeout_minutes, absolute_lifetime) for a given role."""
     if role in WORKFORCE_ROLES:
         return WORKFORCE_IDLE_TIMEOUT_MIN, timedelta(hours=WORKFORCE_ABSOLUTE_HOURS)
     return CLIENT_IDLE_TIMEOUT_MIN, timedelta(days=CLIENT_ABSOLUTE_DAYS)
@@ -75,94 +77,66 @@ def max_active_sessions_for(role: str) -> int:
 # --------------------------------------------------------------------------- #
 async def revoke_all_user_sessions(user_id: str, reason: str,
                                     also_bump_session_version: bool = True) -> dict:
-    """Revoke every active session + refresh-token family for a user.
-
-    Called from: password change, password reset, MFA reset/disable, role
-    change, account disable, admin revoke, logout-all, suspected compromise.
-
-    Returns counts for auditing.
-    """
-    ts = now()
-    r1 = await db.user_sessions.update_many(
-        {"user_id": user_id, "revoked_at": None},
-        {"$set": {"revoked_at": ts, "revoke_reason": reason}},
-    )
-    r2 = await db.refresh_tokens.update_many(
-        {"user_id": user_id, "revoked_at": None},
-        {"$set": {"revoked_at": ts, "revoke_reason": reason}},
-    )
-    if also_bump_session_version:
-        await db.users.update_one({"id": user_id}, {"$inc": {"session_version": 1}})
-    return {"sessions_revoked": r1.modified_count, "tokens_revoked": r2.modified_count}
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            sessions_revoked = await sessions_repo.revoke_all_for_user(pg, user_id, reason)
+            tokens_revoked = await tokens_repo.revoke_all_for_user(pg, user_id, reason)
+            if also_bump_session_version:
+                await users_repo.bump_session_version(pg, user_id)
+    return {"sessions_revoked": sessions_revoked, "tokens_revoked": tokens_revoked}
 
 
 async def revoke_family(family_id: str, reason: str) -> int:
-    """Burn one refresh-token family. Called from reuse-detection path."""
-    r = await db.refresh_tokens.update_many(
-        {"family_id": family_id, "revoked_at": None},
-        {"$set": {"revoked_at": now(), "revoke_reason": reason}},
-    )
-    return r.modified_count
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            return await tokens_repo.revoke_family(pg, family_id, reason)
 
 
 # --------------------------------------------------------------------------- #
 # Session creation with active-limit enforcement                               #
 # --------------------------------------------------------------------------- #
 async def enforce_active_session_limit(user: dict) -> dict:
-    """Called during login. Returns a dict describing what happened.
-
-    Client roles: revoke the oldest session automatically ('evict-oldest').
-    Workforce roles: refuse to create the session (raise `SessionLimitExceeded`).
-    """
     role = user.get("role") or "client"
     limit = max_active_sessions_for(role)
-    active_count = await db.user_sessions.count_documents({
-        "user_id": user["id"], "revoked_at": None,
-        "absolute_expires_at": {"$gt": now()},
-    })
-    if active_count < limit:
-        return {"action": "none", "active_count": active_count, "limit": limit}
-
-    if role in WORKFORCE_ROLES:
-        return {"action": "reject_workforce", "active_count": active_count, "limit": limit}
-
-    # Client: silently evict the OLDEST session
-    oldest = await db.user_sessions.find_one(
-        {"user_id": user["id"], "revoked_at": None},
-        sort=[("created_at", 1)],
-    )
-    if oldest:
-        await db.user_sessions.update_one(
-            {"id": oldest["id"]},
-            {"$set": {"revoked_at": now(), "revoke_reason": "client_evicted_oldest"}},
-        )
-        await db.refresh_tokens.update_many(
-            {"session_id": oldest["id"], "revoked_at": None},
-            {"$set": {"revoked_at": now(), "revoke_reason": "session_evicted"}},
-        )
-    return {"action": "evicted_oldest", "evicted_session_id": (oldest or {}).get("id")}
+    async with AsyncSessionLocal() as pg:
+        active_count = await sessions_repo.count_active(pg, user["id"])
+        if active_count < limit:
+            return {"action": "none", "active_count": active_count, "limit": limit}
+        if role in WORKFORCE_ROLES:
+            return {"action": "reject_workforce", "active_count": active_count, "limit": limit}
+        # Client: evict the oldest session
+        oldest = await sessions_repo.oldest_active(pg, user["id"])
+        if oldest:
+            async with pg.begin():
+                await sessions_repo.revoke_by_id(pg, oldest["id"], "client_evicted_oldest")
+                await tokens_repo.revoke_by_session(pg, oldest["id"], "session_evicted")
+        return {"action": "evicted_oldest", "evicted_session_id": (oldest or {}).get("id")}
 
 
 async def list_active_sessions_sanitized(user_id: str, current_sid: Optional[str] = None) -> list:
-    """Return the sanitized session list for the login-continuation flow.
-    Workforce users must never see raw IPs or full user-agents.
-    """
-    sessions = await db.user_sessions.find({
-        "user_id": user_id, "revoked_at": None,
-    }).sort("last_used_at", -1).to_list(20)
+    async with AsyncSessionLocal() as pg:
+        sessions = await sessions_repo.list_active_for_user(pg, user_id, limit=20)
     out = []
     for s in sessions:
         ua = s.get("user_agent") or ""
         label = "Unknown device"
         low = ua.lower()
-        if "iphone" in low or "ipad" in low: label = "iPhone / iPad"
-        elif "android" in low:               label = "Android device"
-        elif "macintosh" in low:             label = "Mac"
-        elif "windows" in low:               label = "Windows"
-        elif "linux" in low:                 label = "Linux"
-        if "chrome" in low: label += " · Chrome"
-        elif "firefox" in low: label += " · Firefox"
-        elif "safari" in low: label += " · Safari"
+        if "iphone" in low or "ipad" in low:
+            label = "iPhone / iPad"
+        elif "android" in low:
+            label = "Android device"
+        elif "macintosh" in low:
+            label = "Mac"
+        elif "windows" in low:
+            label = "Windows"
+        elif "linux" in low:
+            label = "Linux"
+        if "chrome" in low:
+            label += " · Chrome"
+        elif "firefox" in low:
+            label += " · Firefox"
+        elif "safari" in low:
+            label += " · Safari"
         last = _as_utc(s.get("last_used_at")) or _as_utc(s.get("created_at"))
         out.append({
             "session_id": s["id"],
@@ -182,155 +156,127 @@ async def issue_first_refresh(user_id: str, session_id: str,
                               expires_at: datetime,
                               ip: Optional[str],
                               user_agent: Optional[str]) -> str:
-    """Called once at login. Returns the RAW refresh token (returned in Set-Cookie)."""
     raw = generate_opaque_refresh_token()
-    await db.refresh_tokens.insert_one({
-        "id": secrets.token_hex(16),
-        "token_hash": hash_refresh_token(raw),
-        "session_id": session_id,
-        "user_id": user_id,
-        "family_id": family_id,
-        "generation": 0,
-        "parent_token_id": None,
-        "created_at": now(),
-        "last_used_at": None,
-        "expires_at": expires_at,
-        "used_at": None,
-        "replaced_by_id": None,
-        "revoked_at": None,
-        "revoke_reason": None,
-        "ip_created": ip,
-        "ip_last_used": None,
-        "user_agent_created": user_agent,
-    })
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await tokens_repo.insert(
+                pg,
+                id=secrets.token_hex(16),
+                token_hash=hash_refresh_token(raw),
+                session_id=session_id,
+                user_id=user_id,
+                family_id=family_id,
+                generation=0,
+                parent_token_id=None,
+                created_at=now(),
+                last_used_at=None,
+                expires_at=expires_at,
+                used_at=None,
+                replaced_by_id=None,
+                revoked_at=None,
+                revoke_reason=None,
+                ip_created=ip,
+                ip_last_used=None,
+                user_agent_created=user_agent,
+            )
     return raw
 
 
 class RefreshOutcome:
     def __init__(self, kind: str, **extra):
-        self.kind = kind        # 'rotated' | 'concurrency_grace' | 'reuse_detected' | 'unknown'
+        self.kind = kind  # 'rotated' | 'concurrency_grace' | 'reuse_detected' | 'unknown'
         self.__dict__.update(extra)
 
 
 async def rotate_refresh(raw_token: str, ip: Optional[str],
                          user_agent: Optional[str]) -> RefreshOutcome:
-    """Atomically consume the presented refresh token and mint a successor.
-
-    Concurrency grace: if the presented token was used within the last
-    `REFRESH_CONCURRENCY_GRACE_SECONDS` from a similar device context, treat
-    it as a legitimate concurrent request and return the LATEST successor's
-    raw token (idempotency). The client should just retry with the cookie
-    that the winning request already set.
-
-    Confirmed reuse (outside grace, or with materially different device
-    context) burns the entire family + associated session.
-    """
     ts = now()
     token_hash = hash_refresh_token(raw_token)
 
-    # Step 1: try to atomically claim the token if it's still fresh.
-    row = await db.refresh_tokens.find_one_and_update(
-        {"token_hash": token_hash, "used_at": None, "revoked_at": None,
-         "expires_at": {"$gt": ts}},
-        {"$set": {"used_at": ts, "last_used_at": ts, "ip_last_used": ip}},
-    )
+    async with AsyncSessionLocal() as pg:
+        # Step 1: attempt to atomically claim the token.
+        async with pg.begin():
+            claimed = await tokens_repo.claim_for_rotation(pg, token_hash, ts, ip)
+            if claimed is not None:
+                session_row = await sessions_repo.get(pg, claimed["session_id"])
+                if not session_row or session_row.get("revoked_at") is not None:
+                    await tokens_repo.revoke_family(pg, claimed["family_id"], "session_gone")
+                    return RefreshOutcome("unknown")
 
-    if row is not None:
-        # We won the race — mint the successor.
-        session = await db.user_sessions.find_one({"id": row["session_id"]})
-        if not session or session.get("revoked_at") is not None:
-            await revoke_family(row["family_id"], "session_gone")
+                abs_exp = _as_utc(session_row.get("absolute_expires_at"))
+                soft_exp = ts + timedelta(days=REFRESH_TTL_DAYS)
+                expires_at = min(soft_exp, abs_exp) if abs_exp else soft_exp
+
+                successor_raw = generate_opaque_refresh_token()
+                successor_id = secrets.token_hex(16)
+                await tokens_repo.insert(
+                    pg,
+                    id=successor_id,
+                    token_hash=hash_refresh_token(successor_raw),
+                    session_id=claimed["session_id"],
+                    user_id=claimed["user_id"],
+                    family_id=claimed["family_id"],
+                    generation=claimed["generation"] + 1,
+                    parent_token_id=claimed["id"],
+                    created_at=ts,
+                    last_used_at=None,
+                    expires_at=expires_at,
+                    used_at=None,
+                    replaced_by_id=None,
+                    revoked_at=None,
+                    revoke_reason=None,
+                    ip_created=ip,
+                    ip_last_used=None,
+                    user_agent_created=user_agent,
+                )
+                await tokens_repo.set_replaced_by(pg, claimed["id"], successor_id)
+                return RefreshOutcome(
+                    "rotated", raw=successor_raw,
+                    session_id=claimed["session_id"], user_id=claimed["user_id"],
+                    family_id=claimed["family_id"], expires_at=expires_at,
+                )
+
+        # Step 2: token wasn't claimable — inspect its state.
+        prior = await tokens_repo.get_by_hash(pg, token_hash)
+        if not prior:
             return RefreshOutcome("unknown")
 
-        # Successor expires at the earliest of (now+TTL, session absolute expiry).
-        abs_exp = _as_utc(session.get("absolute_expires_at"))
-        soft_exp = ts + timedelta(days=REFRESH_TTL_DAYS)
-        expires_at = min(soft_exp, abs_exp) if abs_exp else soft_exp
+        if prior.get("revoked_at") is not None:
+            async with pg.begin():
+                await tokens_repo.revoke_family(pg, prior["family_id"], "reuse_after_revoke")
+                await sessions_repo.revoke_by_id(pg, prior["session_id"], "refresh_reuse_detected")
+            return RefreshOutcome("reuse_detected", family_id=prior["family_id"],
+                                  session_id=prior["session_id"], user_id=prior["user_id"])
 
-        successor_raw = generate_opaque_refresh_token()
-        successor_id = secrets.token_hex(16)
-        await db.refresh_tokens.insert_one({
-            "id": successor_id,
-            "token_hash": hash_refresh_token(successor_raw),
-            "session_id": row["session_id"],
-            "user_id": row["user_id"],
-            "family_id": row["family_id"],
-            "generation": row["generation"] + 1,
-            "parent_token_id": row["id"],
-            "created_at": ts,
-            "last_used_at": None,
-            "expires_at": expires_at,
-            "used_at": None,
-            "replaced_by_id": None,
-            "revoked_at": None,
-            "revoke_reason": None,
-            "ip_created": ip,
-            "ip_last_used": None,
-            "user_agent_created": user_agent,
-        })
-        await db.refresh_tokens.update_one(
-            {"id": row["id"]},
-            {"$set": {"replaced_by_id": successor_id}},
-        )
-        return RefreshOutcome(
-            "rotated", raw=successor_raw,
-            session_id=row["session_id"], user_id=row["user_id"],
-            family_id=row["family_id"], expires_at=expires_at,
-        )
+        used_at = _as_utc(prior["used_at"])
+        within_grace = used_at is not None and (ts - used_at).total_seconds() <= REFRESH_GRACE_SECONDS
+        same_ua = (prior.get("user_agent_created") or "") == (user_agent or "")
 
-    # Step 2: token was NOT claimable. Check if it exists in a used/revoked state.
-    prior = await db.refresh_tokens.find_one({"token_hash": token_hash})
-    if not prior:
-        return RefreshOutcome("unknown")
+        if within_grace and same_ua:
+            successor_present = False
+            if prior.get("replaced_by_id"):
+                async with pg.begin():
+                    from sqlalchemy import select
+                    from postgres_models import RefreshToken
+                    stmt = select(RefreshToken).where(RefreshToken.id == prior["replaced_by_id"])
+                    successor_present = (await pg.execute(stmt)).scalar_one_or_none() is not None
+            return RefreshOutcome("concurrency_grace",
+                                  family_id=prior["family_id"],
+                                  session_id=prior["session_id"],
+                                  user_id=prior["user_id"],
+                                  successor_present=successor_present)
 
-    if prior.get("revoked_at") is not None:
-        # Already-revoked reuse → treat as confirmed reuse (attacker with old token).
-        await revoke_family(prior["family_id"], "reuse_after_revoke")
-        await db.user_sessions.update_one(
-            {"id": prior["session_id"]},
-            {"$set": {"revoked_at": ts, "revoke_reason": "refresh_reuse_detected"}},
-        )
+        async with pg.begin():
+            await tokens_repo.revoke_family(pg, prior["family_id"], "reuse_detected")
+            await sessions_repo.revoke_by_id(pg, prior["session_id"], "refresh_reuse_detected")
         return RefreshOutcome("reuse_detected", family_id=prior["family_id"],
                               session_id=prior["session_id"], user_id=prior["user_id"])
-
-    # Token was used — decide grace vs. reuse.
-    used_at = _as_utc(prior["used_at"])
-    within_grace = (ts - used_at).total_seconds() <= REFRESH_GRACE_SECONDS
-    same_ua = (prior.get("user_agent_created") or "") == (user_agent or "")
-
-    if within_grace and same_ua:
-        # Legitimate concurrent refresh. Return the successor that the winning
-        # caller already installed — client will just reuse the newer cookie.
-        successor = await db.refresh_tokens.find_one({"id": prior.get("replaced_by_id")})
-        return RefreshOutcome("concurrency_grace",
-                              family_id=prior["family_id"],
-                              session_id=prior["session_id"],
-                              user_id=prior["user_id"],
-                              successor_present=bool(successor))
-
-    # Outside grace OR different device context → confirmed reuse.
-    await revoke_family(prior["family_id"], "reuse_detected")
-    await db.user_sessions.update_one(
-        {"id": prior["session_id"]},
-        {"$set": {"revoked_at": ts, "revoke_reason": "refresh_reuse_detected"}},
-    )
-    return RefreshOutcome("reuse_detected", family_id=prior["family_id"],
-                          session_id=prior["session_id"], user_id=prior["user_id"])
 
 
 # --------------------------------------------------------------------------- #
 # Session touch — evaluate idle BEFORE writing, throttle writes                #
 # --------------------------------------------------------------------------- #
 async def check_and_touch_session(session: dict, ip: Optional[str]) -> Optional[str]:
-    """Return None if session is valid; otherwise a rejection reason string.
-
-    Order of checks (per gate correction):
-      1. revoked_at
-      2. absolute_expires_at
-      3. idle timeout against EXISTING last_used_at (pre-touch)
-      4. session_version staleness (caller checks against user doc separately)
-      5. THEN touch last_used_at — throttled to once per TOUCH_THROTTLE_SECONDS.
-    """
     ts = now()
     if session.get("revoked_at") is not None:
         return "session_revoked"
@@ -344,13 +290,11 @@ async def check_and_touch_session(session: dict, ip: Optional[str]) -> Optional[
     if last_used and (ts - last_used) > timedelta(minutes=idle_min):
         return "session_idle_expired"
 
-    # Throttled touch — only write if the stored value is stale.
     if not last_used or (ts - last_used).total_seconds() > TOUCH_THROTTLE_SECONDS:
         try:
-            await db.user_sessions.update_one(
-                {"id": session["id"]},
-                {"$set": {"last_used_at": ts, "ip_last": ip}},
-            )
+            async with AsyncSessionLocal() as pg:
+                async with pg.begin():
+                    await sessions_repo.touch(pg, session["id"], ip)
         except Exception:
             pass
     return None
@@ -360,12 +304,11 @@ async def check_and_touch_session(session: dict, ip: Optional[str]) -> Optional[
 # Cookie settings                                                              #
 # --------------------------------------------------------------------------- #
 def refresh_cookie_kwargs() -> dict:
-    """FastAPI Response.set_cookie() kwargs. Path scoped to /api/auth/refresh."""
     hipaa = os.environ.get("HIPAA_MODE", "false").lower() in {"1", "true", "yes", "on"}
     return {
         "key": "nms_rt",
         "httponly": True,
-        "secure": hipaa,                     # dev: false so localhost testing works
+        "secure": hipaa,
         "samesite": "lax",
         "path": "/api/auth/refresh",
         "max_age": REFRESH_TTL_DAYS * 86400,
