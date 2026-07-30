@@ -1126,3 +1126,49 @@ conversion. See `PG_MIGRATION_STATUS.md` for the exact hand-off checklist.
 - App boots cleanly, `/api/health` returns 200.
 
 _Last updated: Feb 28, 2026 (Sprint 12 · PostgreSQL Auth Foundation)_
+
+---
+
+## Sprint 12.5 · Auth Router Refactor (Feb 28, 2026)
+
+### Scope (Session 1 of the atomic PG runtime cutover)
+Split the 975-line `backend/routers/auth.py` into topical submodules so
+the Session 2 PostgreSQL cutover can be reviewed one file at a time.
+Behaviour is 100% preserved — MongoDB remains the persistence backend,
+every route path / schema / cookie / MFA behaviour is unchanged, and
+`routers.auth` continues to be the public entry point.
+
+### Files added
+- `backend/routers/auth_impl/_common.py` — shared imports, helpers,
+  `json_dumps_body`, `_create_session`, `_email_hash`, etc. Uses `__all__`
+  so `from ._common import *` re-exports underscored helpers.
+- `backend/routers/auth_impl/registration.py` — register, login, login/continue.
+- `backend/routers/auth_impl/refresh.py` — POST /auth/refresh with rotation.
+- `backend/routers/auth_impl/sessions.py` — logout, logout-all, sessions list, revoke.
+- `backend/routers/auth_impl/mfa.py` — setup, verify, disable.
+- `backend/routers/auth_impl/profile.py` — me, profile update, change-password.
+- `backend/routers/auth_impl/password_reset.py` — forgot, reset, dev/reset-token.
+- `backend/routers/auth_impl/oauth.py` — Emergent Google + direct OAuth.
+- `backend/routers/auth_impl/__init__.py` — imports every submodule so
+  decorators register at import time.
+- `backend/tests/test_auth_refactor_characterization.py` — 9 tests
+  covering route registration, public helper exports, login + MFA,
+  refresh cookie rotation, `/auth/me`, invalid password → 401, sessions
+  list `is_current` flag, and generic forgot-password contract.
+
+### Files modified
+- `backend/routers/auth.py` — reduced from 975 lines to a thin shim
+  that imports `auth_impl` (triggers route registration) and re-exports
+  the helpers other backend modules import directly (`_create_session`,
+  `_email_hash`, `_hash_token`, `_set_refresh_cookie`,
+  `_clear_refresh_cookie`, `_revoke_all_sessions`, `_revoke_session`).
+
+### Verification
+- Full test suite: **62/62 passing** (9 new characterization + 12 PG
+  foundation + 5 staff handoffs + 18 Bedrock features + 18 Bedrock AI).
+- Backend imports cleanly and boots (`/api/health` OK).
+- All 21 auth routes still registered on the shared FastAPI router.
+- Live smoke: two-step MFA login returns 200 with access token +
+  HttpOnly refresh cookie; refresh rotates the cookie.
+
+_Last updated: Feb 28, 2026 (Sprint 12.5 · Auth Router Refactor)_
