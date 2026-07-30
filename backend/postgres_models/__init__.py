@@ -6,3 +6,5 @@ from .refresh_token import RefreshToken  # noqa: F401
 from .login import LoginHistory, LoginContinuation  # noqa: F401
 from .password_reset import PasswordResetAttempt, PasswordResetToken  # noqa: F401
 from .audit import AuditLog, SecurityEvent  # noqa: F401
+from .recovery_code import RecoveryCode  # noqa: F401
+

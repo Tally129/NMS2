@@ -7,7 +7,7 @@ appointments, visit_notes) continue to live in MongoDB.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import Depends, HTTPException, Request
@@ -80,7 +80,7 @@ async def admin_users(user=Depends(require_roles("admin"))):
     return [to_user_out(r) for r in rows]
 
 
-@api.post("/admin/users", response_model=UserOut)
+@api.post("/admin/users")
 async def admin_create_user(payload: UserCreate, request: Request, user=Depends(require_roles("admin"))):
     if payload.role not in ("admin", "practitioner", "staff", "client"):
         raise HTTPException(status_code=400, detail="Invalid role")
@@ -88,6 +88,25 @@ async def admin_create_user(payload: UserCreate, request: Request, user=Depends(
     async with AsyncSessionLocal() as pg:
         if await users_repo.get_by_email(pg, email):
             raise HTTPException(status_code=409, detail="Email already registered")
+    # Session 2c — every workforce account is created in the bootstrap flow.
+    # Clients keep the pre-existing behaviour: their password is what the
+    # admin typed and no forced onboarding is triggered.
+    from routers.auth_impl.bootstrap import (
+        TEMP_PASSWORD_TTL_HOURS, _generate_temp_password,
+    )
+    WORKFORCE = {"admin", "practitioner", "staff", "front_desk", "frontdesk",
+                 "medical_assistant", "auditor"}
+    is_workforce = payload.role in WORKFORCE
+    if is_workforce:
+        raw_password = _generate_temp_password()
+        onboarding_status = "password_change_required"
+        must_change_password = True
+        temp_exp = datetime.now(timezone.utc) + timedelta(hours=TEMP_PASSWORD_TTL_HOURS)
+    else:
+        raw_password = payload.password
+        onboarding_status = None
+        must_change_password = False
+        temp_exp = None
     now = datetime.now(timezone.utc)
     user_id = new_id()
     async with AsyncSessionLocal() as pg:
@@ -96,7 +115,7 @@ async def admin_create_user(payload: UserCreate, request: Request, user=Depends(
                 pg,
                 user_id=user_id,
                 email=email,
-                password_hash=hash_password(payload.password),
+                password_hash=hash_password(raw_password),
                 full_name=payload.full_name or "",
                 phone=payload.phone,
                 role=payload.role,
@@ -104,14 +123,31 @@ async def admin_create_user(payload: UserCreate, request: Request, user=Depends(
                 mfa_enabled=False,
                 mfa_secret=None,
                 session_version=1,
-                password_changed_at=now,
+                password_changed_at=now if not is_workforce else None,
                 created_at=now,
+                must_change_password=must_change_password,
+                onboarding_status=onboarding_status,
+                temporary_password_expires_at=temp_exp,
             )
     await log_audit(db, user["id"], user["email"], "admin.create_user",
                     resource_type="user", resource_id=user_id,
-                    metadata={"role": payload.role},
+                    metadata={"role": payload.role, "onboarding": onboarding_status},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    return to_user_out(doc)
+    if is_workforce:
+        await log_audit(db, user_id, email, "temporary_password_issued",
+                        resource_type="user", resource_id=user_id,
+                        metadata={"ttl_hours": TEMP_PASSWORD_TTL_HOURS,
+                                  "issued_by": user["id"]},
+                        ip=get_client_ip(request),
+                        user_agent=request.headers.get("user-agent"))
+    out = to_user_out(doc)
+    if is_workforce:
+        # Return the plaintext temporary password ONCE. The caller is
+        # expected to hand this to the new employee out-of-band.
+        out = {**out, "temporary_password": raw_password,
+               "temporary_password_expires_at": temp_exp.isoformat(),
+               "onboarding_status": onboarding_status}
+    return out
 
 
 @api.put("/admin/users/{user_id}/role", response_model=UserOut)

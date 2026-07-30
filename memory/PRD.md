@@ -1343,3 +1343,145 @@ separate follow-up (Session 2c).
 - Password hashing (bcrypt) unchanged — Argon2id migration is Session 2d.
 
 _Last updated: 2026-07-30 (Session 2b · PostgreSQL Auth Runtime Cutover)_
+
+---
+
+## Sprint 12.8 · Session 2c — Admin Bootstrap Onboarding (2026-07-30) ✅
+
+**Branch**: `auth-remove-google` (Sessions 2a + 2b already committed).
+
+**Scope**: Forced onboarding for every workforce account — temporary
+password → forced password change → forced MFA enrollment → single-use
+recovery codes → normal MFA-gated session. Existing MFA-enabled workforce
+users and every client account are unaffected.
+
+### Data model
+- `auth_users.onboarding_status` VARCHAR(32) — `'password_change_required'`,
+  `'mfa_enrollment_required'`, or NULL (complete).
+- `auth_users.temporary_password_expires_at` TIMESTAMP WITH TIME ZONE.
+- `auth_recovery_codes(id, user_id, code_hash, used_at, created_at)` — 8
+  single-use MFA fallback codes per user, sha256-hashed at rest, atomic
+  redemption via `UPDATE ... RETURNING`.
+
+### Alembic
+- New revision `62cd2e365fc9_add_admin_bootstrap_columns_and_recovery_codes.py`.
+  Forward-only; head is now `62cd2e365fc9`.
+
+### JWT surface
+- `make_bootstrap_token(user_id, stage)` — 10-minute token with claims
+  `{type:"bootstrap", scope:"bootstrap", bootstrap_stage:<stage>}`.
+- Bootstrap stages: `"password_change"` and `"mfa_enrollment"`.
+- `decode_token(expected_type="access")` and `expected_type="bootstrap"`
+  provide strict mutual rejection — access tokens can't hit bootstrap
+  endpoints and vice versa.
+
+### New endpoints
+- `POST /api/auth/bootstrap/first-admin` — one-shot; gated by
+  `X-Bootstrap-Secret` header matching `$BOOTSTRAP_SECRET`. Returns
+  temporary password once, 409 on subsequent calls, 503 when the server
+  secret is unset. Never logs the temp password or the secret.
+- `POST /api/auth/bootstrap/password-change` — requires a
+  `bootstrap_stage=password_change` JWT.
+- `POST /api/auth/bootstrap/mfa/setup` — requires
+  `bootstrap_stage=mfa_enrollment`.
+- `POST /api/auth/bootstrap/mfa/verify` — requires the same stage;
+  successful verify mints 8 recovery codes.
+
+### Login flow changes (`/api/auth/login`)
+- On successful password check, if the user's `onboarding_status` is
+  `password_change_required` (or `must_change_password=True`), respond
+  with `{bootstrap_token, bootstrap_stage:"password_change", user,
+  next_step}` and no access token / no refresh cookie.
+- If the user is workforce and MFA is not yet configured, respond with
+  `{bootstrap_token, bootstrap_stage:"mfa_enrollment", ...}`.
+- Recovery-code fallback added to the standard login body — pass the
+  10-char code where `mfa_token` would normally go. Non-digit + length
+  ≥8 triggers the recovery path; atomic PG UPDATE guarantees single-use.
+- Temporary-password expiry emits `temporary_password_expired` audit and
+  returns HTTP 403 with `{code:"temporary_password_expired"}`.
+
+### Admin surface
+- `POST /api/admin/users` — for workforce roles, ignores the caller's
+  password, generates a 24-char random temp password, sets
+  `must_change_password=True` +
+  `onboarding_status="password_change_required"` +
+  `temporary_password_expires_at=now()+24h`, and returns
+  `{temporary_password, temporary_password_expires_at,
+  onboarding_status, ...}` ONCE. Client-role creation flow unchanged.
+- Audit event `temporary_password_issued` recorded (no password in
+  metadata).
+
+### Dev-only startup helper
+- If `BOOTSTRAP_ADMIN_EMAIL` is set and no admin exists (and HIPAA_MODE
+  is off), server startup creates the first admin with a random temp
+  password and prints it once to the console. Silently skipped in
+  HIPAA_MODE.
+
+### New env vars (documented in `.env.example`)
+- `BOOTSTRAP_SECRET` — high-entropy secret gating the first-admin
+  endpoint. Blank = endpoint returns 503.
+- `BOOTSTRAP_ADMIN_EMAIL` — dev-only seed email.
+- `BOOTSTRAP_TEMP_PASSWORD_TTL_HOURS=24` — expiry window.
+
+### State diagram
+```
+                 admin creates user (workforce)
+                          │
+                          ▼
+       ┌── temporary_password_expires_at set ──┐
+       │  onboarding_status = "password_change_required"
+       │  must_change_password = TRUE
+       └───────────────┬───────────────────────┘
+                       │  login(temp pw)
+                       ▼
+        bootstrap_token stage="password_change"  ─── (no session, no refresh)
+                       │  bootstrap/password-change
+                       ▼
+         onboarding_status = "mfa_enrollment_required"
+         must_change_password = FALSE
+         temp password expiry cleared
+                       │  login(new pw)
+                       ▼
+        bootstrap_token stage="mfa_enrollment"   ─── (no session, no refresh)
+                       │  bootstrap/mfa/setup → bootstrap/mfa/verify(TOTP)
+                       ▼
+          mfa_enabled = TRUE
+          onboarding_status = NULL
+          8 recovery codes returned once
+                       │  login(pw + TOTP)  OR  login(pw + recovery_code)
+                       ▼
+                   NORMAL SESSION
+```
+
+### Audit events emitted
+`first_admin_bootstrap_attempt`, `first_admin_created`,
+`temporary_password_issued`, `temporary_password_expired`,
+`bootstrap_login_started`, `bootstrap_password_changed`,
+`mfa_enrollment_started`, `mfa_enrollment_failed`,
+`mfa_enrollment_completed`, `recovery_code_used`, `recovery_code_failed`,
+`onboarding_completed`.
+
+Never logged in audit metadata: passwords, TOTP secrets, plaintext
+recovery codes, bootstrap secret, refresh tokens, access tokens.
+
+### Verification
+- New test file `backend/tests/test_session2c_admin_bootstrap.py` —
+  **20/20 pass**. Covers full lifecycle, concurrent recovery-code race,
+  bootstrap-vs-access token mutual rejection, temp-password expiry,
+  client signup NOT forced through workforce onboarding, seeded MFA
+  admins unaffected.
+- Full auth regression across Sessions 2a/2b/2c: **134 pass**, 6 pre-
+  existing failures unrelated to Session 2c (SendGrid live status,
+  RBAC catalog gaps, clamscan not installed in container).
+- Live smoke: Google OAuth still 404, `/api/health` still exposes only
+  `{llm, email, sms}`, first-admin endpoint refuses without secret (401)
+  and refuses correct secret when an admin exists (409).
+
+### Non-goals
+- Argon2id migration → Session 2d (Security Hardening).
+- Risk-based login detection → Session 2d.
+- Recovery-code regeneration UX → Session 2d.
+- Passkeys / WebAuthn → later, after 2d.
+
+_Last updated: 2026-07-30 (Session 2c · Admin Bootstrap)_
+

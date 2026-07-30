@@ -39,6 +39,16 @@ class User(Base):
     mfa_secret: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     mfa_bypass: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Session 2c — admin bootstrap / forced onboarding state.
+    #   None                          → onboarding complete (or never required, e.g. clients)
+    #   "password_change_required"    → must set a permanent password before doing anything
+    #   "mfa_enrollment_required"     → workforce user needs to enroll MFA before session
+    onboarding_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # UTC expiry for the temporary password issued at bootstrap. Login rejects
+    # the temporary password once this timestamp is in the past.
+    temporary_password_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
     session_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     auth_provider: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     picture_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)

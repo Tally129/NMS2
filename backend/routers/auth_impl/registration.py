@@ -113,15 +113,79 @@ async def login(payload: LoginIn, request: Request):
     if not user.get("is_active", True):
         raise HTTPException(status_code=403, detail="Account disabled")
 
+    # Session 2c — enforce bootstrap onboarding BEFORE creating a session or
+    # asking for MFA. Bootstrap JWTs are short-lived, refresh-cookie-less
+    # tokens that only unlock the /auth/bootstrap/* endpoints.
+    onboarding = user.get("onboarding_status")
+    temp_exp = user.get("temporary_password_expires_at")
+    ip = get_client_ip(request)
+    ua = request.headers.get("user-agent")
+    if onboarding == "password_change_required" or user.get("must_change_password"):
+        if temp_exp and temp_exp < datetime.now(timezone.utc):
+            await log_audit(db, user["id"], user["email"], "temporary_password_expired",
+                            severity="warning", outcome="failure",
+                            ip=ip, user_agent=ua)
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "temporary_password_expired",
+                        "message": "Your temporary password has expired. Ask an administrator to reissue one."},
+            )
+        from auth_utils import make_bootstrap_token
+        boot = make_bootstrap_token(user["id"], "password_change")
+        await log_audit(db, user["id"], user["email"], "bootstrap_login_started",
+                        metadata={"stage": "password_change"},
+                        ip=ip, user_agent=ua)
+        return {
+            "bootstrap_token": boot,
+            "bootstrap_stage": "password_change",
+            "user": to_user_out(user),
+            "next_step": "password_change",
+        }
+    if onboarding == "mfa_enrollment_required" or (user.get("role") in WORKFORCE_ROLES and not user.get("mfa_enabled") and not user.get("mfa_bypass")):
+        from auth_utils import make_bootstrap_token
+        boot = make_bootstrap_token(user["id"], "mfa_enrollment")
+        await log_audit(db, user["id"], user["email"], "bootstrap_login_started",
+                        metadata={"stage": "mfa_enrollment"},
+                        ip=ip, user_agent=ua)
+        return {
+            "bootstrap_token": boot,
+            "bootstrap_stage": "mfa_enrollment",
+            "user": to_user_out(user),
+            "next_step": "mfa_enrollment",
+        }
+
     role = user.get("role", "client")
     mfa_satisfied_now = False
+    recovery_used_id = None
     if user.get("mfa_enabled"):
-        if not payload.mfa_token:
+        recovery_code = str(payload.mfa_token or "").strip()
+        # Recovery codes are longer + include letters; TOTPs are 6 digits.
+        if recovery_code and (not recovery_code.isdigit()) and len(recovery_code) >= 8:
+            code_hash = hashlib.sha256(recovery_code.upper().encode("utf-8")).hexdigest()
+            from repositories import recovery_codes as recovery_repo
+            async with AsyncSessionLocal() as pg:
+                async with pg.begin():
+                    recovery_used_id = await recovery_repo.claim_by_hash(
+                        pg, user_id=user["id"], code_hash=code_hash,
+                    )
+            if not recovery_used_id:
+                await log_audit(db, user["id"], user["email"], "recovery_code_failed",
+                                severity="high", outcome="failure",
+                                ip=ip, user_agent=ua)
+                record_login_failure(payload.email)
+                raise HTTPException(status_code=401, detail="Invalid recovery code")
+            mfa_satisfied_now = True
+            await log_audit(db, user["id"], user["email"], "recovery_code_used",
+                            severity="high", outcome="success",
+                            metadata={"code_id": recovery_used_id},
+                            ip=ip, user_agent=ua)
+        elif not payload.mfa_token:
             return {"access_token": "", "refresh_token": "", "user": to_user_out(user), "mfa_required": True}
-        if not verify_mfa(user.get("mfa_secret") or "", payload.mfa_token):
+        elif not verify_mfa(user.get("mfa_secret") or "", payload.mfa_token):
             record_login_failure(payload.email)
             raise HTTPException(status_code=401, detail="Invalid MFA code")
-        mfa_satisfied_now = True
+        else:
+            mfa_satisfied_now = True
 
     reset_login_failures(payload.email)
 

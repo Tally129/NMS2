@@ -614,6 +614,60 @@ async def seed_demo():
     except Exception as _e:
         logger.warning("PG auth sync at startup failed: %s", _e)
 
+    # Session 2c (dev only): seed a brand-new bootstrap admin whose email
+    # is set via BOOTSTRAP_ADMIN_EMAIL. Skipped in HIPAA_MODE and skipped if
+    # any admin already exists. Prints the temp password to the console ONCE
+    # so a developer can pick it up on the first `docker logs` glance.
+    hipaa = os.environ.get("HIPAA_MODE", "false").lower() in {"1", "true", "yes", "on"}
+    boot_email = (os.environ.get("BOOTSTRAP_ADMIN_EMAIL") or "").strip().lower()
+    if boot_email and not hipaa:
+        try:
+            from postgres_db import AsyncSessionLocal as _S
+            from postgres_models import User as _User
+            from repositories import users as _users_repo
+            from routers.auth_impl.bootstrap import (
+                TEMP_PASSWORD_TTL_HOURS, _generate_temp_password,
+            )
+            from auth_utils import hash_password as _hp
+            from models import new_id as _new_id
+            from sqlalchemy import select as _select
+
+            async with _S() as pg:
+                any_admin = (
+                    await pg.execute(_select(_User).where(_User.role == "admin").limit(1))
+                ).scalar_one_or_none()
+                existing = await _users_repo.get_by_email(pg, boot_email)
+            if any_admin is None and existing is None:
+                temp_pw = _generate_temp_password()
+                now = datetime.now(timezone.utc)
+                async with _S() as pg:
+                    async with pg.begin():
+                        await _users_repo.create_user(
+                            pg, user_id=_new_id(), email=boot_email,
+                            password_hash=_hp(temp_pw),
+                            full_name="Bootstrap Admin", role="admin",
+                            is_active=True, must_change_password=True,
+                            onboarding_status="password_change_required",
+                            temporary_password_expires_at=now + timedelta(hours=TEMP_PASSWORD_TTL_HOURS),
+                            session_version=1, created_at=now,
+                        )
+                logger.warning(
+                    "\n"
+                    "================================================================\n"
+                    " BOOTSTRAP ADMIN CREATED (development only) — copy the password!\n"
+                    "----------------------------------------------------------------\n"
+                    "  email:              %s\n"
+                    "  temporary password: %s\n"
+                    "  expires:            %s (in %sh)\n"
+                    "  next step:          POST /api/auth/login → follow bootstrap flow\n"
+                    "================================================================\n",
+                    boot_email, temp_pw,
+                    (now + timedelta(hours=TEMP_PASSWORD_TTL_HOURS)).isoformat(),
+                    TEMP_PASSWORD_TTL_HOURS,
+                )
+        except Exception as _e:
+            logger.warning("BOOTSTRAP_ADMIN_EMAIL seed skipped: %s", _e)
+
     # Legal & Policies: seed the nine default policies (idempotent).
     try:
         from routers.legal import seed_default_policies
