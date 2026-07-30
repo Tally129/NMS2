@@ -1068,3 +1068,61 @@ details. Message content stays inside the portal.
   without failing the message insert.
 
 _Last updated: Feb 28, 2026 (Sprint 11.1 · Privacy-Safe Secure-Message Alerts)_
+
+---
+
+## Sprint 12 · PostgreSQL Auth Foundation (Feb 28, 2026)
+
+### Scope (Phases 1–4 + 9–10 of the migration charter)
+Built the parallel PostgreSQL infrastructure the auth-stack cutover will
+run on top of, without touching the still-Mongo runtime. Local PostgreSQL
+is verified end-to-end; all foundation tests pass; no app behaviour has
+changed yet.
+
+### Delivered
+- **12 SQLAlchemy models** across `backend/postgres_models/` (User, Client,
+  UserSession, RefreshToken, LoginHistory, LoginContinuation,
+  PasswordResetAttempt, PasswordResetToken, OAuthState, OAuthHandoff,
+  AuditLog with autoincrementing `seq` + retained UUID `id`, SecurityEvent).
+  All datetimes are `DateTime(timezone=True)`. `AuditLog.audit_metadata`
+  uses `JSONB`. Foreign keys wired with correct `ondelete` behaviour.
+- **Alembic** — new `alembic.ini`, rewritten `alembic/env.py` to load
+  `Base.metadata` from `postgres_models` and resolve `DATABASE_URL` from
+  process env. Initial revision `557f2e586456` applied to local dev.
+- **Repositories layer** — `backend/repositories/*` covering users, clients,
+  user_sessions, refresh_tokens (with `SELECT ... FOR UPDATE SKIP LOCKED`
+  atomic claim), audit (with PostgreSQL transaction-scoped
+  `pg_advisory_xact_lock`), login history + continuations, password reset
+  (rate-limit windows + single-use tokens), OAuth state + one-shot handoff.
+  Every function accepts an explicit `AsyncSession` and returns dicts
+  matching the pre-migration Mongo shape.
+- **Staff migration script** —
+  `backend/scripts/migrate_staff_users_to_postgres.py`. Dry-run + real
+  modes, idempotent (upserts by email), migrated 55 workforce users
+  (33 admin, 16 staff, 4 practitioners, 1 MA, 1 auditor) locally. Never
+  copies sessions, refresh tokens, reset tokens, OAuth material — cutover
+  forces re-login.
+- **Foundation tests** — 12 hermetic tests covering repo layer,
+  atomic refresh rotation, single-use consume patterns, and audit chain
+  seq-ordering. All pass in 0.65s.
+- **Local dev Postgres** — installed PostgreSQL 15 apt package, created
+  `nms_auth` DB owned by `nms_dev`. `DATABASE_URL` lives in
+  `backend/.env` (gitignored); `.env.example` gained a placeholder entry.
+- **Packages added to requirements.txt** — `sqlalchemy==2.0.51`,
+  `alembic==1.18.5`, `psycopg==3.3.4`, `psycopg-binary==3.3.4`,
+  `asyncpg==0.31.0`.
+
+### Deferred to a follow-up PR (Phases 5–8 of the migration charter)
+Converting `deps.py`, `sessions.py`, `audit.py`, and `routers/auth.py`
+was scoped as this session's work but deliberately postponed to avoid
+leaving the app in a broken hybrid state (a session pointing at a
+Mongo-only user cannot satisfy the PostgreSQL FK). `routers/auth.py` is
+975 lines with 15+ endpoints, each requiring careful atomic-transaction
+conversion. See `PG_MIGRATION_STATUS.md` for the exact hand-off checklist.
+
+### Test results
+- 53/53 tests pass (12 new PG foundation + 41 pre-existing Bedrock /
+  features / staff handoffs).
+- App boots cleanly, `/api/health` returns 200.
+
+_Last updated: Feb 28, 2026 (Sprint 12 · PostgreSQL Auth Foundation)_

@@ -1,73 +1,92 @@
+"""Alembic environment. Loads DATABASE_URL from process env and every
+NMS PostgreSQL model so autogenerate sees all tables."""
+from __future__ import annotations
+
+import os
+import sys
 from logging.config import fileConfig
+from pathlib import Path
 
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
-
+from sqlalchemy import engine_from_config, pool
 from alembic import context
 
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
+# --- Path setup: make backend/ importable when Alembic is invoked from anywhere.
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+# Load .env before importing models so DATABASE_URL / secrets are available.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(BACKEND_DIR / ".env")
+except Exception:
+    pass
+
+# Import ALL models so `Base.metadata` includes every table.
+from postgres_models import Base  # noqa: E402,F401
+from postgres_models import (  # noqa: E402,F401
+    User, Client, UserSession, RefreshToken,
+    LoginHistory, LoginContinuation,
+    PasswordResetAttempt, PasswordResetToken,
+    OAuthState, OAuthHandoff,
+    AuditLog, SecurityEvent,
+)
+
 config = context.config
 
-# Interpret the config file for Python logging.
-# This line sets up loggers basically.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# add your model's MetaData object here
-# for 'autogenerate' support
-# from myapp import mymodel
-# target_metadata = mymodel.Base.metadata
-target_metadata = None
+# Resolve DATABASE_URL at runtime. Never bake it into alembic.ini.
+db_url = os.environ.get("DATABASE_URL", "").strip()
+if not db_url:
+    raise RuntimeError("DATABASE_URL is not configured for Alembic")
 
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
-# my_important_option = config.get_main_option("my_important_option")
-# ... etc.
+# Alembic uses a synchronous engine internally. Strip the async driver
+# marker so `create_engine` works. We keep the +psycopg suffix — psycopg 3
+# is dual-mode (sync + async).
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql+psycopg://", 1)
+elif db_url.startswith("postgresql://") and "+" not in db_url.split("://", 1)[0]:
+    db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
+
+# `-x db_url=...` on the CLI can override.
+x_args = context.get_x_argument(as_dictionary=True)
+if x_args.get("db_url"):
+    db_url = x_args["db_url"]
+
+config.set_main_option("sqlalchemy.url", db_url)
+
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode.
-
-    This configures the context with just a URL
-    and not an Engine, though an Engine is acceptable
-    here as well.  By skipping the Engine creation
-    we don't even need a DBAPI to be available.
-
-    Calls to context.execute() here emit the given string to the
-    script output.
-
-    """
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
+        url=db_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        compare_type=True,
+        compare_server_default=True,
     )
-
     with context.begin_transaction():
         context.run_migrations()
 
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode.
-
-    In this scenario we need to create an Engine
-    and associate a connection with the context.
-
-    """
     connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
+        config.get_section(config.config_ini_section) or {},
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        future=True,
     )
-
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+            compare_server_default=True,
         )
-
         with context.begin_transaction():
             context.run_migrations()
 
