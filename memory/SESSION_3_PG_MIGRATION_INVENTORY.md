@@ -44,28 +44,37 @@ Legend
 |                      | H = high (denormalisation, GridFS blobs, or FK graph rework).    |
 | **Batch**            | Session 3x that should own it (see §5 for definitions).          |
 
-### 2.a Legacy auth collections — Session 2b MIRRORS, no new writes (delete after grace period)
+### 2.a Legacy auth collections — Session 3.0 outcome
 
-These are already the source-of-truth in PostgreSQL. Left in Mongo only so
-the admin dashboard's older read paths and audit backups don't miss data
-during the transition. They must NOT receive new writes; a Session 3.0
-sweep will drop them.
+Session 3.0 (2026-07-30) dropped **6 of these 10** collections in the
+development MongoDB after a full backup and reconciliation. The remaining
+**4** stayed in place because non-auth routers still consume them and
+must migrate as part of their proper domain sessions.
 
-| Collection                | Count  | PHI | PG target (already present)     | Notes                                                       |
-| ------------------------- | ------ | --- | ------------------------------- | ----------------------------------------------------------- |
-| `users`                   | 1218   | ✅   | `auth_users`                    | Session 2b PG cutover                                        |
-| `user_sessions`           | 70     | –   | `auth_user_sessions`            | ""                                                          |
-| `refresh_tokens`          | 89     | –   | `auth_refresh_tokens`           | ""                                                          |
-| `login_history`           | 2970   | –   | `auth_login_history`            | ""                                                          |
-| `login_continuations`     | 0      | –   | `auth_login_continuations`     | ""                                                          |
-| `password_reset_attempts` | 377    | –   | `auth_password_reset_attempts`  | ""                                                          |
-| `password_reset_tokens`   | 0      | –   | `auth_password_reset_tokens`    | ""                                                          |
-| `audit_logs`              | 9023   | –   | `auth_audit_logs`               | New rows since Session 2b live in PG only.                  |
-| `security_events`         | 223    | –   | `auth_security_events`          | ""                                                          |
-| `oauth_handoffs`          | 55     | –   | (removed, Session 2a)           | Drop; no code path reads.                                   |
+| Collection                | Count  | PHI | PG target                      | Session 3.0 outcome                                        |
+| ------------------------- | ------ | --- | ------------------------------ | ---------------------------------------------------------- |
+| `user_sessions`           | 66     | –   | `auth_user_sessions`            | ✅ **DROPPED**                                              |
+| `refresh_tokens`          | 85     | –   | `auth_refresh_tokens`           | ✅ **DROPPED**                                              |
+| `login_history`           | 2970   | –   | `auth_login_history`            | ✅ **DROPPED**                                              |
+| `login_continuations`     | 0      | –   | `auth_login_continuations`      | ✅ **DROPPED**                                              |
+| `password_reset_attempts` | 377    | –   | `auth_password_reset_attempts`  | ✅ **DROPPED**                                              |
+| `oauth_handoffs`          | 55     | –   | (removed in Session 2a)         | ✅ **DROPPED**                                              |
+| `users`                   | 1218   | ✅   | `auth_users`                    | ⛔ DEFER — 42 runtime refs (see §7 owner list)              |
+| `password_reset_tokens`   | 0      | –   | `auth_password_reset_tokens`    | ⛔ DEFER — 3 refs in `portal_ops.py` staff-side reset flow  |
+| `audit_logs`              | 9023   | –   | `auth_audit_logs`               | ⛔ DEFER — 5 refs in `server.py` startup + `compliance.py`  |
+| `security_events`         | 223    | –   | `auth_security_events`          | ⛔ DEFER — 2 refs in `server.py` startup index creation     |
 
-**Action**: `db.<collection>.drop()` after 30-day grace + on-disk backup.
-No test dependency.
+**Backup**: `/app/backups/session-3.0-20260730T233413Z/test_database/*.bson.gz`
+(verified via `mongorestore --dryRun`).
+
+**Follow-up sessions that must remove the 4 deferred consumers**:
+- `users` → Session 3.1 (Patients/Clients) and a parallel sweep of the
+  ~10 routers that read `db.users` for display-name lookups
+- `password_reset_tokens` → covered by the portal-ops migration
+  (currently unowned — schedule alongside Session 3.7)
+- `audit_logs` + `security_events` → point `compliance.py` at the PG
+  `auth_audit_logs` table and drop the startup index-creation calls in
+  `server.py`. Small standalone follow-up (Session 3.0b).
 
 ---
 
