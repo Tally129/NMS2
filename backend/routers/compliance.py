@@ -98,19 +98,38 @@ async def patient_data_export(request: Request, user=Depends(get_current_user)):
 async def accounting_of_disclosures(client_id: str, request: Request,
                                     user=Depends(get_current_user)):
     """§164.528 — patient right to an accounting of disclosures.
-    Returns every audit log row that references this client, filtered to the read/access events."""
+    Returns every audit log row that references this client, filtered to the read/access events.
+
+    Session 3.0b: reads from PostgreSQL `auth_audit_logs` (the Mongo mirror
+    was dropped)."""
     if user["role"] == "client":
         sc = await _resolve_self_client(user)
         if not sc or sc["id"] != client_id:
             raise HTTPException(status_code=403, detail="Forbidden")
-    q = {
-        "$or": [
-            {"resource_type": "client", "resource_id": client_id},
-            {"metadata.client_id": client_id},
-        ]
-    }
-    rows = await db.audit_logs.find(q).sort("ts", -1).to_list(2000)
-    hits = [_strip_id(r) for r in rows]
+    from postgres_db import AsyncSessionLocal
+    from postgres_models import AuditLog
+    from sqlalchemy import or_, select
+    async with AsyncSessionLocal() as pg:
+        stmt = (
+            select(AuditLog)
+            .where(or_(
+                (AuditLog.resource_type == "client") & (AuditLog.resource_id == client_id),
+                AuditLog.audit_metadata["client_id"].astext == client_id,
+            ))
+            .order_by(AuditLog.ts.desc())
+            .limit(2000)
+        )
+        rows = (await pg.execute(stmt)).scalars().all()
+    def _row(r):
+        return {
+            "id": r.id, "ts": r.ts.isoformat() if r.ts else None,
+            "user_id": r.user_id, "user_email": r.user_email,
+            "action": r.action, "resource_type": r.resource_type,
+            "resource_id": r.resource_id, "severity": r.severity,
+            "outcome": r.outcome, "ip": r.ip, "user_agent": r.user_agent,
+            "metadata": r.audit_metadata,
+        }
+    hits = [_row(r) for r in rows]
     await log_audit(db, user["id"], user["email"], "patient.accounting_view",
                     resource_type="client", resource_id=client_id,
                     metadata={"count": len(hits)},

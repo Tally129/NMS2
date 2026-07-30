@@ -61,8 +61,8 @@ must migrate as part of their proper domain sessions.
 | `oauth_handoffs`          | 55     | –   | (removed in Session 2a)         | ✅ **DROPPED**                                              |
 | `users`                   | 1218   | ✅   | `auth_users`                    | ⛔ DEFER — 42 runtime refs (see §7 owner list)              |
 | `password_reset_tokens`   | 0      | –   | `auth_password_reset_tokens`    | ⛔ DEFER — 3 refs in `portal_ops.py` staff-side reset flow  |
-| `audit_logs`              | 9023   | –   | `auth_audit_logs`               | ⛔ DEFER — 5 refs in `server.py` startup + `compliance.py`  |
-| `security_events`         | 223    | –   | `auth_security_events`          | ⛔ DEFER — 2 refs in `server.py` startup index creation     |
+| `audit_logs`              | 9023   | –   | `auth_audit_logs`               | ✅ **DROPPED (Session 3.0b)**                                |
+| `security_events`         | 223    | –   | `auth_security_events`          | ✅ **DROPPED (Session 3.0b)**                                |
 
 **Backup**: `/app/backups/session-3.0-20260730T233413Z/test_database/*.bson.gz`
 (verified via `mongorestore --dryRun`).

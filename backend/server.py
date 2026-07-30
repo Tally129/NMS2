@@ -511,7 +511,8 @@ async def seed_demo():
         await db.intake_forms.create_index("client_id", unique=True)
         await db.visit_notes.create_index("client_id")
         await db.files.create_index("client_id")
-        await db.audit_logs.create_index("ts")
+        # Session 3.0b: audit_logs / security_events live in PostgreSQL now;
+        # Mongo mirrors were dropped after the compliance viewer was cut over.
         await db.ws_tickets.create_index("expires_at", expireAfterSeconds=0)
         await db.push_subscriptions.create_index([("user_id", 1), ("endpoint", 1)], unique=True)
         await db.form_templates.create_index([("builtin", 1), ("title", 1)])
@@ -524,12 +525,7 @@ async def seed_demo():
         await db.client_supplement_assignments.create_index([("client_id", 1), ("active", 1)])
         await db.client_supplement_assignments.create_index([("client_id", 1), ("sheet_id", 1)], unique=False)
         await db.protocol_enrollments.create_index("status")
-        # Sprint 3+ collections
-        await db.audit_logs.create_index([("ts", 1)])
-        await db.audit_logs.create_index("action")
-        await db.audit_logs.create_index("severity")
-        await db.security_events.create_index([("ts", -1)])
-        await db.security_events.create_index("handled")
+        # Sprint 3+ collections (audit_logs/security_events moved to PG in Session 3.0b)
         await db.breakglass_sessions.create_index("user_id")
         await db.breakglass_sessions.create_index("expires_at")
         await db.breakglass_sessions.create_index("target_client_id")
