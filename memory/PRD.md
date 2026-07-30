@@ -1264,3 +1264,82 @@ NOT part of this session.
 - No admin bootstrap changes.
 
 _Last updated: 2026-07-30 (Session 2a · Google OAuth Removal)_
+
+
+---
+
+## Sprint 12.7 · Session 2b — PostgreSQL Auth Runtime Cutover (2026-07-30) ✅
+
+**Branch**: `auth-remove-google` (on top of Session 2a).
+
+**Scope**: Convert all authentication persistence from MongoDB/Motor to
+PostgreSQL/SQLAlchemy. API contract, JWT shape, refresh cookie behaviour,
+MFA flow, and password-reset semantics unchanged. Admin bootstrap is a
+separate follow-up (Session 2c).
+
+### New files
+- `backend/mongo_db.py` — Motor client + GridFS bucket now live here.
+  Everything outside the auth stack imports `db` / `fs_bucket` via
+  `deps.py`'s re-export.
+- `backend/pg_bootstrap.py` — `sync_mongo_users_to_pg()` runs at startup
+  to mirror pre-existing MongoDB users into PostgreSQL so the PG-backed
+  auth stack can authenticate them. Idempotent (only inserts missing
+  rows, refreshes transient password/MFA fields).
+
+### Rewritten (auth surface — Motor-free)
+- `backend/audit.py` — audit chain now lives in PostgreSQL, hash chain
+  guarded by a per-transaction advisory lock. Signature preserved
+  (`log_audit(db, ...)`) so every existing caller keeps compiling; the
+  `db` argument is now ignored.
+- `backend/sessions.py` — `issue_first_refresh`, `rotate_refresh`,
+  `revoke_all_user_sessions`, `enforce_active_session_limit`,
+  `check_and_touch_session`, `list_active_sessions_sanitized` all use
+  `AsyncSessionLocal()` + `repositories/*`.
+- `backend/deps.py` — `get_authenticated_user` reads user + session from
+  PG. Re-exports `db` / `fs_bucket` from `mongo_db.py`.
+- `backend/routers/auth_impl/*` — every submodule (registration, refresh,
+  mfa, sessions, profile, password_reset, _common) rewritten to hit PG
+  via repositories. `db` is still re-exported for the single Mongo
+  `clients` write in `register()` (client business row).
+- `backend/routers/admin.py` — user directory, session explorer, audit
+  viewer, revoke endpoints all target PostgreSQL.
+
+### Repository additions
+- `repositories/users.py::list_recent`
+- `repositories/user_sessions.py::list_active_for_admin`
+- `repositories/audit.py::list_recent`
+
+### Startup + tests
+- `server.py` startup now invokes `sync_mongo_users_to_pg()` after
+  seed_demo so existing Mongo users are visible to the PG auth stack.
+- `postgres_db.py` loads `.env` defensively at module import so the
+  connection URL is available even when postgres_db is imported before
+  other modules call `load_dotenv`.
+- `tests/conftest.py` now mirrors MFA enrollment + workforce session
+  cleanup + audit-chain wipe into PostgreSQL (session-autouse). Also
+  loads `.env` early so `test_pg_auth_foundation` no longer skips.
+- `tests/test_pg_auth_foundation.py::TestAuditChain` isolates its
+  primitive fake-hash inserts via a wipe fixture so the UAT
+  `verify_audit_chain` test isn't contaminated.
+
+### Verification
+- Full auth regression: **114 pass**, 2 pre-existing SendGrid-live
+  failures unrelated to this migration.
+- Live curl smoke: MFA login → PG `auth_user_sessions` row created and
+  `mfa_satisfied_at` set → refresh rotates (generation++, previous row
+  replaced) → `/auth/sessions` returns the active set → `logout-all`
+  revokes every row → password reset via dev token consumes the token,
+  revokes all sessions, allows re-login.
+- Grep hygiene (all zero):
+  - `grep -rn 'from motor\|import motor\|AsyncIOMotor' backend/deps.py backend/audit.py backend/sessions.py backend/routers/auth_impl/ backend/repositories/`
+  - `grep -rn 'db\.users\|db\.user_sessions\|db\.refresh_tokens\|db\.login_history\|db\.login_continuations\|db\.password_reset\|db\.audit_logs\|db\.security_events' backend/audit.py backend/sessions.py backend/routers/auth_impl/`
+- Alembic head still `af896f736c94` (Session 2a's oauth-drop revision).
+
+### Non-goals confirmed
+- No admin bootstrap changes (Session 2c).
+- No new alembic migrations.
+- Mongo `clients`, `appointments`, `notes`, `files`, `visit_notes`, etc.
+  remain on MongoDB — non-auth business collections are out of scope.
+- Password hashing (bcrypt) unchanged — Argon2id migration is Session 2d.
+
+_Last updated: 2026-07-30 (Session 2b · PostgreSQL Auth Runtime Cutover)_
