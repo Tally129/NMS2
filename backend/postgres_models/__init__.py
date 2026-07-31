@@ -26,4 +26,8 @@ from .clinical_and_messaging import (  # noqa: F401
     MessageThread, Message, FormTemplate, FormSubmission, SoapTemplate,
     PushSubscription,
 )
+from .crm_and_ops import (  # noqa: F401
+    Campaign, FrontDeskVisit, InternalTask, IntegrationLog,
+    ProtocolEnrollment, ProtocolTemplate, FileMeta,
+)
 

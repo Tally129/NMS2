@@ -570,3 +570,63 @@ collections transparently route to PostgreSQL. Routers are untouched.
 
 _Last updated: 2026-08-01 (Phase 3.4b · Adapter cutover complete)_
 
+
+
+---
+
+## Phase 3.5 — CRM & Operations Cutover (2026-08-01)
+
+**Strategy**: Extend the `motor_compat_pg` adapter with 7 new tables. No
+router edits required — the adapter's generic JSONB payload approach
+handles every field the routers write.
+
+**Retired collections (dropped, non-regenerative):**
+- campaigns
+- front_desk_visits
+- internal_tasks
+- integration_log
+- protocol_enrollments
+- protocol_templates
+- files (metadata only; GridFS `emr_files.chunks` / `emr_files.files` remain
+  in Mongo — capital-project S3 cutover deferred)
+
+**Schema additions (Alembic `b2c3d4e5f6a7`):**
+- New table `emr_campaigns` (id + created_at + payload).
+- New table `emr_front_desk_visits` (adds typed `client_id` FK + index).
+- New table `emr_internal_tasks` (adds typed `status` index + `due_date`
+  for dashboard-summary range filters).
+- New table `emr_integration_log` (id + created_at + payload).
+- New table `emr_protocol_enrollments` (adds typed `client_id`,
+  `practitioner_id`, `status` indices).
+- New table `emr_protocol_templates` (id + created_at + payload).
+- New table `emr_file_meta` (adds typed `client_id`, `deleted_at` indices;
+  metadata-only — GridFS blob storage untouched).
+- Models exported via `postgres_models/crm_and_ops.py`.
+
+**Adapter changes:**
+- `motor_compat_pg._MODEL_BY_NAME` extended with the 7 new mappings.
+- `MotorCompatDb._RETIRED` now covers 15 collections total (8 from
+  Phase 3.4b + 7 from Phase 3.5). No Mongo fallback for any of them.
+
+**Router edits:** none. Every existing `db.campaigns.*`,
+`db.front_desk_visits.*`, `db.internal_tasks.*`, `db.integration_log.*`,
+`db.protocol_enrollments.*`, `db.protocol_templates.*`, `db.files.*` call
+transparently routes to PostgreSQL.
+
+**Verification:**
+- Alembic head: `b2c3d4e5f6a7` (up from `a1b2c3d4e5f6`).
+- 26/26 Phase 3.1b–3.5 smoke tests pass (test_session3_1_clients ×6,
+  test_session3_2_scheduling ×6, test_session3_3_clinical ×2,
+  test_session3_4_messaging ×6, test_session3_5_crm_ops ×6).
+- New test file `tests/test_session3_5_crm_ops.py` covers campaign
+  create+list, task create+list+dashboard-summary+update+delete, protocol
+  template + enrollment lifecycle, front-desk check-in + today + update,
+  file upload metadata + list + soft-delete, and integration_log
+  insertion via the adapter.
+- One legacy test drift fixed: `test_session3_4_messaging.py` now writes
+  its fake file record via the adapter (was previously pymongo-direct;
+  since `files` is now PG-only, the router lookup was 404-ing).
+- Post-restart regen check: **0 of 15** retired collections regenerate.
+
+_Last updated: 2026-08-01 (Phase 3.5 · CRM & Operations Adapter cutover)_
+

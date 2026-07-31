@@ -336,12 +336,14 @@ def test_lab_values_crud_and_review_land_in_pg(admin_token, practitioner_token):
     assert isinstance(p.get("review_history"), list) and len(p["review_history"]) >= 1
 
     # Attach a file via $addToSet
-    # Create a fake file record directly for the test (bypass /files/upload).
+    # Create a fake file metadata record via the adapter (routes to PG).
     file_id = uuid.uuid4().hex
-    _mongo().files.insert_one({
+    import asyncio
+    from deps import db as _db
+    asyncio.run(_db.files.insert_one({
         "id": file_id, "client_id": cid, "deleted_at": None,
         "content_type": "application/pdf", "filename": "smoke.pdf",
-    })
+    }))
     ra = requests.post(f"{BASE_URL}/labs/{lab_id}/attachments",
                         headers=_b(practitioner_token),
                         json={"file_id": file_id})
@@ -374,8 +376,8 @@ def test_lab_values_crud_and_review_land_in_pg(admin_token, practitioner_token):
     # Mongo silent
     assert _mongo().lab_values.find_one({"id": lab_id}) is None
 
-    # cleanup fake file record
-    _mongo().files.delete_one({"id": file_id})
+    # cleanup fake file metadata
+    asyncio.run(_db.files.delete_one({"id": file_id}))
 
 
 # ============================================ treatment_plans

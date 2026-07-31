@@ -33,9 +33,14 @@ from postgres_models.clinical_and_messaging import (
     FormSubmission, FormTemplate, LabValue, Message, MessageThread,
     SoapTemplate, Treatment, TreatmentPlan,
 )
+from postgres_models.crm_and_ops import (
+    Campaign, FileMeta, FrontDeskVisit, IntegrationLog, InternalTask,
+    ProtocolEnrollment, ProtocolTemplate,
+)
 
 
 _MODEL_BY_NAME = {
+    # Phase 3.4b — clinical/messaging
     "message_threads": MessageThread,
     "messages": Message,
     "form_templates": FormTemplate,
@@ -44,6 +49,14 @@ _MODEL_BY_NAME = {
     "lab_values": LabValue,
     "treatment_plans": TreatmentPlan,
     "treatments": Treatment,
+    # Phase 3.5 — CRM & operations
+    "campaigns": Campaign,
+    "front_desk_visits": FrontDeskVisit,
+    "internal_tasks": InternalTask,
+    "integration_log": IntegrationLog,
+    "protocol_enrollments": ProtocolEnrollment,
+    "protocol_templates": ProtocolTemplate,
+    "files": FileMeta,
 }
 
 
