@@ -380,6 +380,68 @@ complete:
 - **Argon2id migration** — Session 2d.
 - **Risk-based login detection** — Session 2d.
 - **Recovery-code regeneration UX** — Session 2d.
+
+---
+
+## Phase 3.1a Migration Status (2026-07-30) — data layer landed
+
+| Domain          | Collection                        | Mongo rows | PG table                              | PG rows | Backfilled | Router cutover |
+| --------------- | --------------------------------- | ---------- | ------------------------------------- | ------- | ---------- | -------------- |
+| Identity        | `users`                           | 1219       | `auth_users`                          | 1375    | ✅ (Session 2b + `pg_bootstrap`) | ✅ Auth stack (Sessions 2a/2b/2c) — non-auth reads pending (Phase 3.1b) |
+| Patients        | `clients`                         | 1584       | `emr_clients` (extended)              | 1584    | ✅          | ⛔ Phase 3.1b   |
+| Patients        | `intake_forms`                    | 2          | `emr_intake_forms`                    | 2       | ✅          | ⛔ Phase 3.1b   |
+| Patients        | `intakes`                         | 0          | (merged into `emr_intake_forms`)      | 0       | n/a        | ⛔ Phase 3.1b   |
+| Patients        | `supplement_sheets`               | 76         | `emr_supplement_sheets`               | 76      | ✅          | ⛔ Phase 3.1b   |
+| Patients        | `client_supplement_assignments`   | 97         | `emr_client_supplement_assignments`   | 97      | ✅          | ⛔ Phase 3.1b   |
+| Patients        | `password_reset_tokens`           | 0          | `emr_legacy_password_reset_tokens`    | 0       | n/a (empty) | ⛔ Phase 3.1b (portal_ops) |
+
+**Alembic**: forward-only revision `e4a80693e8d6`. Renamed `auth_clients` →
+`emr_clients` and added 20+ columns + 3 new side tables + the legacy
+staff-side reset-token table. No prior migration modified.
+
+**Backfill script**: `backend/scripts/phase3_1_backfill.py` (idempotent,
+resumable, dry-run capable, deduplicates NMS-CUSTOM MRN, NULL-ifies
+orphan `user_id` / `assigned_practitioner_id` FKs so the demo test data
+imports cleanly).
+
+**Row-count reconciliation** — all 4 non-empty collections
+match Mongo exactly. 84 client rows had orphan user_ids nulled during
+import (dev-only test artifacts). 2 rows had their MRN nulled to satisfy
+the unique constraint (both were `NMS-CUSTOM` demo dupes).
+
+### Phase 3.1b — Router cutover (next session)
+
+The data layer is landed; the app still READS from Mongo for the
+patient/client domain. Phase 3.1b must:
+
+1. Add repositories: `repositories/clients.py`, `repositories/intake.py`,
+   `repositories/supplements.py`, `repositories/legacy_password_reset.py`.
+2. Cutover files (in this order — leaf routers first, then `server.py`
+   seed, then `deps.py`):
+   - `deps.py::_resolve_self_client` → PG
+   - `routers/clients.py` (largest surface — client CRUD + intake + files)
+   - `routers/portal_ops.py` (staff CRUD + password_reset_tokens)
+   - `routers/campaign_extras.py` (client segmentation)
+   - `routers/campaigns.py` (client audience)
+   - `routers/telehealth.py` (client lookup during video calls)
+   - `routers/appointments.py` (client lookup during scheduling)
+   - `routers/ops.py` (front desk client search)
+   - `routers/lab_review.py` (client attribution)
+   - `routers/tasks.py` (client link on tasks)
+   - `routers/health_track.py` (labs/messages client attribution)
+   - `routers/delegations.py` (user directory)
+   - `routers/permissions.py` (user directory)
+   - `routers/admin.py::dashboard_stats` (client + note counts)
+   - `routers/auth_impl/registration.py::register` (client row insert)
+   - `routers/auth_impl/profile.py::update_me` (client mirror)
+   - `server.py::seed_demo` (client seed)
+3. Test file `test_session3_1_clients.py` + full auth regression.
+4. Drop `db.clients`, `db.intake_forms`, `db.intakes`, `db.supplement_sheets`,
+   `db.client_supplement_assignments`, `db.password_reset_tokens`, `db.users`.
+5. Verify collections don't come back after startup + traffic.
+
+_Last updated: 2026-07-30 (Phase 3.1a · Data layer landed)_
+
 - **Passkeys / WebAuthn** — post-2d, standalone.
 - **GridFS → S3/MinIO** — capital project after Session 3.7.
 - **Retiring `mongo_db.py` entirely** — impossible until GridFS is

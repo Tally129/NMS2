@@ -7,4 +7,10 @@ from .login import LoginHistory, LoginContinuation  # noqa: F401
 from .password_reset import PasswordResetAttempt, PasswordResetToken  # noqa: F401
 from .audit import AuditLog, SecurityEvent  # noqa: F401
 from .recovery_code import RecoveryCode  # noqa: F401
+from .patient_profile import (  # noqa: F401
+    IntakeForm,
+    SupplementSheet,
+    ClientSupplementAssignment,
+    LegacyPasswordResetToken,
+)
 
