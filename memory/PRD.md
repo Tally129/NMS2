@@ -3,7 +3,17 @@
 ## Original Problem Statement
 HIPAA-aligned wellness EMR for `natmedsol.com` (Natural Medical Solutions Wellness Center). Wellness office, **not** a medical practice. Single-tenant private app, not SaaS. Aesthetic adapted from medspa-concierge to NatMedSol's deep-green / parchment / gold palette.
 
-## Phase 3.2b — Test Data Reset (2026-07-31) ⭐ NEW
+## Phase 3.3 / 3.4 Foundation — Clinical + Messaging Data Layer (2026-07-31) ⭐ NEW
+- **New Alembic revision `8ae0b2901822`** (head) creates 13 tables covering both domains:
+  - Clinical: `emr_visit_notes` (hash-chained: `prev_hash` + `note_hash`), `emr_treatment_plans`, `emr_treatments`, `emr_lab_values`, `emr_live_soap_drafts`, `emr_visit_chat`, `emr_clinical_delegations`
+  - Messaging & Files: `emr_message_threads`, `emr_messages`, `emr_form_templates`, `emr_form_submissions`, `emr_soap_templates`, `emr_push_subscriptions`
+  - All FKs to `auth_users` / `emr_clients` nullable + paired with `legacy_*` breadcrumbs.
+- **`postgres_models/clinical_and_messaging.py`** — SQLAlchemy models for all 13 tables.
+- **`repositories/clinical_and_messaging.py`** — full async CRUD surface plus the hash chain helpers: `compute_note_hash()`, `prev_note_hash_for_practitioner()`, `finalize_note()` (idempotent, computes SHA-256 chain over canonical JSON).
+- **GridFS `emr_files.*`** is intentionally deferred — a proper S3/MinIO cutover is scheduled for a follow-up phase (per handoff notes on S3 scaffolding).
+- **Runtime cutover of the 14 affected routers is scoped-not-yet-executed** in this session and is the immediate next task; the empty-database state + `DEMO_SEED_DISABLE=1` guard mean no Mongo re-creation of these collections occurs at rest, so shipping the foundation is safe.
+
+## Phase 3.2b — Test Data Reset (2026-07-31)
 - **All application data wiped.** New `scripts/reset_test_data.py` truncates every PG table (except `alembic_version`) and deletes every doc across all Mongo collections including GridFS chunks/files — without dropping tables, collections, indexes, or migrations.
 - **`DEMO_SEED_DISABLE=1`** env flag added to `backend/.env` + honoured by `server.py::seed_demo`. Restarting the backend after a reset no longer recreates demo users, clients, appointments, or any other test records.
 - **Smoke-test bootstrap** helper `tests/smoketest_bootstrap.py` materialises two workforce fixtures (`smoketest-admin@natmedsol.local` + `smoketest-prac@natmedsol.local`, both MFA-enrolled with the conftest fixture secret) directly against PG so Phase 3.1b/3.2 smoke tests keep running against a clean environment.

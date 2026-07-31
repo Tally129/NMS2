@@ -20,4 +20,10 @@ from .scheduling import (  # noqa: F401
     Reminder,
     ReminderSettings,
 )
+from .clinical_and_messaging import (  # noqa: F401
+    VisitNote, TreatmentPlan, Treatment, LabValue, LiveSoapDraft, VisitChat,
+    ClinicalDelegation,
+    MessageThread, Message, FormTemplate, FormSubmission, SoapTemplate,
+    PushSubscription,
+)
 
