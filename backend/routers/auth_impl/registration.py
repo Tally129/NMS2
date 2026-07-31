@@ -40,15 +40,16 @@ async def register(payload: UserCreate, request: Request):
                 created_at=now,
             )
 
-    # Client business row still lives in MongoDB. Keep the linkage by
-    # `user_id` — this row backs `/api/clients/me`, the intake wizard, and
-    # the entire patient portal until the clients collection migrates.
-    await db.clients.insert_one({
-        "id": new_id(), "user_id": user_id,
-        "full_name": payload.full_name, "email": email,
-        "phone": payload.phone, "intake_completed": False,
-        "created_at": now,
-    })
+    # Client business row now lives in PostgreSQL (Phase 3.1b). Old Mongo
+    # `clients` collection is scheduled for drop once every non-auth router
+    # migrates.
+    from repositories import clients as clients_repo
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await clients_repo.create(
+                pg, client_id=new_id(), user_id=user_id,
+                full_name=payload.full_name, email=email, phone=payload.phone,
+            )
 
     await log_audit(db, user_id, email, "auth.register",
                     resource_type="user", resource_id=user_id,

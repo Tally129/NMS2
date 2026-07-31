@@ -16,7 +16,14 @@ async def update_me(payload: ProfileUpdate, request: Request, user=Depends(get_a
                 await users_repo.update_fields(pg, user["id"], updates)
         client_fields = {k: v for k, v in updates.items() if k in ("full_name", "phone")}
         if client_fields:
-            await db.clients.update_many({"user_id": user["id"]}, {"$set": client_fields})
+            # Mirror into PostgreSQL client profile (Phase 3.1b).
+            from repositories import clients as clients_repo
+            async with AsyncSessionLocal() as pg:
+                target = await clients_repo.get_by_user_id(pg, user["id"])
+            if target:
+                async with AsyncSessionLocal() as pg:
+                    async with pg.begin():
+                        await clients_repo.update_fields(pg, target["id"], client_fields)
         await log_audit(db, user["id"], user["email"], "account.update",
                         ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     async with AsyncSessionLocal() as pg:

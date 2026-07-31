@@ -83,9 +83,13 @@ def to_user_out(user) -> dict:
 
 
 async def _resolve_self_client(user) -> Optional[dict]:
-    """Client business data still lives in MongoDB — Session 2b did not
-    migrate the clients collection."""
-    return await db.clients.find_one({"user_id": user["id"]})
+    """Client business data reads from PostgreSQL (Phase 3.1a landed the
+    data + Phase 3.1b partial adds the repository). Non-auth routers that
+    still call `db.clients.find_one(...)` will migrate individually in the
+    remainder of Phase 3.1b."""
+    from repositories import clients as clients_repo  # local import to avoid boot cycle
+    async with AsyncSessionLocal() as pg:
+        return await clients_repo.get_by_user_id(pg, user["id"])
 
 
 # --------------------------------------------------------------------------- #
