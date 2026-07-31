@@ -713,3 +713,94 @@ adapter.
 
 _Last updated: 2026-08-01 (Phase 3.6 · Structured data fully on PG)_
 
+
+
+---
+
+## Phase 3.7 — GridFS retirement + full Mongo removal (2026-08-01)
+
+**Strategy**: Introduce an async `Storage` abstraction with two backends
+(`FilesystemStorage`, `S3Storage`); migrate blobs from GridFS via a
+resumable backfill script; cut all runtime blob I/O in `routers/clients`
+and `routers/telehealth` to `storage.get_storage()`; delete `mongo_db.py`;
+strip the Motor fallback from `MotorCompatDb` so unknown-collection
+access raises loudly instead of hitting Mongo; verify boot with
+`MONGO_URL` unset/unreachable.
+
+**Structured-data stragglers migrated (5 tables):**
+`memberships`, `campaign_templates`, `campaign_unsubscribes`,
+`forms` (`emr_forms_legacy`), `symptom_logs`. Same JSONB-payload pattern
+as Phases 3.5/3.6. Cumulative retired-collection registration in
+`motor_compat_pg._MODEL_BY_NAME` is now **48** entries.
+
+**GridFS retirement:**
+- Dropped `emr_files.files` + `emr_files.chunks` (6 blobs × 21 bytes,
+  snapshot at `/tmp/gridfs_pre_drop_snapshot.json`).
+- 6/6 blobs backfilled via `scripts/backfill_gridfs_to_storage.py` with
+  checksum reconciliation clean.
+- `mongo_db.py` deleted. `deps.py` no longer imports Motor.
+- `MotorCompatDb` no longer holds a Motor client — unknown-collection
+  access raises `AttributeError` instead of silent Mongo fallback.
+
+**Schema additions (Alembic `d4e5f6a7b8c9`):**
+- 6 new columns on `emr_file_meta`: `storage_backend`, `storage_key`
+  (indexed), `bucket`, `version_id`, `legacy_gridfs_id` (indexed),
+  `retention_hold_until`.
+- 5 new tables for the remaining collections.
+
+**Files added:**
+- `backend/storage/__init__.py` — `get_storage()` factory + re-exports.
+- `backend/storage/base.py` — `Storage` protocol, `ObjectMetadata`,
+  `NotFound`, `StorageError`.
+- `backend/storage/filesystem.py` — sandbox / dev / test backend.
+- `backend/storage/s3.py` — S3 backend with SSE-KMS, streaming multipart,
+  presigned URLs; imports boto3 lazily.
+- `backend/scripts/backfill_gridfs_to_storage.py` — idempotent, resumable
+  backfill with `--dry-run`, `--resume`, `--limit`.
+- `backend/tests/test_session3_7_storage.py` — 7 smoke tests.
+- `backend/alembic/versions/2026_08_01_0400-d4e5f6a7b8c9_*.py`.
+- `memory/PHASE_3_7_DEPLOYMENT.md` — EC2 deployment + rollback runbook.
+
+**Files changed:**
+- `backend/routers/clients.py` — upload/download go through the storage
+  adapter; unmigrated legacy rows return 410.
+- `backend/routers/telehealth.py` — visit recording upload/download go
+  through the storage adapter; legacy path returns 410.
+- `backend/routers/campaigns.py` — remove `from pymongo import
+  ReturnDocument` (replaced with a local truthy constant).
+- `backend/server.py` — remove unused `bson.ObjectId` import + `fs_bucket`
+  from `deps` imports; `close_mongo` is now a no-op shim.
+- `backend/routers/ops.py` — remove unused `bson.ObjectId` import.
+- `backend/motor_compat_pg.py` — remove Motor fallback; unknown
+  collections raise.
+- `backend/deps.py` — remove `mongo_db` import; provide no-op
+  `close_mongo` shim; `db = MotorCompatDb()` (no arg).
+- `backend/postgres_models/crm_and_ops.py` — `FileMeta` gains six
+  storage-backend columns.
+- `backend/postgres_models/structured_rest.py` — 5 new models.
+- `backend/postgres_models/__init__.py` — export new models.
+- `backend/.env` — add `STORAGE_BACKEND`, `STORAGE_FS_ROOT`,
+  `S3_BUCKET_NAME`, `S3_KMS_KEY_ARN`, `S3_PRESIGN_EXPIRES_SECONDS`.
+- `backend/mongo_db.py` — **deleted**.
+
+**Packages installed:** `boto3==1.34.162`, `botocore==1.34.162`,
+`s3transfer==0.10.4`. `motor` + `pymongo` are still installed but no
+longer imported at runtime (only by the backfill script and tests).
+
+**Env changes:**
+- Added: `STORAGE_BACKEND`, `STORAGE_FS_ROOT`, `S3_BUCKET_NAME`,
+  `S3_KMS_KEY_ARN`, `S3_PRESIGN_EXPIRES_SECONDS`, `AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` (dev only; prod uses
+  instance profile).
+- No longer required at runtime: `MONGO_URL`, `DB_NAME`.
+
+**Verification:**
+- Alembic head: `d4e5f6a7b8c9`.
+- 42/42 smoke tests pass (6+6+2+6+6+9+7).
+- Backend boots + serves `/api/health` with `MONGO_URL` unset **and**
+  with `MONGO_URL` pointed at an unreachable host.
+- No runtime Motor / PyMongo / GridFS / `fs_bucket` imports remain.
+- Mongo collections after restart: **0**. Zero regeneration.
+
+_Last updated: 2026-08-01 (Phase 3.7 · MongoDB fully retired)_
+

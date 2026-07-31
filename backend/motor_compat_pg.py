@@ -47,6 +47,7 @@ from postgres_models.structured_rest import (
     BaaRecord, LegalAcceptance, LegalPolicy,
     BreakglassSession,
     PostingDeadLetter, VipListEntry, WsTicket, UserSessionCompat,
+    Membership, CampaignTemplate, CampaignUnsubscribe, LegacyForm, SymptomLog,
 )
 
 
@@ -97,6 +98,12 @@ _MODEL_BY_NAME = {
     "vip_list": VipListEntry,
     "ws_tickets": WsTicket,
     "user_sessions": UserSessionCompat,
+    # Phase 3.7 — final structured stragglers
+    "memberships": Membership,
+    "campaign_templates": CampaignTemplate,
+    "campaign_unsubscribes": CampaignUnsubscribe,
+    "forms": LegacyForm,
+    "symptom_logs": SymptomLog,
 }
 
 
@@ -601,33 +608,39 @@ class MotorCompatCollection:
 
 # ---------- database facade ------------------------------------------- #
 class MotorCompatDb:
-    """Wraps a Motor database, transparently returning MotorCompatCollection
-    for retired collections and delegating everything else to Motor.
-
-    Retired collection names are RE-ROUTED to PostgreSQL with no possibility
-    of Mongo fallback for those 8 collections. Every other collection is
-    passed through unchanged to Motor."""
+    """Wraps a set of PostgreSQL-backed collections behind a Motor-shaped
+    facade so legacy routers can keep calling ``db.<collection>``. Every
+    collection referenced at runtime MUST be registered in
+    `_MODEL_BY_NAME`; unknown names raise KeyError instead of silently
+    falling back to Mongo. This is what allows the app to boot with
+    MongoDB unavailable (Phase 3.7).
+    """
 
     _RETIRED = frozenset(_MODEL_BY_NAME.keys())
 
-    def __init__(self, motor_db):
-        self._motor = motor_db
+    def __init__(self, _motor_unused=None):
+        # `_motor_unused` argument preserved for call-site compatibility
+        # with earlier phases; it is intentionally ignored. There is no
+        # Motor fallback — the app runs entirely on PostgreSQL.
         self._overrides = {n: MotorCompatCollection(n) for n in self._RETIRED}
 
-    # Motor exposes collection access via both attribute and index. Cover
-    # both so router code keeps working.
     def __getattr__(self, name: str):
-        # __getattr__ is only called when the attribute isn't found normally
         overrides = self.__dict__.get("_overrides") or {}
         if name in overrides:
             return overrides[name]
-        return getattr(self.__dict__["_motor"], name)
+        raise AttributeError(
+            f"MotorCompatDb has no collection {name!r}; every runtime "
+            f"collection must be registered in motor_compat_pg._MODEL_BY_NAME. "
+            f"MongoDB has been retired."
+        )
 
     def __getitem__(self, name: str):
         if name in self._overrides:
             return self._overrides[name]
-        return self._motor[name]
+        raise KeyError(
+            f"Unknown collection {name!r}. Register in "
+            f"motor_compat_pg._MODEL_BY_NAME."
+        )
 
-    # For repr and debugging.
     def __repr__(self) -> str:  # pragma: no cover
-        return f"<MotorCompatDb wrapping {self._motor!r} retired={sorted(self._RETIRED)}>"
+        return f"<MotorCompatDb (PG-only) collections={len(self._RETIRED)}>"

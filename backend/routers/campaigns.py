@@ -22,7 +22,11 @@ from typing import List, Optional
 
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from pymongo import ReturnDocument
+# Phase 3.7: no pymongo — the adapter interprets any truthy
+# return_document as ReturnDocument.AFTER for round-trip compatibility.
+class ReturnDocument:  # noqa: N801 (mirror pymongo's public constant name)
+    AFTER = True
+    BEFORE = False
 
 from audit import get_client_ip, log_audit
 from deps import _strip_id, api, db, require_roles

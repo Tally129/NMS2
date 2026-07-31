@@ -6,10 +6,10 @@ Extracted from server.py during Phase 16 refactor.
 from __future__ import annotations
 
 import io
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from bson import ObjectId
 from fastapi import Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
@@ -17,9 +17,10 @@ from audit import get_client_ip, log_audit
 from delegations import has_active_delegation
 from notifiers import push_to_user
 from deps import (
-    _resolve_self_client, _strip_id, api, db, fs_bucket,
+    _resolve_self_client, _strip_id, api, db,
     get_current_user, require_roles,
 )
+from storage import NotFound as StorageNotFound, get_storage
 from models import (
     AmendIn, ClientIn, ClientOut, FileMetaOut, IntakeIn, IntakeOut,
     NoteIn, NoteOut, new_id,
@@ -606,11 +607,23 @@ async def upload_file(
 
     checksum = _hashlib.sha256(content).hexdigest()
     safe_name = _safe_filename(file.filename)
-    gridfs_id = await fs_bucket.upload_from_stream(safe_name, io.BytesIO(content),
-                                                   metadata={"mime": mime, "sha256": checksum})
+
+    # Opaque object key — never derived from PHI or user-visible names.
+    storage = get_storage()
+    file_id = new_id()
+    storage_key = f"clients/{client_id or 'nocli'}/{file_id[:2]}/{file_id}"
+    obj_meta = await storage.put_bytes(
+        storage_key, content,
+        content_type=mime or "application/octet-stream",
+        sha256=checksum,
+        metadata={"category": category},
+    )
     meta = {
-        "id": new_id(),
-        "gridfs_id": str(gridfs_id),
+        "id": file_id,
+        "storage_backend": obj_meta.backend,
+        "storage_key": storage_key,
+        "bucket": obj_meta.bucket,
+        "version_id": obj_meta.version_id,
         "filename": safe_name,
         "mime": mime or "application/octet-stream",
         "size": len(content),
@@ -702,11 +715,18 @@ async def download_file(file_id: str, request: Request, user=Depends(get_current
         })
     if scan_status != "clean":
         raise HTTPException(status_code=403, detail="File not available")
+    # Fetch bytes from the storage adapter. Legacy GridFS-only rows (no
+    # storage_key) are treated as missing — they must be backfilled first.
+    storage_key = meta.get("storage_key")
+    if not storage_key:
+        raise HTTPException(status_code=410, detail={
+            "code": "storage_not_migrated",
+            "message": "This file lives in legacy GridFS. Run the S3 backfill script.",
+        })
     try:
-        stream = await fs_bucket.open_download_stream(ObjectId(meta["gridfs_id"]))
-    except Exception:
+        data = await get_storage().get_bytes(storage_key)
+    except StorageNotFound:
         raise HTTPException(status_code=404, detail="File not found in storage")
-    data = await stream.read()
     await log_audit(db, user["id"], user["email"], "file.download",
                     resource_type="file", resource_id=file_id,
                     metadata={"client_id": meta.get("client_id"), "sha256": meta.get("sha256"),

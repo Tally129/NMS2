@@ -1,11 +1,12 @@
 """
 Shared FastAPI singletons + auth dependencies.
 
-Session 2b (PostgreSQL runtime cutover): user + session persistence for
-authentication now lives in PostgreSQL. The auth surface of this module
-does NOT import Motor. The MongoDB `db` handle used by non-auth business
-routers has moved to `mongo_db.py`; we re-export it here so existing
-`from deps import db` callers keep working during the transition.
+Phase 3.7 (S3 cutover + MongoDB removal): the app runs entirely on
+PostgreSQL. The Motor client is gone. `db` is a `MotorCompatDb` bound
+purely to PostgreSQL — every collection referenced at runtime resolves
+to a PG-backed model. Requesting an unknown collection raises
+`AttributeError` (no silent Mongo fallback). Blob storage flows through
+`storage.get_storage()` (filesystem in dev, S3 in prod) — not GridFS.
 """
 from __future__ import annotations
 
@@ -23,14 +24,16 @@ from audit import get_client_ip, log_audit  # noqa: F401 (re-exported for router
 from auth_utils import (
     assert_valid_secret, decode_token, get_jwt_audience, get_jwt_issuer,
 )
-from mongo_db import close_mongo, db as _raw_db, fs_bucket  # noqa: F401 (re-exported)
 from motor_compat_pg import MotorCompatDb
 
-# Phase 3.4b: wrap the raw Motor db so the 8 retired collections
-# (messages, message_threads, form_templates, form_submissions,
-# soap_templates, lab_values, treatment_plans, treatments) transparently
-# route to PostgreSQL. All other collections still hit Mongo directly.
-db = MotorCompatDb(_raw_db)
+# The FastAPI-wide db handle. No Motor. No Mongo. Pure PostgreSQL router
+# behind a Motor-shaped facade so pre-existing router code keeps working.
+db = MotorCompatDb()
+
+
+async def close_mongo():  # noqa: D401 — kept for callsite compatibility
+    """No-op shim; MongoDB was fully retired in Phase 3.7."""
+    return None
 from postgres_db import AsyncSessionLocal
 from repositories import user_sessions as sessions_repo
 from repositories import users as users_repo

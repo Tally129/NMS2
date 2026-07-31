@@ -14,7 +14,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
-from bson import ObjectId
 from fastapi import (
     Depends, File, HTTPException, Query, Request, UploadFile,
     WebSocket, WebSocketDisconnect,
@@ -23,9 +22,10 @@ from fastapi.responses import StreamingResponse
 
 from audit import get_client_ip, log_audit
 from deps import (
-    _resolve_self_client, _strip_id, api, db, fs_bucket,
+    _resolve_self_client, _strip_id, api, db,
     get_current_user, logger, require_roles,
 )
+from storage import NotFound as StorageNotFound, get_storage
 from models import TelehealthConsentIn, new_id
 from auth_utils import decode_token
 from pg_shims import find_client, find_intake_by_client, find_user_by_id
@@ -559,16 +559,20 @@ async def upload_visit_recording(
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     contents = await file.read()
-    file_id = await fs_bucket.upload_from_stream(
-        f"visit-{appt_id}-{int(datetime.now(timezone.utc).timestamp())}.webm",
-        contents,
-        metadata={"appointment_id": appt_id, "uploader_id": user["id"], "kind": "visit_recording"},
+    fid = new_id()
+    storage_key = f"visits/{appt_id}/{fid}.webm"
+    obj_meta = await get_storage().put_bytes(
+        storage_key, contents,
+        content_type="video/webm",
+        metadata={"appointment_id": appt_id, "uploader_id": user["id"],
+                   "kind": "visit_recording"},
     )
-    fid = str(file_id)
     async with AsyncSessionLocal() as pg:
         async with pg.begin():
             await sched_repo.push_appointment_recording(pg, appt_id, {
-                "file_id": fid, "size": len(contents), "uploaded_by": user["id"],
+                "file_id": fid, "storage_key": storage_key,
+                "storage_backend": obj_meta.backend,
+                "size": len(contents), "uploaded_by": user["id"],
                 "ts": datetime.now(timezone.utc).isoformat(),
             })
     await log_audit(db, user["id"], user["email"], "telehealth.recording_upload",
@@ -611,11 +615,7 @@ async def download_visit_recording(appt_id: str, file_id: str, request: Request,
         sc = await _resolve_self_client(user)
         if not sc or a.get("client_id") != sc["id"]:
             raise HTTPException(status_code=403, detail="Forbidden")
-    # Confirm file is bound to this appointment via metadata
-    try:
-        oid = ObjectId(file_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid file id")
+    # Confirm file is bound to this appointment via recording metadata
     found = None
     for r in (a.get("recordings") or []):
         if r.get("file_id") == file_id:
@@ -623,23 +623,21 @@ async def download_visit_recording(appt_id: str, file_id: str, request: Request,
             break
     if not found:
         raise HTTPException(status_code=404, detail="Recording not found")
+    storage_key = found.get("storage_key")
+    if not storage_key:
+        raise HTTPException(status_code=410, detail={
+            "code": "storage_not_migrated",
+            "message": "This recording lives in legacy GridFS. Run the S3 backfill script.",
+        })
     try:
-        stream = await fs_bucket.open_download_stream(oid)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Recording not found in GridFS")
+        stream_iter = get_storage().stream(storage_key)
+    except StorageNotFound:
+        raise HTTPException(status_code=404, detail="Recording not found in storage")
     await log_audit(db, user["id"], user["email"], "telehealth.recording_download",
                     resource_type="appointment", resource_id=appt_id,
                     metadata={"file_id": file_id},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-
-    async def _iter():
-        while True:
-            chunk = await stream.readchunk()
-            if not chunk:
-                break
-            yield chunk
-
-    return StreamingResponse(_iter(), media_type="video/webm",
+    return StreamingResponse(stream_iter, media_type="video/webm",
                              headers={"Content-Disposition": f'attachment; filename="visit-{appt_id}.webm"'})
 
 

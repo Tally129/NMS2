@@ -2,7 +2,7 @@
 
 Seven tables for the retired collections: campaigns, front_desk_visits,
 internal_tasks, integration_log, protocol_enrollments, protocol_templates,
-files (metadata only — GridFS blobs still live in Mongo).
+files (metadata only — blobs live in S3/filesystem via `storage/`).
 
 Every table follows the same shape: `id` PK, `created_at` typed column
 (for sort/range filters), and a JSONB `payload` for all router-provided
@@ -77,7 +77,7 @@ class ProtocolTemplate(_Ph35Base, Base):
 
 
 class FileMeta(_Ph35Base, Base):
-    """File metadata only — GridFS chunks/files stay in Mongo."""
+    """File metadata only — blobs live in S3 (or filesystem in dev)."""
     __tablename__ = "emr_file_meta"
     client_id: Mapped[Optional[str]] = mapped_column(
         String(64), ForeignKey("emr_clients.id", ondelete="SET NULL"),
@@ -85,4 +85,13 @@ class FileMeta(_Ph35Base, Base):
     )
     deleted_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True,
+    )
+    # Storage-backend addressing (Phase 3.7):
+    storage_backend: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    storage_key: Mapped[Optional[str]] = mapped_column(String(512), nullable=True, index=True)
+    bucket: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    version_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    legacy_gridfs_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    retention_hold_until: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
     )

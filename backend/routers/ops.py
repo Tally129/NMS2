@@ -13,7 +13,6 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from bson import ObjectId
 from fastapi import Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from reportlab.lib.pagesizes import letter

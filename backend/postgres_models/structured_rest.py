@@ -183,3 +183,28 @@ class UserSessionCompat(_Ph36Base, Base):
     adapter."""
     __tablename__ = "emr_user_sessions_legacy"
     user_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+
+
+# ============================================ Phase 3.7 (final stragglers)
+class Membership(_Ph36Base, Base):
+    __tablename__ = "emr_memberships"
+    client_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
+
+
+class CampaignTemplate(_Ph36Base, Base):
+    __tablename__ = "emr_campaign_templates"
+
+
+class CampaignUnsubscribe(_Ph36Base, Base):
+    __tablename__ = "emr_campaign_unsubscribes"
+
+
+class LegacyForm(_Ph36Base, Base):
+    """Very old `forms` collection — only used by ops.py dashboard count."""
+    __tablename__ = "emr_forms_legacy"
+
+
+class SymptomLog(_Ph36Base, Base):
+    __tablename__ = "emr_symptom_logs"
+    client_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)

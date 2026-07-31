@@ -40,5 +40,6 @@ from .structured_rest import (  # noqa: F401
     BaaRecord, LegalAcceptance, LegalPolicy,
     BreakglassSession,
     PostingDeadLetter, VipListEntry, WsTicket, UserSessionCompat,
+    Membership, CampaignTemplate, CampaignUnsubscribe, LegacyForm, SymptomLog,
 )
 

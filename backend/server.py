@@ -7,7 +7,6 @@ FastAPI middleware, the seed/startup jobs, and mounts the shared router.
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Request, Query
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
-from bson import ObjectId
 import os
 import io
 import json
@@ -60,7 +59,7 @@ from audit import log_audit, get_client_ip
 
 # Shared singletons (mongo, api router, auth helpers) live in deps.py
 from deps import (
-    api, db, fs_bucket, bearer, logger,
+    api, db, bearer, logger,
     _strip_id, get_current_user, require_roles, to_user_out, _resolve_self_client,
     close_mongo,
 )
@@ -864,7 +863,7 @@ async def seed_demo():
 @app.on_event("shutdown")
 async def shutdown_db_client():
     _stop_campaign_scheduler()
-    close_mongo()
+    await close_mongo()  # no-op; retained for callsite compatibility
 
 
 # --------------------------------------------------------------------------- #
