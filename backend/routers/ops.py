@@ -33,6 +33,10 @@ from models import (
     PosCheckoutIn, TimeEditIn, TimeEntryOut,
     TransactionOut, TreatmentIn, TreatmentOut, new_id,
 )
+from pg_shims import (
+    count_clients, find_client, find_intake_by_client, find_user_by_id,
+    find_users_by_ids, insert_client, list_users_by_roles,
+)
 
 
 # =================== PHASE 4: TREATMENTS / INVENTORY / POS / TRANSACTIONS / TIME CLOCK / FRONT DESK / IMPORT / ACCOUNT ===================
@@ -146,11 +150,11 @@ async def _hydrate_txn(t):
     if not t:
         return None
     if t.get("client_id"):
-        c = await db.clients.find_one({"id": t["client_id"]})
+        c = await find_client(client_id=t["client_id"])
         if c:
             t["client_name"] = c.get("full_name")
     if t.get("created_by"):
-        u = await db.users.find_one({"id": t["created_by"]})
+        u = await find_user_by_id(t["created_by"])
         if u:
             t["created_by_name"] = u.get("full_name")
     return t
@@ -184,7 +188,7 @@ async def pos_checkout(payload: PosCheckoutIn, request: Request,
                         "_stubbed": True, "ts": datetime.now(timezone.utc),
                     })
                     # Push admins/staff
-                    admins = await db.users.find({"role": {"$in": ["admin", "staff"]}}).to_list(50)
+                    admins = await list_users_by_roles(["admin", "staff"], limit=50)
                     for u in admins:
                         await push_to_user(
                             u["id"],
@@ -323,8 +327,7 @@ async def email_invoice(tid: str, payload: InvoiceEmailIn, request: Request,
         raise HTTPException(status_code=404, detail="Not found")
     client = None
     if t.get("client_id"):
-        client = await db.clients.find_one({"id": t["client_id"]},
-                                            {"full_name": 1, "email": 1})
+        client = await find_client(client_id=t["client_id"])
     target = (payload.to or (client or {}).get("email") or "").strip().lower()
     if not target:
         raise HTTPException(status_code=400, detail={
@@ -387,9 +390,7 @@ async def _render_invoice_pdf(t: dict) -> "io.BytesIO":
     """Server-side rendered invoice PDF. Returns a rewound BytesIO."""
     client = None
     if t.get("client_id"):
-        client = await db.clients.find_one({"id": t["client_id"]},
-                                            {"full_name": 1, "email": 1, "phone": 1,
-                                             "address": 1, "mrn": 1})
+        client = await find_client(client_id=t["client_id"])
     invoice_no = _invoice_number(t)
     created = t.get("created_at") or datetime.now(timezone.utc)
     subtotal = float(t.get("subtotal", 0) or 0)
@@ -628,7 +629,7 @@ async def _hydrate_time(e):
     e = _strip_id(e)
     if not e:
         return None
-    u = await db.users.find_one({"id": e["user_id"]})
+    u = await find_user_by_id(e["user_id"])
     if u:
         e["user_name"] = u.get("full_name")
     e["total_minutes"] = _calc_minutes(e)
@@ -741,15 +742,13 @@ async def _hydrate_fd(v):
     v = _strip_id(v)
     if not v:
         return None
-    c = await db.clients.find_one({"id": v["client_id"]})
+    c = await find_client(client_id=v["client_id"])
     if c:
         v["client_name"] = c.get("full_name")
     # Readiness signals (handoff #2). Computed from existing collections —
     # never persisted onto the front-desk row.
-    intake = await db.intakes.find_one(
-        {"client_id": v["client_id"]}, sort=[("created_at", -1)],
-    )
-    v["intake_complete"] = bool(intake and (intake.get("answers") or {}))
+    intake = await find_intake_by_client(v["client_id"])
+    v["intake_complete"] = bool(intake and (intake.get("demographics") or intake.get("completed")))
     v["forms_pending"] = await db.forms.count_documents({
         "client_id": v["client_id"],
         "status": {"$in": ["sent", "draft"]},
@@ -779,7 +778,7 @@ async def front_desk_today(user=Depends(require_roles("admin", "staff", "practit
 @api.post("/front-desk/check-in", response_model=FrontDeskOut)
 async def front_desk_checkin(payload: FrontDeskCheckIn, request: Request,
                              user=Depends(require_roles("admin", "staff", "practitioner"))):
-    c = await db.clients.find_one({"id": payload.client_id})
+    c = await find_client(client_id=payload.client_id)
     if not c:
         raise HTTPException(status_code=404, detail="Client not found")
     doc = {
@@ -853,7 +852,7 @@ async def import_clients(
             errors.append({"row": row, "reason": "missing name/email"})
             continue
         # dedupe by email if present
-        if email and await db.clients.find_one({"email": email}):
+        if email and await find_client(email=email):
             skipped += 1
             continue
         doc = {
@@ -869,7 +868,12 @@ async def import_clients(
             "intake_completed": False,
             "created_at": datetime.now(timezone.utc),
         }
-        await db.clients.insert_one(doc)
+        # `address` and `emergency_contact` are JSONB in PG; wrap free-text strings.
+        if isinstance(doc.get("address"), str):
+            doc["address"] = {"raw": doc["address"]}
+        if isinstance(doc.get("emergency_contact"), str):
+            doc["emergency_contact"] = {"raw": doc["emergency_contact"]}
+        await insert_client(doc)
         imported += 1
     await db.imported_batches.insert_one({
         "id": new_id(), "filename": file.filename,
@@ -941,7 +945,7 @@ async def analytics_overview(
     )[:8]
 
     # New clients in window
-    new_clients = await db.clients.count_documents({"created_at": {"$gte": start, "$lt": end}})
+    new_clients = await count_clients(created_since=start, created_before=end)
 
     # Active practitioners (with >=1 note in window)
     notes = await db.visit_notes.find({"created_at": {"$gte": start, "$lt": end}}).to_list(2000)
@@ -953,7 +957,7 @@ async def analytics_overview(
     pids = [pid for pid in by_provider.keys() if pid != "unknown"]
     users_map = {}
     if pids:
-        async for u in db.users.find({"id": {"$in": pids}}, {"_id": 0, "id": 1, "full_name": 1}):
+        for u in await find_users_by_ids(pids):
             users_map[u["id"]] = u.get("full_name")
     notes_by_provider = []
     for pid, cnt in sorted(by_provider.items(), key=lambda x: x[1], reverse=True):

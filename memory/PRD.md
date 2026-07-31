@@ -3,6 +3,16 @@
 ## Original Problem Statement
 HIPAA-aligned wellness EMR for `natmedsol.com` (Natural Medical Solutions Wellness Center). Wellness office, **not** a medical practice. Single-tenant private app, not SaaS. Aesthetic adapted from medspa-concierge to NatMedSol's deep-green / parchment / gold palette.
 
+## Phase 3.1b — MongoDB → PostgreSQL Migration for Identity & Patients (2026-07-31) ⭐ NEW
+- **Runtime cutover complete.** Every Mongo read/write for `users`, `clients`, `intake_forms`, `supplement_sheets`, `client_supplement_assignments`, and `password_reset_tokens` was replaced with PostgreSQL calls via a new `pg_shims.py` shim layer + repository methods.
+- **15 routers rewritten**: `server.py`, `permissions.py`, `routers/clients.py`, `routers/portal_ops.py`, `routers/telehealth.py`, `routers/appointments.py`, `routers/campaigns.py`, `routers/campaign_extras.py`, `routers/lab_review.py`, `routers/ops.py`, `routers/tasks.py`, `routers/health_track.py`, `routers/delegations.py`, `routers/compliance.py`, `routers/forms_protocols.py`, `routers/admin.py`.
+- **Alembic**: new revision `b7e2c4d9a1f8` adds `emr_clients.tags` JSONB column so portal-ops test-patient tagger + campaign segmentation stay on PG.
+- **Seed rewritten**: `server.py::seed_demo` now writes admin / practitioner / staff / auditor / MA fixtures directly to `auth_users`. Mongo `users`/`clients` seed inserts + Mongo `create_index` calls for the retired collections are gone.
+- **Dead code removed**: `pg_bootstrap.py` (Mongo → PG user sync helper) deleted.
+- **6 Mongo collections dropped and verified** they do not regenerate on boot: `users` (1221 docs), `clients` (1587 docs), `intake_forms` (2 docs), `supplement_sheets` (76 docs), `client_supplement_assignments` (97 docs), `password_reset_tokens` (0 docs).
+- **Tests**: new `tests/test_session3_1_clients.py` (6/6 pass) verifies practitioners list, dashboard client count, client CRUD, intake save, and admin/users all round-trip through PostgreSQL. `tests/pg_test_helpers.py` module added for legacy tests still using pymongo user lookups.
+- **API contract unchanged.** Every HTTP request/response shape preserved.
+
 ## Personas
 - **Client:** PWA-installable; schedule, intake, chart/labs/plan, secure messaging, billing. Sign in with **email + password + MFA** (Google SSO was removed 2026-07-30, Session 2a).
 - **Practitioner:** schedule (full EHR view), charts, telehealth (live SOAP sidebar + AI draft), messaging, treatments, time clock, analytics.

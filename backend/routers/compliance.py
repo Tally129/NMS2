@@ -15,6 +15,7 @@ from deps import (
     get_current_user, require_roles,
 )
 from models import new_id
+from pg_shims import list_all_assignments_for_client
 
 
 @api.get("/compliance/baa-checklist")
@@ -82,7 +83,7 @@ async def patient_data_export(request: Request, user=Depends(get_current_user)):
         "visit_notes": [_strip_id(n) async for n in db.visit_notes.find({"client_id": cid})],
         "treatment_plans": [_strip_id(t) async for t in db.treatment_plans.find({"client_id": cid})],
         "protocol_enrollments": [_strip_id(p) async for p in db.protocol_enrollments.find({"client_id": cid})],
-        "supplement_assignments": [_strip_id(s) async for s in db.client_supplement_assignments.find({"client_id": cid})],
+        "supplement_assignments": await list_all_assignments_for_client(cid),
         "form_submissions": [_strip_id(f) async for f in db.form_submissions.find({"client_id": cid})],
         "files": [_strip_id(f) async for f in db.files.find({"client_id": cid})],
         "billing": [_strip_id(b) async for b in db.pos_sales.find({"client_id": cid})],

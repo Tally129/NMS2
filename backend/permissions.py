@@ -23,6 +23,7 @@ from fastapi import Depends, HTTPException, Request
 
 from audit import get_client_ip, log_audit
 from deps import WORKFORCE_ROLES, db, require_workforce_mfa
+from pg_shims import find_client
 
 
 # --------------------------------------------------------------------------- #
@@ -220,7 +221,7 @@ async def assert_client_visible(user: dict, client_id: str) -> dict:
     """Central resource-scope check. Raises 403 if the current user cannot
     view the given client, otherwise returns the client document."""
     role = user.get("role") or ""
-    client = await db.clients.find_one({"id": client_id})
+    client = await find_client(client_id=client_id)
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
     if role_has(role, P.CLIENT_READ_ANY):

@@ -114,6 +114,7 @@ class Client(Base):
     dietary_restrictions: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
     wellness_goals: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
     current_supplements: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    tags: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
     # Legacy-id passthrough for reconciliation across the cutover.
     legacy_mongo_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(

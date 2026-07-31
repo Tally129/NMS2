@@ -64,6 +64,7 @@ from deps import (
     _strip_id, get_current_user, require_roles, to_user_out, _resolve_self_client,
     close_mongo,
 )
+from pg_shims import find_client, find_user_by_email, insert_user, list_users_by_roles, update_user
 
 # Register modular routers (side-effect: each file adds routes to `api`)
 from routers import auth as _auth_routes  # noqa: F401
@@ -410,7 +411,7 @@ async def _appointment_reminder_loop():
                 "reminder_sent_at": {"$exists": False},
             })
             async for a in cursor:
-                client = await db.clients.find_one({"id": a.get("client_id")})
+                client = await find_client(client_id=a.get("client_id"))
                 if not client or not client.get("user_id"):
                     continue
                 start_local = a["start"].strftime("%-I:%M %p")
@@ -444,7 +445,7 @@ async def _expiring_inventory_loop():
                         expiring.append(it["name"])
                         break
             if expiring:
-                admins = await db.users.find({"role": {"$in": ["admin", "staff"]}}).to_list(50)
+                admins = await list_users_by_roles(["admin", "staff"], limit=50)
                 for u in admins:
                     await push_to_user(
                         u["id"],
@@ -506,9 +507,8 @@ async def seed_demo():
     # Sprint 1: In HIPAA_MODE=on, refuse to seed predictable staff credentials.
     _hipaa = os.environ.get("HIPAA_MODE", "false").lower() in {"1", "true", "yes", "on"}
     try:
-        await db.users.create_index("email", unique=True)
-        await db.clients.create_index("user_id")
-        await db.intake_forms.create_index("client_id", unique=True)
+        # Phase 3.1b: users/clients/intake_forms/client_supplement_assignments
+        # live in PostgreSQL now. Only Mongo-resident collections keep indexes here.
         await db.visit_notes.create_index("client_id")
         await db.files.create_index("client_id")
         # Session 3.0b: audit_logs / security_events live in PostgreSQL now;
@@ -522,8 +522,6 @@ async def seed_demo():
         await db.protocol_templates.create_index([("builtin", 1), ("title", 1)])
         await db.protocol_enrollments.create_index("client_id")
         await db.protocol_enrollments.create_index("practitioner_id")
-        await db.client_supplement_assignments.create_index([("client_id", 1), ("active", 1)])
-        await db.client_supplement_assignments.create_index([("client_id", 1), ("sheet_id", 1)], unique=False)
         await db.protocol_enrollments.create_index("status")
         # Sprint 3+ collections (audit_logs/security_events moved to PG in Session 3.0b)
         await db.breakglass_sessions.create_index("user_id")
@@ -544,27 +542,33 @@ async def seed_demo():
         logger.warning("HIPAA_MODE=on — skipping predictable-password demo seed.")
         return
 
-    if await db.users.count_documents({}) == 0:
-        admin = {
+    # Phase 3.1b: users live in PostgreSQL. Seed demo accounts only when the
+    # `auth_users` table is empty (fresh dev DB) — never dual-write to Mongo.
+    from postgres_db import AsyncSessionLocal as _PG
+    from postgres_models import User as _U
+    from sqlalchemy import func as _f, select as _s
+    async with _PG() as _pg:
+        _user_count = int((await _pg.execute(_s(_f.count(_U.id)))).scalar_one())
+    if _user_count == 0:
+        await insert_user({
             "id": new_id(), "email": "admin@natmedsol.local",
             "password_hash": hash_password("Admin!2345"),
             "full_name": "Site Administrator", "phone": None,
             "role": "admin", "mfa_enabled": False, "mfa_secret": None,
             "is_active": True, "created_at": datetime.now(timezone.utc), "last_login_at": None,
-        }
-        prac = {
+        })
+        await insert_user({
             "id": new_id(), "email": "ravello@natmedsol.local",
             "password_hash": hash_password("Ravello!2345"),
             "full_name": "Dr. Gail Ravello", "phone": None,
             "role": "practitioner", "mfa_enabled": False, "mfa_secret": None,
             "is_active": True, "created_at": datetime.now(timezone.utc), "last_login_at": None,
-        }
-        await db.users.insert_many([admin, prac])
-        logger.info("Seeded demo admin + practitioner users.")
+        })
+        logger.info("Seeded demo admin + practitioner users (PostgreSQL).")
 
     # Idempotent: ensure a real staff-role front-desk user exists for QA / RBAC testing
-    if not await db.users.find_one({"email": "frontdesk@natmedsol.local"}):
-        await db.users.insert_one({
+    if not await find_user_by_email("frontdesk@natmedsol.local"):
+        await insert_user({
             "id": new_id(), "email": "frontdesk@natmedsol.local",
             "password_hash": hash_password("FrontDesk!2345"),
             "full_name": "Front Desk Staff", "phone": None,
@@ -574,8 +578,8 @@ async def seed_demo():
         logger.info("Seeded demo staff (front desk) user.")
 
     # Idempotent break-glass auditor account (read-only, all reads stamped emergency=true)
-    if not await db.users.find_one({"email": "auditor@natmedsol.local"}):
-        await db.users.insert_one({
+    if not await find_user_by_email("auditor@natmedsol.local"):
+        await insert_user({
             "id": new_id(), "email": "auditor@natmedsol.local",
             "password_hash": hash_password("Auditor!2345"),
             "full_name": "Compliance Auditor", "phone": None,
@@ -585,9 +589,9 @@ async def seed_demo():
         logger.info("Seeded break-glass auditor user.")
 
     # Idempotent: seed a Medical Assistant test account for delegated-editing QA.
-    ma_doc = await db.users.find_one({"email": "ma@natmedsol.local"})
+    ma_doc = await find_user_by_email("ma@natmedsol.local")
     if not ma_doc:
-        await db.users.insert_one({
+        await insert_user({
             "id": new_id(), "email": "ma@natmedsol.local",
             "password_hash": hash_password("MedAssist!2345"),
             "full_name": "Morgan Assistant", "phone": None,
@@ -598,17 +602,11 @@ async def seed_demo():
     elif ma_doc.get("role") != "medical_assistant":
         # Self-heal: an earlier build shipped this seed with role="client".
         # Correct it on boot without wiping the record so audit history is preserved.
-        await db.users.update_one({"id": ma_doc["id"]}, {"$set": {"role": "medical_assistant"}})
+        await update_user(ma_doc["id"], {"role": "medical_assistant"})
         logger.info("Self-healed medical assistant role for ma@natmedsol.local.")
 
-    # Session 2b: mirror any MongoDB user rows into PostgreSQL so the PG-backed
-    # auth stack can authenticate them. Idempotent — only inserts missing rows
-    # and refreshes password_hash/mfa fields when Mongo is ahead.
-    try:
-        from pg_bootstrap import sync_mongo_users_to_pg
-        await sync_mongo_users_to_pg(db)
-    except Exception as _e:
-        logger.warning("PG auth sync at startup failed: %s", _e)
+    # Session 2b sync path (Mongo → PG mirror) is retired now that identity
+    # is 100% PostgreSQL. Nothing to sync anymore.
 
     # Session 2c (dev only): seed a brand-new bootstrap admin whose email
     # is set via BOOTSTRAP_ADMIN_EMAIL. Skipped in HIPAA_MODE and skipped if

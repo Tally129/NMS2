@@ -23,6 +23,7 @@ from postgres_models import AuditLog, User
 from repositories import audit as audit_repo
 from repositories import user_sessions as sessions_repo
 from repositories import users as users_repo
+from pg_shims import count_clients
 from sessions import list_active_sessions_sanitized, revoke_all_user_sessions, revoke_family
 
 
@@ -36,7 +37,7 @@ async def dashboard_stats(user=Depends(get_current_user)):
             audit_ct = int((await pg.execute(select(func.count(AuditLog.id)))).scalar_one())
         return {
             "role": role,
-            "clients": await db.clients.count_documents({}),
+            "clients": await count_clients(),
             "notes": await db.visit_notes.count_documents({}),
             "files": await db.files.count_documents({}),
             "appointments_requested": await db.appointment_requests.count_documents({}),
@@ -46,8 +47,8 @@ async def dashboard_stats(user=Depends(get_current_user)):
     if role == "practitioner":
         return {
             "role": role,
-            "my_patients": await db.clients.count_documents({"assigned_practitioner_id": user["id"]}),
-            "total_clients": await db.clients.count_documents({}),
+            "my_patients": await count_clients(practitioner_id=user["id"]),
+            "total_clients": await count_clients(),
             "my_notes": await db.visit_notes.count_documents({"practitioner_id": user["id"]}),
         }
     self_client = await _resolve_self_client(user)

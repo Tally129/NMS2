@@ -28,6 +28,7 @@ from audit import get_client_ip, log_audit
 from deps import _strip_id, api, db, require_roles
 from models import new_id
 from notifiers import email_status, send_email, send_sms, sms_status
+from pg_shims import list_clients_filtered_by_ids
 
 
 CHANNELS = ("email", "sms")
@@ -86,10 +87,11 @@ async def _resolve_recipients(filter_type: str, filter_params: dict) -> List[dic
             "allowed": list(FILTER_TYPES),
         })
     now = datetime.now(timezone.utc)
-    q: dict = {}
+    include_ids: Optional[List[str]] = None
+    exclude_ids: Optional[List[str]] = None
     if filter_type == "all_marketing":
         # Everyone (still bound by opt-in exclusion below).
-        q = {}
+        pass
     elif filter_type == "inactive":
         cutoff_days = int(filter_params.get("inactive_days", 90))
         cutoff = now - timedelta(days=cutoff_days)
@@ -99,7 +101,7 @@ async def _resolve_recipients(filter_type: str, filter_params: dict) -> List[dic
             if a.get("client_id"):
                 active_client_ids.add(a["client_id"])
         if active_client_ids:
-            q["id"] = {"$nin": list(active_client_ids)}
+            exclude_ids = list(active_client_ids)
     elif filter_type == "upcoming_appointments":
         horizon_days = int(filter_params.get("days_ahead", 14))
         window_end = now + timedelta(days=horizon_days)
@@ -111,7 +113,7 @@ async def _resolve_recipients(filter_type: str, filter_params: dict) -> List[dic
                 client_ids.add(a["client_id"])
         if not client_ids:
             return []
-        q["id"] = {"$in": list(client_ids)}
+        include_ids = list(client_ids)
     elif filter_type == "due_for_followup":
         # Clients whose last appointment ended before `since_days` and have no
         # future appointment scheduled.
@@ -132,7 +134,7 @@ async def _resolve_recipients(filter_type: str, filter_params: dict) -> List[dic
         eligible = stale_ids - future_ids
         if not eligible:
             return []
-        q["id"] = {"$in": list(eligible)}
+        include_ids = list(eligible)
     elif filter_type == "membership":
         # Reuse existing "memberships" collection if present, else best-effort
         member_ids = set()
@@ -142,7 +144,7 @@ async def _resolve_recipients(filter_type: str, filter_params: dict) -> List[dic
                 member_ids.add(m["client_id"])
         if not member_ids:
             return []
-        q["id"] = {"$in": list(member_ids)}
+        include_ids = list(member_ids)
     elif filter_type == "treatment_group":
         # Filter by an active treatment protocol / plan title supplied in params.
         title = (filter_params.get("group_title") or "").strip()
@@ -157,9 +159,11 @@ async def _resolve_recipients(filter_type: str, filter_params: dict) -> List[dic
                 client_ids.add(p["client_id"])
         if not client_ids:
             return []
-        q["id"] = {"$in": list(client_ids)}
+        include_ids = list(client_ids)
 
-    return await db.clients.find(q).to_list(5000)
+    return await list_clients_filtered_by_ids(
+        include_ids=include_ids, exclude_ids=exclude_ids, limit=5000,
+    )
 
 
 def _classify(client: dict, channel: str) -> tuple[str, str]:

@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field, EmailStr
 from audit import get_client_ip, log_audit
 from deps import api, db, get_current_user, require_roles
 from models import new_id
+from pg_shims import bulk_clear_marketing_consent, count_clients
 from routers.campaigns import (
     CHANNELS, FILTER_TYPES,
     _build_context, _fill_variables, _render_html, _render_plain,
@@ -549,8 +550,8 @@ async def unsubscribe(c: str = Query(..., alias="c"), t: str = Query(..., alias=
     client record after verifying the HMAC-lite token."""
     if _unsub_token(c) != t:
         raise HTTPException(status_code=400, detail="Invalid unsubscribe link")
-    r = await db.clients.update_one({"id": c}, {"$set": {"consent_marketing": False}})
-    if r.matched_count == 0:
+    matched = await bulk_clear_marketing_consent([c])
+    if matched == 0:
         raise HTTPException(status_code=404, detail="Not found")
     await db.campaign_unsubscribes.insert_one({
         "client_id": c, "ts": datetime.now(timezone.utc), "source": "email_link",
@@ -626,19 +627,19 @@ async def segment_estimate(payload: SegmentEstimateIn,
     elif ft == "new_patients":
         days = int(p.get("days", 30))
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        total = await db.clients.count_documents({"created_at": {"$gte": cutoff}})
+        total = await count_clients(created_since=cutoff)
     elif ft == "birthday_month":
         month = int(p.get("month", datetime.now(timezone.utc).month))
         # dob stored as YYYY-MM-DD string.
         rx = f"^\\d{{4}}-{month:02d}-"
-        total = await db.clients.count_documents({"dob": {"$regex": rx}})
+        total = await count_clients(dob_regex=rx)
     elif ft == "tags":
         tags = p.get("tags") or []
         if tags:
-            total = await db.clients.count_documents({"tags": {"$in": list(tags)}})
+            total = await count_clients(tags_any=tags)
     elif ft == "custom_list":
         ids = p.get("client_ids") or []
-        total = await db.clients.count_documents({"id": {"$in": list(ids)}})
+        total = await count_clients(ids=ids)
     else:
         raise HTTPException(status_code=400, detail={
             "code": "unknown_filter_type",

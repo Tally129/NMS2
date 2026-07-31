@@ -26,6 +26,7 @@ from delegations import (
 )
 from deps import _strip_id, api, db, get_current_user, require_roles
 from models import new_id
+from pg_shims import find_client, find_user_by_id
 
 
 class DelegationIn(BaseModel):
@@ -39,7 +40,7 @@ class DelegationIn(BaseModel):
 @api.post("/delegations")
 async def create_delegation(payload: DelegationIn, request: Request,
                             user=Depends(require_roles("practitioner"))):
-    delegate = await db.users.find_one({"id": payload.delegate_id})
+    delegate = await find_user_by_id(payload.delegate_id)
     if not delegate:
         raise HTTPException(status_code=404, detail="Delegate user not found")
     if delegate.get("role") not in ELIGIBLE_DELEGATE_ROLES:
@@ -49,7 +50,7 @@ async def create_delegation(payload: DelegationIn, request: Request,
             "eligible_roles": sorted(ELIGIBLE_DELEGATE_ROLES),
         })
     if payload.client_id:
-        client = await db.clients.find_one({"id": payload.client_id})
+        client = await find_client(client_id=payload.client_id)
         if not client:
             raise HTTPException(status_code=404, detail="Client not found")
     if payload.scope != "documentation":

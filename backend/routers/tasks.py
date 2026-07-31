@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from audit import get_client_ip, log_audit
 from deps import _strip_id, api, db, get_current_user, require_roles
 from models import new_id
+from pg_shims import find_client, find_user_by_id
 
 
 TASK_STATUSES = ("new", "in_progress", "waiting", "completed")
@@ -68,7 +69,7 @@ class TaskPatch(BaseModel):
 async def _resolve_name(user_id: Optional[str]) -> Optional[str]:
     if not user_id:
         return None
-    u = await db.users.find_one({"id": user_id}, {"full_name": 1, "email": 1})
+    u = await find_user_by_id(user_id)
     if not u:
         return None
     return u.get("full_name") or u.get("email")
@@ -77,7 +78,7 @@ async def _resolve_name(user_id: Optional[str]) -> Optional[str]:
 async def _resolve_client_name(client_id: Optional[str]) -> Optional[str]:
     if not client_id:
         return None
-    c = await db.clients.find_one({"id": client_id}, {"full_name": 1, "email": 1})
+    c = await find_client(client_id=client_id)
     if not c:
         return None
     return c.get("full_name") or c.get("email")

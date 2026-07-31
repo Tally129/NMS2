@@ -24,12 +24,20 @@ from models import (
     AmendIn, ClientIn, ClientOut, FileMetaOut, IntakeIn, IntakeOut,
     NoteIn, NoteOut, new_id,
 )
+from pg_shims import (
+    delete_client as _pg_delete_client, find_active_assignment,
+    find_assignment, find_client, find_intake_by_client,
+    find_supplement_sheet, find_user_by_id, find_clients_by_ids,
+    insert_assignment, insert_client, list_active_assignments_for_client,
+    list_active_supplement_sheets, list_clients, touch_assignment_reference,
+    update_client as _pg_update_client, upsert_intake, deactivate_assignment,
+)
 
 
 # =================== CLIENTS ===================
 @api.get("/clients", response_model=List[ClientOut])
-async def list_clients(user=Depends(require_roles("admin", "practitioner", "staff", "medical_assistant", "front_desk", "frontdesk"))):
-    items = await db.clients.find().sort("created_at", -1).to_list(500)
+async def list_clients_endpoint(user=Depends(require_roles("admin", "practitioner", "staff", "medical_assistant", "front_desk", "frontdesk"))):
+    items = await list_clients(sort_desc=True, limit=500)
     return [_strip_id(i) for i in items]
 
 
@@ -43,7 +51,7 @@ async def my_client_record(user=Depends(get_current_user)):
 
 @api.get("/clients/{client_id}", response_model=ClientOut)
 async def get_client(client_id: str, request: Request, user=Depends(get_current_user)):
-    c = await db.clients.find_one({"id": client_id})
+    c = await find_client(client_id=client_id)
     if not c:
         raise HTTPException(status_code=404, detail="Client not found")
     role = user.get("role") or ""
@@ -80,7 +88,7 @@ async def create_client(payload: ClientIn, request: Request,
     # Auto-generate MRN if not provided: NMS- + 6-char hex
     if not doc.get("mrn"):
         doc["mrn"] = f"NMS-{doc['id'][:6].upper()}"
-    await db.clients.insert_one(doc)
+    await insert_client(doc)
     await log_audit(db, user["id"], user["email"], "client.create",
                     resource_type="client", resource_id=doc["id"],
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
@@ -90,16 +98,16 @@ async def create_client(payload: ClientIn, request: Request,
 @api.put("/clients/{client_id}", response_model=ClientOut)
 async def update_client(client_id: str, payload: ClientIn, request: Request,
                         user=Depends(require_roles("admin", "staff", "practitioner"))):
-    c = await db.clients.find_one({"id": client_id})
+    c = await find_client(client_id=client_id)
     if not c:
         raise HTTPException(status_code=404, detail="Client not found")
     updates = {k: v for k, v in payload.dict().items() if v is not None}
-    await db.clients.update_one({"id": client_id}, {"$set": updates})
+    await _pg_update_client(client_id, updates)
     await log_audit(db, user["id"], user["email"], "client.update",
                     resource_type="client", resource_id=client_id,
                     metadata={"fields": list(updates.keys())},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    c = await db.clients.find_one({"id": client_id})
+    c = await find_client(client_id=client_id)
     return _strip_id(c)
 
 
@@ -114,12 +122,12 @@ async def save_intake(payload: IntakeIn, request: Request, user=Depends(get_curr
     else:
         if not payload.client_id:
             raise HTTPException(status_code=400, detail="client_id required")
-        target_client = await db.clients.find_one({"id": payload.client_id})
+        target_client = await find_client(client_id=payload.client_id)
         if not target_client:
             raise HTTPException(status_code=404, detail="Client not found")
         client_id = payload.client_id
 
-    existing = await db.intake_forms.find_one({"client_id": client_id})
+    existing = await find_intake_by_client(client_id)
     data = payload.dict()
     data["client_id"] = client_id
     now = datetime.now(timezone.utc)
@@ -130,16 +138,16 @@ async def save_intake(payload: IntakeIn, request: Request, user=Depends(get_curr
         data["created_at"] = existing.get("created_at", now)
         if payload.completed:
             data["completed_at"] = now
-        await db.intake_forms.update_one({"id": existing["id"]}, {"$set": data})
+        await upsert_intake(intake_id=existing["id"], client_id=client_id, fields=data)
     else:
         data["id"] = new_id()
         data["created_at"] = now
         if payload.completed:
             data["completed_at"] = now
-        await db.intake_forms.insert_one(data)
+        await upsert_intake(intake_id=data["id"], client_id=client_id, fields=data)
 
     if payload.completed:
-        await db.clients.update_one({"id": client_id}, {"$set": {"intake_completed": True}})
+        await _pg_update_client(client_id, {"intake_completed": True})
 
     await log_audit(db, user["id"], user["email"], "intake.save",
                     resource_type="intake", resource_id=data["id"],
@@ -153,7 +161,7 @@ async def get_intake(client_id: str, request: Request, user=Depends(get_current_
         self_client = await _resolve_self_client(user)
         if not self_client or self_client["id"] != client_id:
             raise HTTPException(status_code=403, detail="Forbidden")
-    intake = await db.intake_forms.find_one({"client_id": client_id})
+    intake = await find_intake_by_client(client_id)
     if not intake:
         return None
     await log_audit(db, user["id"], user["email"], "intake.read",
@@ -191,7 +199,7 @@ async def list_all_notes(request: Request,
     rows = await db.visit_notes.find(q).sort("created_at", -1).to_list(limit)
     # Hydrate with client_name
     client_ids = list({r.get("client_id") for r in rows if r.get("client_id")})
-    clients = {c["id"]: c async for c in db.clients.find({"id": {"$in": client_ids}})}
+    clients = {c["id"]: c for c in await find_clients_by_ids(client_ids)}
     out = []
     for r in rows:
         c = clients.get(r.get("client_id")) or {}
@@ -211,7 +219,7 @@ async def list_all_notes(request: Request,
 @api.post("/notes", response_model=NoteOut)
 async def create_note(payload: NoteIn, request: Request,
                       user=Depends(require_roles("practitioner", "admin", "medical_assistant"))):
-    c = await db.clients.find_one({"id": payload.client_id})
+    c = await find_client(client_id=payload.client_id)
     if not c:
         raise HTTPException(status_code=404, detail="Client not found")
     # Delegated draft editing gate — admin / medical_assistant need an active delegation.
@@ -233,7 +241,7 @@ async def create_note(payload: NoteIn, request: Request,
         doc["practitioner_id"] = user["id"]
         doc["practitioner_name"] = user.get("full_name", "")
     else:
-        provider = await db.users.find_one({"id": authorizing_provider_id}) if authorizing_provider_id else None
+        provider = await find_user_by_id(authorizing_provider_id) if authorizing_provider_id else None
         doc["practitioner_id"] = authorizing_provider_id
         doc["practitioner_name"] = (provider or {}).get("full_name", "")
         doc["drafted_by_id"] = user["id"]
@@ -353,7 +361,7 @@ async def _fan_out_supplements_for_note(note: dict, user: dict) -> list:
     ]).lower()
     if not haystack.strip():
         return []
-    sheets = await db.supplement_sheets.find({"active": True}).to_list(200)
+    sheets = await list_active_supplement_sheets(limit=200)
     matched = []
     now = datetime.now(timezone.utc)
     for s in sheets:
@@ -362,15 +370,10 @@ async def _fan_out_supplements_for_note(note: dict, user: dict) -> list:
             continue  # avoid spurious matches on tiny titles
         if title.lower() in haystack:
             # idempotent — only create when not already linked
-            existing = await db.client_supplement_assignments.find_one({
-                "client_id": note["client_id"], "sheet_id": s["id"], "active": True,
-            })
+            existing = await find_active_assignment(note["client_id"], s["id"])
             if existing:
                 # bump last_referenced + add note ref
-                await db.client_supplement_assignments.update_one(
-                    {"id": existing["id"]},
-                    {"$set": {"last_referenced_at": now}, "$addToSet": {"note_ids": note["id"]}},
-                )
+                await touch_assignment_reference(existing["id"], ts=now, note_id=note["id"])
                 matched.append({"sheet_id": s["id"], "sheet_title": title, "assignment_id": existing["id"], "newly_assigned": False})
             else:
                 a = {
@@ -388,7 +391,7 @@ async def _fan_out_supplements_for_note(note: dict, user: dict) -> list:
                     "note_ids": [note["id"]],
                     "source": "auto_soap",
                 }
-                await db.client_supplement_assignments.insert_one(a)
+                await insert_assignment(a)
                 matched.append({"sheet_id": s["id"], "sheet_title": title, "assignment_id": a["id"], "newly_assigned": True})
                 # Mirror to audit log so admins have a single trail regardless of source
                 try:
@@ -399,7 +402,8 @@ async def _fan_out_supplements_for_note(note: dict, user: dict) -> list:
                     pass
                 # Push notification to the client portal user
                 try:
-                    if c_user_id := (await db.clients.find_one({"id": note["client_id"]})).get("user_id"):
+                    note_client = await find_client(client_id=note["client_id"])
+                    if note_client and (c_user_id := note_client.get("user_id")):
                         await push_to_user(
                             c_user_id,
                             "New supplement directions",
@@ -419,7 +423,7 @@ async def list_client_supplement_assignments(client_id: str, user=Depends(get_cu
         sc = await _resolve_self_client(user)
         if not sc or sc["id"] != client_id:
             raise HTTPException(status_code=403, detail="Forbidden")
-    rows = await db.client_supplement_assignments.find({"client_id": client_id, "active": True}).sort("assigned_at", -1).to_list(200)
+    rows = await list_active_assignments_for_client(client_id, limit=200)
     return [_strip_id(r) for r in rows]
 
 
@@ -429,13 +433,13 @@ async def create_client_supplement_assignment(client_id: str, payload: dict, req
     sheet_id = payload.get("sheet_id")
     if not sheet_id:
         raise HTTPException(status_code=400, detail="sheet_id required")
-    sheet = await db.supplement_sheets.find_one({"id": sheet_id})
+    sheet = await find_supplement_sheet(sheet_id)
     if not sheet:
         raise HTTPException(status_code=404, detail="Sheet not found")
-    client = await db.clients.find_one({"id": client_id})
+    client = await find_client(client_id=client_id)
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
-    existing = await db.client_supplement_assignments.find_one({"client_id": client_id, "sheet_id": sheet_id, "active": True})
+    existing = await find_active_assignment(client_id, sheet_id)
     if existing:
         return _strip_id(existing)
     now = datetime.now(timezone.utc)
@@ -454,7 +458,7 @@ async def create_client_supplement_assignment(client_id: str, payload: dict, req
         "note_ids": [],
         "source": "manual",
     }
-    await db.client_supplement_assignments.insert_one(a)
+    await insert_assignment(a)
     await log_audit(db, user["id"], user["email"], "supplement_assignment.create",
                     resource_type="client", resource_id=client_id,
                     metadata={"sheet_id": sheet_id},
@@ -465,10 +469,10 @@ async def create_client_supplement_assignment(client_id: str, payload: dict, req
 @api.delete("/clients/{client_id}/supplement-assignments/{assignment_id}")
 async def remove_client_supplement_assignment(client_id: str, assignment_id: str, request: Request,
                                               user=Depends(require_roles("admin", "practitioner"))):
-    a = await db.client_supplement_assignments.find_one({"id": assignment_id})
+    a = await find_assignment(assignment_id)
     if not a or a.get("client_id") != client_id:
         raise HTTPException(status_code=404, detail="Assignment not found")
-    await db.client_supplement_assignments.update_one({"id": assignment_id}, {"$set": {"active": False, "removed_at": datetime.now(timezone.utc), "removed_by_id": user["id"]}})
+    await deactivate_assignment(assignment_id, by_id=user["id"])
     await log_audit(db, user["id"], user["email"], "supplement_assignment.remove",
                     resource_type="client", resource_id=client_id,
                     metadata={"assignment_id": assignment_id},
@@ -569,7 +573,7 @@ async def upload_file(
     else:
         # Workforce upload must specify a client the actor can see.
         if client_id:
-            target = await db.clients.find_one({"id": client_id})
+            target = await find_client(client_id=client_id)
             if not target:
                 raise HTTPException(status_code=404, detail="Client not found")
 

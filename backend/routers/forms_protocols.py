@@ -28,6 +28,10 @@ from models import (
     ProtocolSessionUpdate, ProtocolTemplateIn, ProtocolTemplateOut,
     SoapTemplateIn, SoapTemplateOut, new_id,
 )
+from pg_shims import (
+    deactivate_supplement_sheet, find_client, insert_supplement_sheet,
+    list_active_supplement_sheets,
+)
 
 
 # =================== PHASE 10: FORMS & CONSENTS ===================
@@ -256,7 +260,7 @@ async def send_form(payload: FormSendIn, request: Request,
         raise HTTPException(status_code=404, detail="Template not found")
     client = None
     if payload.client_id:
-        client = await db.clients.find_one({"id": payload.client_id})
+        client = await find_client(client_id=payload.client_id)
         if not client:
             raise HTTPException(status_code=404, detail="Client not found")
     token = _secrets.token_urlsafe(24)
@@ -907,20 +911,20 @@ async def save_supplement_sheet(payload: dict, request: Request,
         "created_at": now,
         "updated_at": now,
     }
-    await db.supplement_sheets.insert_one(doc)
+    await insert_supplement_sheet(doc)
     return _strip_id(doc)
 
 
 @api.get("/library/supplements")
 async def list_supplement_sheets(user=Depends(require_roles("admin", "practitioner", "staff"))):
-    rows = await db.supplement_sheets.find({"active": True}).sort("created_at", -1).to_list(200)
+    rows = await list_active_supplement_sheets(limit=200)
     return [_strip_id(r) for r in rows]
 
 
 @api.delete("/library/supplements/{sheet_id}")
 async def delete_supplement_sheet(sheet_id: str,
                                   user=Depends(require_roles("admin", "practitioner"))):
-    await db.supplement_sheets.delete_one({"id": sheet_id})
+    await deactivate_supplement_sheet(sheet_id)
     return {"ok": True}
 
 
@@ -930,7 +934,7 @@ async def create_protocol_enrollment(payload: ProtocolEnrollmentIn, request: Req
     tpl = await db.protocol_templates.find_one({"id": payload.template_id})
     if not tpl:
         raise HTTPException(status_code=404, detail="Template not found")
-    client = await db.clients.find_one({"id": payload.client_id})
+    client = await find_client(client_id=payload.client_id)
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
     weeks = payload.weeks or tpl.get("weeks") or 4

@@ -10,8 +10,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from postgres_models import Client, IntakeForm
 
 
+def _flatten_scalar(v):
+    """Older Phase 3.1b writes wrap CSV-imported free-text address / emergency
+    contact strings as ``{"raw": "..."}`` (JSONB compatibility). Callers still
+    expect the ``ClientOut`` Pydantic model's plain string. Unwrap the shim
+    shape transparently on read; leave real dicts untouched (they were used
+    briefly by an earlier structured-address prototype)."""
+    if isinstance(v, dict) and set(v.keys()) == {"raw"}:
+        return v["raw"]
+    return v
+
+
 def _client_to_dict(c: Client) -> Dict[str, Any]:
-    return {k: getattr(c, k) for k in (
+    d = {k: getattr(c, k) for k in (
         "id", "user_id", "mrn", "full_name", "email", "phone", "alt_phone",
         "dob", "sex", "gender_identity", "pronouns", "marital_status",
         "language", "referral_source", "assigned_practitioner_id",
@@ -20,8 +31,12 @@ def _client_to_dict(c: Client) -> Dict[str, Any]:
         "consent_telehealth", "comms_pref",
         "address", "emergency_contact", "allergies",
         "dietary_restrictions", "wellness_goals", "current_supplements",
+        "tags",
         "legacy_mongo_id", "created_at", "updated_at",
     )}
+    d["address"] = _flatten_scalar(d.get("address"))
+    d["emergency_contact"] = _flatten_scalar(d.get("emergency_contact"))
+    return d
 
 
 async def get_by_id(session: AsyncSession, client_id: str) -> Optional[Dict[str, Any]]:
@@ -96,6 +111,8 @@ async def upsert_intake(session: AsyncSession, *, intake_id: str, client_id: str
     existing = (await session.execute(
         select(IntakeForm).where(IntakeForm.client_id == client_id)
     )).scalar_one_or_none()
+    # Strip caller-supplied client_id / id so we don't collide with kwargs below.
+    fields = {k: v for k, v in fields.items() if k not in {"client_id", "id"}}
     if existing:
         for k, v in fields.items():
             if hasattr(IntakeForm, k):

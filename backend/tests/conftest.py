@@ -51,25 +51,10 @@ def _enroll_workforce_mfa_and_patch_login():
 
     c = pymongo.MongoClient(os.environ.get("MONGO_URL", "mongodb://localhost:27017"))
     dbh = c[os.environ.get("DB_NAME", "test_database")]
-    # 1) Enrol MFA on seeded workforce accounts (idempotent). Store as ciphertext.
+    # Phase 3.1b: users/user_sessions/refresh_tokens live in PostgreSQL now.
+    # We only encrypt the fixture secret here; the PG update below is the source of truth.
     encrypted_secret = encrypt_mfa_secret(FIXTURE_TOTP_SECRET)
-    dbh.users.update_many(
-        {"email": {"$in": list(SEEDED_WORKFORCE)}},
-        {"$set": {"mfa_enabled": True, "mfa_secret": encrypted_secret}},
-    )
-    # 1b) Sprint 2: clear any active sessions on seeded workforce accounts so the
-    #     5-session cap doesn't reject the very first test login.
-    user_ids = [u["id"] for u in dbh.users.find(
-        {"email": {"$in": list(SEEDED_WORKFORCE)}}, {"id": 1})]
-    from datetime import datetime, timezone
-    dbh.user_sessions.update_many(
-        {"user_id": {"$in": user_ids}, "revoked_at": None},
-        {"$set": {"revoked_at": datetime.now(timezone.utc), "revoke_reason": "test_setup_cleanup"}},
-    )
-    dbh.refresh_tokens.update_many(
-        {"user_id": {"$in": user_ids}, "revoked_at": None},
-        {"$set": {"revoked_at": datetime.now(timezone.utc), "revoke_reason": "test_setup_cleanup"}},
-    )
+    user_ids = []  # populated from PG in step 1c below.
     c.close()
 
     # 1c) Session 2b: mirror the MFA enrollment + session cleanup into

@@ -105,21 +105,18 @@ class TestWorkforceMfa:
     def test_admin_blocked_on_phi_until_mfa_enrolled(self):
         # Create a fresh admin-role user directly (conftest pre-enrols MFA on all
         # seeded workforce accounts, so we can't use them for the "MFA off" scenario).
-        import pymongo
         from auth_utils import hash_password
-        c = pymongo.MongoClient(os.environ.get("MONGO_URL", "mongodb://localhost:27017"))
-        dbh = c[os.environ.get("DB_NAME", "test_database")]
+        from tests.pg_test_helpers import pg_users_insert, pg_users_delete
         email = f"s1-adm-{_nonce()}@ex.com"
         pw = "SafePass2026Long!"
         user_id = f"test-{_nonce(12)}"
-        dbh.users.insert_one({
+        pg_users_insert({
             "id": user_id, "email": email, "password_hash": hash_password(pw),
             "full_name": "Q Q", "role": "admin", "mfa_enabled": False,
             "mfa_secret": None, "is_active": True, "session_version": 1,
             "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc),
             "last_login_at": None,
         })
-        c.close()
 
         d = _login(email, pw)
         access = d["access_token"]
@@ -186,10 +183,8 @@ class TestPasswordChange:
         assert requests.get(f"{API}/auth/me", headers=h2).status_code == 401
 
         # session_version should have incremented
-        import pymongo
-        c = pymongo.MongoClient(os.environ.get("MONGO_URL", "mongodb://localhost:27017"))
-        u = c[os.environ.get("DB_NAME", "test_database")].users.find_one({"email": email})
-        c.close()
+        from tests.pg_test_helpers import pg_users_find_one
+        u = pg_users_find_one({"email": email})
         assert u["session_version"] >= 2
 
 
@@ -313,12 +308,10 @@ class TestGateItem2_MfaAtRestEncryption:
         assert requests.post(f"{API}/auth/mfa/verify", headers=hdr,
                              json={"token": totp}).status_code == 200
 
-        # Peek at Mongo — the stored mfa_secret must be the enc-v1 blob.
-        import pymongo
+        # Peek at PG — the stored mfa_secret must be the enc-v1 blob.
         me = requests.get(f"{API}/auth/me", headers=hdr).json()
-        c = pymongo.MongoClient(os.environ.get("MONGO_URL", "mongodb://localhost:27017"))
-        u = c[os.environ.get("DB_NAME", "test_database")].users.find_one({"id": me["id"]})
-        c.close()
+        from tests.pg_test_helpers import pg_users_find_one
+        u = pg_users_find_one({"id": me["id"]})
         stored = u.get("mfa_secret") or ""
         assert stored.startswith("enc-v1:"), f"mfa_secret is not encrypted: {stored[:16]}…"
         assert secret_plain not in stored, "plaintext TOTP secret leaked into stored blob"

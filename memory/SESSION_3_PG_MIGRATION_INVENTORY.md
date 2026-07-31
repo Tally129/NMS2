@@ -5,10 +5,39 @@
 > session should carve out ONE row from the batch table below and treat it
 > as its entire scope.
 
-**Snapshot date**: 2026-07-30
+**Snapshot date**: 2026-07-31 (Phase 3.1b runtime cutover complete)
 **Branch**: `auth-remove-google`
-**Last commit**: `3386a20` (Session 2c — admin bootstrap)
-**Alembic head**: `62cd2e365fc9`
+**Last commit**: (about to commit Phase 3.1b)
+**Alembic head**: `b7e2c4d9a1f8`
+
+---
+
+## Session 3.1b — Runtime Cutover Complete (2026-07-31)
+
+The following six MongoDB collections have been **dropped** and verified they
+do NOT regenerate on backend restart or after normal HTTP traffic:
+
+| Collection                       | Docs at drop | PG target                              |
+|----------------------------------|--------------|----------------------------------------|
+| `users`                          | 1,221        | `auth_users`                           |
+| `clients`                        | 1,587        | `emr_clients`                          |
+| `intake_forms`                   | 2            | `emr_intake_forms`                     |
+| `supplement_sheets`              | 76           | `emr_supplement_sheets`                |
+| `client_supplement_assignments`  | 97           | `emr_client_supplement_assignments`    |
+| `password_reset_tokens`          | 0            | `emr_legacy_password_reset_tokens`     |
+
+All 15 target routers have been rewritten to route through
+`pg_shims.py` (Mongo-shape helpers over the async SQLAlchemy repositories):
+`server.py`, `permissions.py`, `routers/clients.py`, `routers/portal_ops.py`,
+`routers/telehealth.py`, `routers/appointments.py`, `routers/campaigns.py`,
+`routers/campaign_extras.py`, `routers/lab_review.py`, `routers/ops.py`,
+`routers/tasks.py`, `routers/health_track.py`, `routers/delegations.py`,
+`routers/compliance.py`, `routers/forms_protocols.py`, `routers/admin.py`.
+
+Added Alembic revision `b7e2c4d9a1f8` (adds `emr_clients.tags` JSONB).
+Removed dead helper `pg_bootstrap.py`.
+Added regression tests: `tests/test_session3_1_clients.py` (6/6 pass) +
+`tests/pg_test_helpers.py`.
 
 ---
 

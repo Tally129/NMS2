@@ -20,6 +20,7 @@ from models import (
     LabValueIn, LabValueOut, MessageIn, MessageOut,
     SymptomLogIn, SymptomLogOut, ThreadIn, ThreadOut, new_id,
 )
+from pg_shims import find_client, find_user_by_id
 
 
 # =================== PHASE 3: SYMPTOMS / LABS / MESSAGING + TELEHEALTH ===================
@@ -104,7 +105,7 @@ async def lab_presets(user=Depends(get_current_user)):
 
 @api.post("/lab-values", response_model=LabValueOut)
 async def create_lab(payload: LabValueIn, request: Request, user=Depends(require_roles("practitioner", "admin", "staff"))):
-    c = await db.clients.find_one({"id": payload.client_id})
+    c = await find_client(client_id=payload.client_id)
     if not c:
         raise HTTPException(status_code=404, detail="Client not found")
     doc = payload.dict()
@@ -149,12 +150,14 @@ async def delete_lab(lab_id: str, request: Request, user=Depends(require_roles("
 async def _message_recipient(thread: dict, sender: dict) -> Optional[dict]:
     """Resolve the other portal user for a two-party patient/care-team thread."""
     if sender.get("role") == "client":
-        return await db.users.find_one({"id": thread.get("practitioner_id"), "is_active": {"$ne": False}})
+        u = await find_user_by_id(thread.get("practitioner_id"))
+        return u if u and u.get("is_active", True) else None
 
-    client = await db.clients.find_one({"id": thread.get("client_id")})
+    client = await find_client(client_id=thread.get("client_id"))
     if not client or not client.get("user_id"):
         return None
-    return await db.users.find_one({"id": client["user_id"], "is_active": {"$ne": False}})
+    u = await find_user_by_id(client["user_id"])
+    return u if u and u.get("is_active", True) else None
 
 
 def _message_portal_path(recipient: dict) -> str:
@@ -241,10 +244,10 @@ async def _hydrate_thread(t, user):
     t = _strip_id(t)
     if not t:
         return None
-    c = await db.clients.find_one({"id": t["client_id"]})
+    c = await find_client(client_id=t["client_id"])
     if c:
         t["client_name"] = c.get("full_name")
-    p = await db.users.find_one({"id": t["practitioner_id"]})
+    p = await find_user_by_id(t["practitioner_id"])
     if p:
         t["practitioner_name"] = p.get("full_name")
     # Count unread for current user
@@ -276,11 +279,11 @@ async def create_thread(payload: ThreadIn, request: Request, user=Depends(get_cu
             raise HTTPException(status_code=404, detail="Client record missing")
         client_id = self_client["id"]
         practitioner_id = payload.participant_id
-        p = await db.users.find_one({"id": practitioner_id})
+        p = await find_user_by_id(practitioner_id)
         if not p or p.get("role") not in ("practitioner", "admin", "staff"):
             raise HTTPException(status_code=400, detail="Invalid practitioner")
     else:
-        c = await db.clients.find_one({"id": payload.participant_id})
+        c = await find_client(client_id=payload.participant_id)
         if not c:
             raise HTTPException(status_code=404, detail="Client not found")
         client_id = c["id"]
@@ -451,12 +454,10 @@ async def promote_thread_to_task(thread_id: str, payload: dict, request: Request
     async def _name_of(uid):
         if not uid:
             return None
-        u = await db.users.find_one({"id": uid}, {"full_name": 1, "email": 1})
+        u = await find_user_by_id(uid)
         return (u or {}).get("full_name") or (u or {}).get("email")
 
-    client = await db.clients.find_one(
-        {"id": t.get("client_id")}, {"full_name": 1, "email": 1},
-    )
+    client = await find_client(client_id=t.get("client_id"))
 
     due_raw = (payload or {}).get("due_date")
     due_date = None

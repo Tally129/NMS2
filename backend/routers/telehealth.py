@@ -28,6 +28,7 @@ from deps import (
 )
 from models import TelehealthConsentIn, new_id
 from auth_utils import decode_token
+from pg_shims import find_client, find_intake_by_client, find_user_by_id
 
 
 # ---------- Waiting room helpers ----------
@@ -367,7 +368,7 @@ async def waiting_room_queue(user=Depends(require_roles("practitioner", "admin",
     ).sort("waiting_room.request_at", 1).to_list(200)
     out = []
     for a in rows:
-        client = await db.clients.find_one({"id": a.get("client_id")}) or {}
+        client = await find_client(client_id=a.get("client_id")) or {}
         out.append({
             "appointment_id": a.get("id"),
             "client_id": a.get("client_id"),
@@ -396,11 +397,11 @@ async def ws_visit(websocket: WebSocket, appt_id: str,
         if not t:
             await websocket.close(code=4401)
             return
-        u = await db.users.find_one({"id": t["user_id"]})
+        u = await find_user_by_id(t["user_id"])
     elif token:
         try:
             payload = decode_token(token)
-            u = await db.users.find_one({"id": payload.get("sub")})
+            u = await find_user_by_id(payload.get("sub"))
         except Exception:
             await websocket.close(code=4401)
             return
@@ -725,10 +726,10 @@ async def llm_soap_draft(appt_id: str, user=Depends(require_roles("practitioner"
     a = await db.appointments.find_one({"id": appt_id})
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
-    client = await db.clients.find_one({"id": a.get("client_id")})
+    client = await find_client(client_id=a.get("client_id"))
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
-    intake = await db.intakes.find_one({"client_id": client["id"]}, sort=[("created_at", -1)]) or {}
+    intake = await find_intake_by_client(client["id"]) or {}
     last_note = await db.visit_notes.find_one(
         {"client_id": client["id"]}, sort=[("created_at", -1)]
     )

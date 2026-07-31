@@ -26,6 +26,7 @@ from models import (
     PlanIn, PlanOut,
     ReminderSettings, new_id,
 )
+from pg_shims import find_client, find_user_by_id, list_users_by_role
 
 TIER_PRICES = {"essentials": 99.0, "core": 199.0, "vip": 299.0}
 
@@ -40,11 +41,11 @@ async def _hydrate_appt(a):
     if not a:
         return None
     if a.get("client_id"):
-        c = await db.clients.find_one({"id": a["client_id"]})
+        c = await find_client(client_id=a["client_id"])
         if c:
             a["client_name"] = c.get("full_name")
     if a.get("practitioner_id"):
-        u = await db.users.find_one({"id": a["practitioner_id"]})
+        u = await find_user_by_id(a["practitioner_id"])
         if u:
             a["practitioner_name"] = u.get("full_name")
     return a
@@ -90,7 +91,7 @@ async def create_appointment(payload: AppointmentIn, request: Request, user=Depe
         status_val = "requested"
     else:
         status_val = payload.status
-    c = await db.clients.find_one({"id": payload.client_id})
+    c = await find_client(client_id=payload.client_id)
     if not c:
         raise HTTPException(status_code=404, detail="Client not found")
     doc = payload.dict()
@@ -144,7 +145,7 @@ async def update_appointment(appt_id: str, payload: AppointmentUpdate, request: 
     await db.appointments.update_one({"id": appt_id}, {"$set": updates})
     # Visit-started push: when telehealth appointment moves to in_session, ping the client
     if updates.get("status") == "in_session" and a.get("visit_mode") == "telehealth":
-        client_doc = await db.clients.find_one({"id": a.get("client_id")})
+        client_doc = await find_client(client_id=a.get("client_id"))
         if client_doc and client_doc.get("user_id"):
             await push_to_user(
                 client_doc["user_id"],
@@ -239,7 +240,7 @@ async def availability_slots(
 # ---------- Practitioners directory (for patient booking) ----------
 @api.get("/practitioners")
 async def list_practitioners(user=Depends(get_current_user)):
-    items = await db.users.find({"role": "practitioner", "is_active": True}).to_list(100)
+    items = await list_users_by_role("practitioner", active_only=True, limit=100)
     return [{"id": u["id"], "full_name": u.get("full_name"), "email": u["email"]} for u in items]
 
 
@@ -248,7 +249,7 @@ async def _hydrate_mem(m):
     m = _strip_id(m)
     if not m:
         return None
-    c = await db.clients.find_one({"id": m["client_id"]})
+    c = await find_client(client_id=m["client_id"])
     if c:
         m["client_name"] = c.get("full_name")
     return m
@@ -360,7 +361,7 @@ async def _hydrate_invoice(i):
     i = _strip_id(i)
     if not i:
         return None
-    c = await db.clients.find_one({"id": i["client_id"]})
+    c = await find_client(client_id=i["client_id"])
     if c:
         i["client_name"] = c.get("full_name")
     return i
@@ -456,7 +457,7 @@ async def _hydrate_plan(p, user=None):
     if not p:
         return None
     if p.get("practitioner_id"):
-        u = await db.users.find_one({"id": p["practitioner_id"]})
+        u = await find_user_by_id(p["practitioner_id"])
         if u:
             p["practitioner_name"] = u.get("full_name")
     # Clients only see patient_visible items
@@ -482,7 +483,7 @@ async def list_plans(client_id: Optional[str] = None, user=Depends(get_current_u
 @api.post("/treatment-plans", response_model=PlanOut)
 async def create_plan(payload: PlanIn, request: Request,
                       user=Depends(require_roles("practitioner", "admin", "medical_assistant"))):
-    c = await db.clients.find_one({"id": payload.client_id})
+    c = await find_client(client_id=payload.client_id)
     if not c:
         raise HTTPException(status_code=404, detail="Client not found")
     authorizing_provider_id = None

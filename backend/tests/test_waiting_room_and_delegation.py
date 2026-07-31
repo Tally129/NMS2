@@ -26,6 +26,8 @@ import pymongo
 import pytest
 import requests
 
+from tests.pg_test_helpers import pg_users_find_one
+
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL").rstrip("/")
 API = f"{BASE_URL}/api"
 
@@ -74,7 +76,8 @@ def client_and_appt(toks, db):
     # Admin creates a client record + appointment (or use whichever endpoint)
     me = requests.get(f"{API}/auth/me", headers=_h(pat_token), timeout=10).json()
     # find/build the client record
-    cr = db.clients.find_one({"user_id": me["id"]})
+    from tests.pg_test_helpers import pg_clients_find_one, pg_clients_insert, pg_users_find_one
+    cr = pg_clients_find_one({"user_id": me["id"]})
     if not cr:
         cr = {
             "id": me["id"] + "-c",
@@ -83,11 +86,11 @@ def client_and_appt(toks, db):
             "full_name": me.get("full_name", "Patient"),
             "created_at": datetime.now(timezone.utc),
         }
-        db.clients.insert_one(cr)
+        pg_clients_insert(cr)
     client_id = cr["id"]
 
     # Practitioner id
-    prov = db.users.find_one({"email": CREDS["practitioner"][0]})
+    prov = pg_users_find_one({"email": CREDS["practitioner"][0]})
     now = datetime.now(timezone.utc)
     appt = {
         "id": f"appt-wr-{int(time.time()*1000)}",
@@ -188,7 +191,7 @@ class TestDelegatedEditing:
     def test_ma_cannot_create_note_without_delegation(self, client_and_appt, toks, db):
         # Ensure no active delegation exists for this client
         db.clinical_delegations.update_many(
-            {"delegate_id": db.users.find_one({"email": CREDS["medical_assistant"][0]})["id"]},
+            {"delegate_id": pg_users_find_one({"email": CREDS["medical_assistant"][0]})["id"]},
             {"$set": {"revoked_at": datetime.now(timezone.utc)}},
         )
         r = requests.post(f"{API}/notes",
@@ -217,7 +220,7 @@ class TestDelegatedEditing:
         assert r2.status_code == 403
 
     def test_grant_then_ma_can_create_and_edit(self, client_and_appt, toks, db):
-        ma = db.users.find_one({"email": CREDS["medical_assistant"][0]})
+        ma = pg_users_find_one({"email": CREDS["medical_assistant"][0]})
         # Grant delegation for this client
         r = requests.post(f"{API}/delegations",
                           headers=_h(toks["practitioner"]),

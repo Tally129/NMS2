@@ -58,20 +58,18 @@ def _admin_login(session: requests.Session):
 def _clear_admin_sessions():
     """Ensure the seeded admin has NO active sessions before each test that
     needs a predictable session count."""
-    dbh = _mongo()
-    u = dbh.users.find_one({"email": ADMIN_EMAIL}, {"id": 1})
+    from tests.pg_test_helpers import pg_users_find_one, _engine
+    from sqlalchemy import text as _t
+    u = pg_users_find_one({"email": ADMIN_EMAIL})
     if not u:
         return
-    dbh.user_sessions.update_many(
-        {"user_id": u["id"], "revoked_at": None},
-        {"$set": {"revoked_at": datetime.now(timezone.utc),
-                  "revoke_reason": "test_reset"}},
-    )
-    dbh.refresh_tokens.update_many(
-        {"user_id": u["id"], "revoked_at": None},
-        {"$set": {"revoked_at": datetime.now(timezone.utc),
-                  "revoke_reason": "test_reset"}},
-    )
+    with _engine().begin() as conn:
+        conn.execute(_t(
+            "UPDATE auth_user_sessions SET revoked_at = NOW(), revoke_reason='test_reset' "
+            "WHERE user_id = :uid AND revoked_at IS NULL"), {"uid": u["id"]})
+        conn.execute(_t(
+            "UPDATE auth_refresh_tokens SET revoked_at = NOW(), revoke_reason='test_reset' "
+            "WHERE user_id = :uid AND revoked_at IS NULL"), {"uid": u["id"]})
 
 
 # --------------------------------------------------------------------------- #
