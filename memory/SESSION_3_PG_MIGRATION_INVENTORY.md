@@ -512,3 +512,61 @@ _Last updated: 2026-07-30 (Phase 3.1a · Data layer landed)_
   contract byte-identical.
 
 _Compiled 2026-07-30 · analysis-only session · no code changed._
+
+
+---
+
+## Phase 3.4b — Runtime Cutover via Motor-Compat Adapter (2026-08-01)
+
+**Strategy**: Adapter-only. `motor_compat_pg.MotorCompatDb` wraps the Motor
+`db` handle re-exported by `deps.py`. Reads/writes to the 8 retired
+collections transparently route to PostgreSQL. Routers are untouched.
+
+**Retired collections (dropped, non-regenerative):**
+- messages
+- message_threads
+- form_templates
+- form_submissions
+- soap_templates
+- lab_values
+- treatment_plans
+- treatments
+
+**Schema additions (Alembic `a1b2c3d4e5f6`):**
+- Added JSONB `payload NOT NULL DEFAULT '{}'` to each of the 8 tables to
+  carry router-provided fields that aren't first-class columns.
+- Relaxed `emr_lab_values.marker` NOT NULL (router writes `test_name` into
+  payload instead).
+
+**Adapter contract:**
+- Full `find / find_one / insert_one / insert_many / update_one /
+  update_many / find_one_and_update / delete_one / delete_many /
+  count_documents / distinct` surface.
+- Cursor `.sort().limit().skip().to_list()` + async iteration.
+- Mongo operators: `$in`, `$nin`, `$ne`, `$gt/$gte/$lt/$lte`, `$exists`,
+  `$regex/$options`, `$or`, `$set`, `$unset`, `$inc`, `$push`, `$addToSet`
+  (incl. `$each`), `$pull`, upsert.
+- Type-safe JSONB equality via `payload @> {"key": val}` containment for
+  booleans/numbers/strings.
+- No Mongo fallback for these 8 collections — `MotorCompatDb._RETIRED`
+  entries always resolve through `MotorCompatCollection`.
+
+**Verification:**
+- Alembic head: `a1b2c3d4e5f6` (up from `8ae0b2901822`).
+- 20/20 Phase 3.1b–3.4 smoke tests pass (`test_session3_1_clients.py`,
+  `test_session3_2_scheduling.py`, `test_session3_3_clinical.py`,
+  `test_session3_4_messaging.py`).
+- New test file `tests/test_session3_4_messaging.py` (6 tests) exercises
+  treatments catalog, form templates + submissions, SOAP templates,
+  messages + threads (incl. push + addToSet), lab values (incl. review
+  status + attach/detach), and treatment plans.
+- Legacy `conftest.py::_ensure_builtin_form_templates` fixture neutered —
+  it previously reseeded Mongo `form_templates` via raw pymongo. Runtime
+  seeds now flow through the adapter (blocked by `DEMO_SEED_DISABLE=1`).
+- Post-restart regen check: **0 of 8** retired collections regenerate.
+
+**Remaining Motor imports (runtime):** `deps.py` (wraps + re-exports),
+`mongo_db.py` (still owns non-retired collections + GridFS).
+
+_Last updated: 2026-08-01 (Phase 3.4b · Adapter cutover complete)_
+

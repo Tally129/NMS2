@@ -23,7 +23,14 @@ from audit import get_client_ip, log_audit  # noqa: F401 (re-exported for router
 from auth_utils import (
     assert_valid_secret, decode_token, get_jwt_audience, get_jwt_issuer,
 )
-from mongo_db import close_mongo, db, fs_bucket  # noqa: F401 (re-exported)
+from mongo_db import close_mongo, db as _raw_db, fs_bucket  # noqa: F401 (re-exported)
+from motor_compat_pg import MotorCompatDb
+
+# Phase 3.4b: wrap the raw Motor db so the 8 retired collections
+# (messages, message_threads, form_templates, form_submissions,
+# soap_templates, lab_values, treatment_plans, treatments) transparently
+# route to PostgreSQL. All other collections still hit Mongo directly.
+db = MotorCompatDb(_raw_db)
 from postgres_db import AsyncSessionLocal
 from repositories import user_sessions as sessions_repo
 from repositories import users as users_repo

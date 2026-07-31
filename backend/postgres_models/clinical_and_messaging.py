@@ -77,7 +77,17 @@ class VisitNote(Base):
     )
 
 
-class TreatmentPlan(Base):
+class _PayloadMixin:
+    """Adds a JSONB `payload` column carrying router-provided fields that
+    aren't first-class columns on the table. Written/read by
+    `motor_compat_pg.MotorCompatCollection`."""
+
+    payload: Mapped[Optional[dict]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}",
+    )
+
+
+class TreatmentPlan(_PayloadMixin, Base):
     __tablename__ = "emr_treatment_plans"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     client_id: Mapped[Optional[str]] = mapped_column(
@@ -103,7 +113,7 @@ class TreatmentPlan(Base):
                                                   onupdate=_utcnow)
 
 
-class Treatment(Base):
+class Treatment(_PayloadMixin, Base):
     """Aesthetic / wellness treatments delivered at the front desk."""
     __tablename__ = "emr_treatments"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -122,7 +132,7 @@ class Treatment(Base):
     legacy_mongo_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
 
-class LabValue(Base):
+class LabValue(_PayloadMixin, Base):
     __tablename__ = "emr_lab_values"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     client_id: Mapped[Optional[str]] = mapped_column(
@@ -198,7 +208,7 @@ class ClinicalDelegation(Base):
 
 
 # ========================================================= Messaging =====
-class MessageThread(Base):
+class MessageThread(_PayloadMixin, Base):
     __tablename__ = "emr_message_threads"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     client_id: Mapped[Optional[str]] = mapped_column(
@@ -218,7 +228,7 @@ class MessageThread(Base):
     legacy_mongo_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
 
-class Message(Base):
+class Message(_PayloadMixin, Base):
     __tablename__ = "emr_messages"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     thread_id: Mapped[Optional[str]] = mapped_column(
@@ -235,7 +245,7 @@ class Message(Base):
     legacy_mongo_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
 
-class FormTemplate(Base):
+class FormTemplate(_PayloadMixin, Base):
     __tablename__ = "emr_form_templates"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -247,7 +257,7 @@ class FormTemplate(Base):
     legacy_mongo_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
 
-class FormSubmission(Base):
+class FormSubmission(_PayloadMixin, Base):
     __tablename__ = "emr_form_submissions"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     token: Mapped[Optional[str]] = mapped_column(String(128), nullable=True,
@@ -270,7 +280,7 @@ class FormSubmission(Base):
     legacy_mongo_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
 
-class SoapTemplate(Base):
+class SoapTemplate(_PayloadMixin, Base):
     __tablename__ = "emr_soap_templates"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
