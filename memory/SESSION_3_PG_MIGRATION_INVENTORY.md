@@ -5,10 +5,43 @@
 > session should carve out ONE row from the batch table below and treat it
 > as its entire scope.
 
-**Snapshot date**: 2026-07-31 (Phase 3.1b runtime cutover complete)
+**Snapshot date**: 2026-07-31 (Phase 3.2 scheduling runtime cutover complete)
 **Branch**: `auth-remove-google`
-**Last commit**: (about to commit Phase 3.1b)
-**Alembic head**: `b7e2c4d9a1f8`
+**Last commit**: (about to commit Phase 3.2)
+**Alembic head**: `c8f4a2e7b3d1`
+
+---
+
+## Session 3.2 — Scheduling Runtime Cutover Complete (2026-07-31)
+
+The following five MongoDB collections have been **dropped** after successful
+backfill + regression + smoke tests; verified they do NOT regenerate on
+backend restart or after normal HTTP traffic:
+
+| Collection             | Docs at drop | PG target                  |
+|------------------------|--------------|-----------------------------|
+| `appointments`         | 515          | `emr_appointments`          |
+| `appointment_requests` | 7            | `emr_appointment_requests`  |
+| `availability`         | 0            | `emr_availability`          |
+| `reminders`            | 401          | `emr_reminders`             |
+| `reminder_settings`    | 0            | `emr_reminder_settings`     |
+
+Migration artifacts:
+- Alembic revision `c8f4a2e7b3d1` (phase 3.2 scheduling)
+- `postgres_models/scheduling.py` — Appointment / AppointmentRequest /
+  Availability / Reminder / ReminderSettings models
+- `repositories/scheduling.py` — full CRUD + list_appointments_with_waiting_state
+- `scripts/phase3_2_backfill.py` (idempotent) — 923 rows migrated
+- `scripts/phase3_2_reconcile.py` — orphan-reference audit report
+
+All eight routers touching the retired collections were rewritten:
+`server.py`, `routers/appointments.py`, `routers/telehealth.py`,
+`routers/campaigns.py`, `routers/campaign_extras.py`,
+`routers/compliance.py`, `routers/portal_ops.py`, `routers/ops.py`,
+`routers/admin.py`.
+
+Regression tests: `tests/test_session3_2_scheduling.py` (6/6 pass)
+plus `tests/test_session3_1_clients.py` (6/6 pass, no regression).
 
 ---
 

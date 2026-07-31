@@ -3,6 +3,17 @@
 ## Original Problem Statement
 HIPAA-aligned wellness EMR for `natmedsol.com` (Natural Medical Solutions Wellness Center). Wellness office, **not** a medical practice. Single-tenant private app, not SaaS. Aesthetic adapted from medspa-concierge to NatMedSol's deep-green / parchment / gold palette.
 
+## Phase 3.2 — MongoDB → PostgreSQL Migration for Scheduling (2026-07-31) ⭐ NEW
+- **Full runtime cutover** of the Scheduling domain: `appointments`, `appointment_requests`, `availability`, `reminders`, `reminder_settings`. All eight routers that read/wrote these collections now route through `repositories.scheduling` on async SQLAlchemy: `routers/appointments.py`, `routers/telehealth.py`, `routers/campaigns.py`, `routers/campaign_extras.py`, `routers/portal_ops.py`, `routers/compliance.py`, `routers/ops.py`, `routers/admin.py`, and `server.py` (public appointment-request + staff review + recurrence + reminder loop).
+- **New Alembic head**: `c8f4a2e7b3d1` creates `emr_appointments`, `emr_appointment_requests`, `emr_availability`, `emr_reminders`, `emr_reminder_settings` with nullable FKs to `auth_users` / `emr_clients` (preserves legacy Mongo refs via `legacy_*` columns).
+- **New repository**: `repositories/scheduling.py` (Router → Repository → SQLAlchemy → PostgreSQL). Includes `list_appointments_with_waiting_state` for the telehealth waiting-room JSONB query and `push_appointment_recording` for the recordings JSONB array.
+- **New models**: `postgres_models/scheduling.py` exports `Appointment`, `AppointmentRequest`, `Availability`, `Reminder`, `ReminderSettings`.
+- **Backfill**: `scripts/phase3_2_backfill.py` (idempotent, dry-run, resumable, batched). Backfilled 515 appointments, 7 appointment_requests, 401 reminders. Orphan FKs surfaced via `legacy_client_id` / `legacy_practitioner_id` / `legacy_appointment_id`.
+- **Reconciliation report**: `scripts/phase3_2_reconcile.py` scans all remaining Mongo collections referencing `users` / `clients`; report saved to `/tmp/phase3_2_reconciliation.json`.
+- **5 Mongo collections dropped and verified non-regenerative**: `appointments` (515 docs), `appointment_requests` (7 docs), `reminders` (401 docs), `availability` (0), `reminder_settings` (0).
+- **Tests**: `tests/test_session3_2_scheduling.py` (6/6 pass) covers public request → PG, appointment CRUD + auto-reminder, singleton reminder settings, availability CRUD, dashboard stats, and reminder scheduler tick.
+- API contract preserved end-to-end.
+
 ## Phase 3.1b — MongoDB → PostgreSQL Migration for Identity & Patients (2026-07-31) ⭐ NEW
 - **Runtime cutover complete.** Every Mongo read/write for `users`, `clients`, `intake_forms`, `supplement_sheets`, `client_supplement_assignments`, and `password_reset_tokens` was replaced with PostgreSQL calls via a new `pg_shims.py` shim layer + repository methods.
 - **15 routers rewritten**: `server.py`, `permissions.py`, `routers/clients.py`, `routers/portal_ops.py`, `routers/telehealth.py`, `routers/appointments.py`, `routers/campaigns.py`, `routers/campaign_extras.py`, `routers/lab_review.py`, `routers/ops.py`, `routers/tasks.py`, `routers/health_track.py`, `routers/delegations.py`, `routers/compliance.py`, `routers/forms_protocols.py`, `routers/admin.py`.

@@ -42,6 +42,8 @@ from pg_shims import (
     invalidate_portal_reset_tokens, list_users_by_roles, search_clients,
     search_users, update_client as _pg_update_client, update_user,
 )
+from postgres_db import AsyncSessionLocal
+from repositories import scheduling as sched_repo
 
 
 _PORTAL_ADMIN_ROLES = ("admin", "practitioner", "staff", "front_desk", "frontdesk")
@@ -159,15 +161,18 @@ async def global_search(
             for u in users
         ]
 
-        # Appointments
-        appt_lookup = await db.appointments.find(
-            {"$or": [{"client_name": rx}, {"provider_name": rx}, {"visit_type": rx}, {"reason": rx}]},
-            {"id": 1, "client_name": 1, "provider_name": 1, "start_at": 1, "status": 1},
-        ).sort("start_at", -1).limit(limit).to_list(limit)
+        # Appointments — search by service string. Legacy `client_name`,
+        # `provider_name`, `visit_type`, `reason` fields do not exist in the
+        # PostgreSQL `emr_appointments` schema (Phase 3.2 cutover); recent
+        # appointments matching the query's `service` field are surfaced instead.
+        q_lower = query.lower()
+        async with AsyncSessionLocal() as pg:
+            all_appts = await sched_repo.list_appointments(pg, sort_desc=True, limit=200)
+        appt_lookup = [a for a in all_appts if q_lower in (a.get("service") or "").lower()][:limit]
         results["appointments"] = [
             {"id": a["id"],
-             "label": f"{a.get('client_name') or 'Patient'} · {a.get('provider_name') or ''}",
-             "sub": f"{(a.get('start_at').strftime('%b %d, %I:%M %p') if a.get('start_at') else '')} · {a.get('status', '')}",
+             "label": f"Appointment · {a.get('service') or ''}",
+             "sub": f"{(a.get('start').strftime('%b %d, %I:%M %p') if a.get('start') else '')} · {a.get('status', '')}",
              "url": f"/portal/{'admin' if role == 'admin' else ('provider' if role == 'practitioner' else 'staff')}/appointments"}
             for a in appt_lookup
         ]
@@ -187,14 +192,17 @@ async def global_search(
         # Client role: search only their own appointments + treatment plans / lab tests names.
         self_client = await find_client(user_id=user["id"])
         if self_client:
-            appts = await db.appointments.find(
-                {"client_id": self_client["id"], "$or": [{"visit_type": rx}, {"provider_name": rx}, {"reason": rx}]},
-                {"id": 1, "provider_name": 1, "start_at": 1, "visit_type": 1},
-            ).sort("start_at", -1).limit(limit).to_list(limit)
+            q_lower = query.lower()
+            async with AsyncSessionLocal() as pg:
+                own_appts = await sched_repo.list_appointments(
+                    pg, client_id=self_client["id"], sort_desc=True, limit=200,
+                )
+            appts = [a for a in own_appts
+                     if q_lower in (a.get("service") or "").lower()][:limit]
             results["appointments"] = [
                 {"id": a["id"],
-                 "label": f"{a.get('provider_name') or 'Provider'} · {a.get('visit_type') or ''}",
-                 "sub": a.get("start_at").strftime("%b %d, %I:%M %p") if a.get("start_at") else "",
+                 "label": f"Appointment · {a.get('service') or ''}",
+                 "sub": a.get("start").strftime("%b %d, %I:%M %p") if a.get("start") else "",
                  "url": "/portal/patient/appointments"}
                 for a in appts
             ]

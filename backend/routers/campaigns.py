@@ -29,6 +29,8 @@ from deps import _strip_id, api, db, require_roles
 from models import new_id
 from notifiers import email_status, send_email, send_sms, sms_status
 from pg_shims import list_clients_filtered_by_ids
+from postgres_db import AsyncSessionLocal
+from repositories import scheduling as sched_repo
 
 
 CHANNELS = ("email", "sms")
@@ -95,22 +97,19 @@ async def _resolve_recipients(filter_type: str, filter_params: dict) -> List[dic
     elif filter_type == "inactive":
         cutoff_days = int(filter_params.get("inactive_days", 90))
         cutoff = now - timedelta(days=cutoff_days)
-        active_client_ids = set()
-        async for a in db.appointments.find({"start": {"$gte": cutoff}},
-                                             {"client_id": 1}):
-            if a.get("client_id"):
-                active_client_ids.add(a["client_id"])
+        async with AsyncSessionLocal() as pg:
+            recent = await sched_repo.list_appointments(pg, start_gte=cutoff, limit=5000)
+        active_client_ids = {a["client_id"] for a in recent if a.get("client_id")}
         if active_client_ids:
             exclude_ids = list(active_client_ids)
     elif filter_type == "upcoming_appointments":
         horizon_days = int(filter_params.get("days_ahead", 14))
         window_end = now + timedelta(days=horizon_days)
-        client_ids = set()
-        async for a in db.appointments.find(
-            {"start": {"$gte": now, "$lte": window_end}}, {"client_id": 1}
-        ):
-            if a.get("client_id"):
-                client_ids.add(a["client_id"])
+        async with AsyncSessionLocal() as pg:
+            upcoming = await sched_repo.list_appointments(
+                pg, start_gte=now, start_lte=window_end, limit=5000,
+            )
+        client_ids = {a["client_id"] for a in upcoming if a.get("client_id")}
         if not client_ids:
             return []
         include_ids = list(client_ids)
@@ -119,9 +118,11 @@ async def _resolve_recipients(filter_type: str, filter_params: dict) -> List[dic
         # future appointment scheduled.
         since_days = int(filter_params.get("since_days", 60))
         cutoff = now - timedelta(days=since_days)
+        async with AsyncSessionLocal() as pg:
+            all_appts = await sched_repo.list_appointments(pg, limit=10000)
         stale_ids = set()
         future_ids = set()
-        async for a in db.appointments.find({}, {"client_id": 1, "start": 1}):
+        for a in all_appts:
             cid = a.get("client_id")
             if not cid:
                 continue

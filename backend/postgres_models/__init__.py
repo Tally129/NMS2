@@ -13,4 +13,11 @@ from .patient_profile import (  # noqa: F401
     ClientSupplementAssignment,
     LegacyPasswordResetToken,
 )
+from .scheduling import (  # noqa: F401
+    Appointment,
+    AppointmentRequest,
+    Availability,
+    Reminder,
+    ReminderSettings,
+)
 

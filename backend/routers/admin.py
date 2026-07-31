@@ -21,6 +21,7 @@ from permissions import P, require_permission
 from postgres_db import AsyncSessionLocal
 from postgres_models import AuditLog, User
 from repositories import audit as audit_repo
+from repositories import scheduling as sched_repo
 from repositories import user_sessions as sessions_repo
 from repositories import users as users_repo
 from pg_shims import count_clients
@@ -35,12 +36,13 @@ async def dashboard_stats(user=Depends(get_current_user)):
         async with AsyncSessionLocal() as pg:
             users_ct = int((await pg.execute(select(func.count(User.id)))).scalar_one())
             audit_ct = int((await pg.execute(select(func.count(AuditLog.id)))).scalar_one())
+            req_ct = await sched_repo.count_appointment_requests(pg)
         return {
             "role": role,
             "clients": await count_clients(),
             "notes": await db.visit_notes.count_documents({}),
             "files": await db.files.count_documents({}),
-            "appointments_requested": await db.appointment_requests.count_documents({}),
+            "appointments_requested": req_ct,
             "users": users_ct,
             "audit_events": audit_ct,
         }

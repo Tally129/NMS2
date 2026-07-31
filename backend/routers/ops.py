@@ -37,6 +37,8 @@ from pg_shims import (
     count_clients, find_client, find_intake_by_client, find_user_by_id,
     find_users_by_ids, insert_client, list_users_by_roles,
 )
+from postgres_db import AsyncSessionLocal
+from repositories import scheduling as sched_repo
 
 
 # =================== PHASE 4: TREATMENTS / INVENTORY / POS / TRANSACTIONS / TIME CLOCK / FRONT DESK / IMPORT / ACCOUNT ===================
@@ -229,9 +231,9 @@ async def pos_checkout(payload: PosCheckoutIn, request: Request,
         appt_updates = {"transaction_id": txn["id"]}
         if txn["status"] == "paid":
             appt_updates["status"] = "completed"
-        await db.appointments.update_one(
-            {"id": payload.appointment_id}, {"$set": appt_updates},
-        )
+        async with AsyncSessionLocal() as pg:
+            async with pg.begin():
+                await sched_repo.update_appointment(pg, payload.appointment_id, appt_updates)
         # Also flip the front-desk row to checked_out so the today view
         # collapses this visit into the "Completed" bucket.
         await db.front_desk_visits.update_many(
@@ -759,9 +761,8 @@ async def _hydrate_fd(v):
     }) > 0
     # Linked transaction (handoff #4) resolved by appointment_id.
     if v.get("appointment_id"):
-        appt = await db.appointments.find_one(
-            {"id": v["appointment_id"]}, {"transaction_id": 1},
-        )
+        async with AsyncSessionLocal() as pg:
+            appt = await sched_repo.get_appointment(pg, v["appointment_id"])
         if appt and appt.get("transaction_id"):
             v["transaction_id"] = appt["transaction_id"]
     return v
@@ -815,10 +816,9 @@ async def front_desk_update(vid: str, payload: FrontDeskUpdate, request: Request
     # (e.g. `scheduled`, `checked_out` — the POS path owns completion).
     mapped = _FD_TO_APPT_STATUS.get(payload.status) if payload.status else None
     if mapped and v_prev.get("appointment_id"):
-        await db.appointments.update_one(
-            {"id": v_prev["appointment_id"]},
-            {"$set": {"status": mapped}},
-        )
+        async with AsyncSessionLocal() as pg:
+            async with pg.begin():
+                await sched_repo.update_appointment(pg, v_prev["appointment_id"], {"status": mapped})
 
     v = await db.front_desk_visits.find_one({"id": vid})
     if not v:
@@ -916,17 +916,18 @@ async def analytics_overview(
     revenue_series = [{"date": d, "revenue": by_day[d]} for d in sorted(by_day)]
 
     # Appointments
-    appts = await db.appointments.find({
-        "start_time": {"$gte": start, "$lt": end},
-    }).to_list(2000)
+    async with AsyncSessionLocal() as pg:
+        appts = await sched_repo.list_appointments(
+            pg, start_gte=start, start_lte=end, limit=2000,
+        )
     no_show = [a for a in appts if a.get("status") == "no_show"]
     completed = [a for a in appts if a.get("status") in ("completed", "checked_out")]
     avg_duration = 0
     if completed:
         durations = []
         for a in completed:
-            if a.get("start_time") and a.get("end_time"):
-                durations.append((a["end_time"] - a["start_time"]).total_seconds() / 60)
+            if a.get("start") and a.get("end"):
+                durations.append((a["end"] - a["start"]).total_seconds() / 60)
         if durations:
             avg_duration = round(sum(durations) / len(durations), 1)
 

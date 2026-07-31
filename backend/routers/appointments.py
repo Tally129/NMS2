@@ -3,6 +3,8 @@ Phase 2: Appointments, Availability, Practitioners directory, Memberships,
 Invoices, Treatment Plans, Reminder settings.
 
 Extracted from server.py during Phase 16 refactor.
+Phase 3.2 (2026-07-31): appointments/availability/reminders/reminder_settings
+now live in PostgreSQL via `repositories.scheduling`.
 """
 from __future__ import annotations
 
@@ -27,6 +29,8 @@ from models import (
     ReminderSettings, new_id,
 )
 from pg_shims import find_client, find_user_by_id, list_users_by_role
+from postgres_db import AsyncSessionLocal
+from repositories import scheduling as sched_repo
 
 TIER_PRICES = {"essentials": 99.0, "core": 199.0, "vip": 299.0}
 
@@ -60,22 +64,16 @@ async def list_appointments(
     client_id: Optional[str] = None,
     user=Depends(get_current_user),
 ):
-    q = {}
     if user["role"] == "client":
         self_client = await _resolve_self_client(user)
         if not self_client:
             return []
-        q["client_id"] = self_client["id"]
-    else:
-        if client_id:
-            q["client_id"] = client_id
-        if practitioner_id:
-            q["practitioner_id"] = practitioner_id
-    if start:
-        q.setdefault("start", {})["$gte"] = start
-    if end:
-        q.setdefault("start", {})["$lte"] = end
-    items = await db.appointments.find(q).sort("start", 1).to_list(1000)
+        client_id = self_client["id"]
+    async with AsyncSessionLocal() as pg:
+        items = await sched_repo.list_appointments(
+            pg, client_id=client_id, practitioner_id=practitioner_id,
+            start_gte=start, start_lte=end, limit=1000,
+        )
     return [await _hydrate_appt(i) for i in items]
 
 
@@ -99,25 +97,29 @@ async def create_appointment(payload: AppointmentIn, request: Request, user=Depe
     doc["status"] = status_val
     doc["created_at"] = datetime.now(timezone.utc)
     doc["created_by"] = user["id"]
-    await db.appointments.insert_one(doc)
-
-    # Auto-schedule reminder (stubbed)
-    settings = await db.reminder_settings.find_one({"id": "singleton"}) or {}
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            doc = await sched_repo.create_appointment(pg, doc)
+    # Auto-schedule reminder (stubbed) — fresh session so the read/write
+    # cycle above's transaction is fully committed first.
+    async with AsyncSessionLocal() as pg:
+        settings = await sched_repo.get_reminder_settings(pg) or {}
     hours_before = settings.get("appointment_reminder_hours_before", 24)
-    channels = settings.get("appointment_reminder_channels", ["email"])
+    channels = settings.get("appointment_reminder_channels") or ["email"]
     if settings.get("enabled", True):
         scheduled_at = doc["start"] - timedelta(hours=hours_before)
-        for ch in channels:
-            await db.reminders.insert_one({
-                "id": new_id(),
-                "appointment_id": doc["id"],
-                "client_id": doc["client_id"],
-                "channel": ch,
-                "scheduled_at": scheduled_at,
-                "sent_at": None,
-                "status": "scheduled",
-                "created_at": datetime.now(timezone.utc),
-            })
+        async with AsyncSessionLocal() as pg:
+            async with pg.begin():
+                for ch in channels:
+                    await sched_repo.create_reminder(pg, {
+                        "id": new_id(),
+                        "appointment_id": doc["id"],
+                        "client_id": doc["client_id"],
+                        "channel": ch,
+                        "scheduled_at": scheduled_at,
+                        "sent_at": None,
+                        "status": "scheduled",
+                    })
 
     await log_audit(db, user["id"], user["email"], "appointment.create",
                     resource_type="appointment", resource_id=doc["id"],
@@ -129,7 +131,8 @@ async def create_appointment(payload: AppointmentIn, request: Request, user=Depe
 @api.put("/appointments/{appt_id}", response_model=AppointmentOut)
 async def update_appointment(appt_id: str, payload: AppointmentUpdate, request: Request,
                              user=Depends(get_current_user)):
-    a = await db.appointments.find_one({"id": appt_id})
+    async with AsyncSessionLocal() as pg:
+        a = await sched_repo.get_appointment(pg, appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     if user["role"] == "client":
@@ -142,7 +145,11 @@ async def update_appointment(appt_id: str, payload: AppointmentUpdate, request: 
         updates = {"status": "canceled"}
     else:
         updates = {k: v for k, v in payload.dict().items() if v is not None}
-    await db.appointments.update_one({"id": appt_id}, {"$set": updates})
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.update_appointment(pg, appt_id, updates)
+    async with AsyncSessionLocal() as pg:
+        a = await sched_repo.get_appointment(pg, appt_id)
     # Visit-started push: when telehealth appointment moves to in_session, ping the client
     if updates.get("status") == "in_session" and a.get("visit_mode") == "telehealth":
         client_doc = await find_client(client_id=a.get("client_id"))
@@ -158,20 +165,17 @@ async def update_appointment(appt_id: str, payload: AppointmentUpdate, request: 
                     resource_type="appointment", resource_id=appt_id,
                     metadata={"fields": list(updates.keys())},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    a = await db.appointments.find_one({"id": appt_id})
     return await _hydrate_appt(a)
 
 
 # ---------- Availability ----------
 @api.get("/availability", response_model=List[AvailabilityOut])
 async def list_availability(practitioner_id: Optional[str] = None, user=Depends(get_current_user)):
-    q = {}
-    if practitioner_id:
-        q["practitioner_id"] = practitioner_id
-    elif user["role"] == "practitioner":
-        q["practitioner_id"] = user["id"]
-    items = await db.availability.find(q).sort("weekday", 1).to_list(200)
-    return [_strip_id(i) for i in items]
+    if not practitioner_id and user["role"] == "practitioner":
+        practitioner_id = user["id"]
+    async with AsyncSessionLocal() as pg:
+        items = await sched_repo.list_availability(pg, practitioner_id=practitioner_id, limit=200)
+    return items
 
 
 @api.post("/availability", response_model=AvailabilityOut)
@@ -181,17 +185,21 @@ async def create_availability(payload: AvailabilityIn, request: Request,
     doc = payload.dict()
     doc["practitioner_id"] = pid
     doc["id"] = new_id()
-    await db.availability.insert_one(doc)
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            doc = await sched_repo.create_availability(pg, doc)
     await log_audit(db, user["id"], user["email"], "availability.create",
                     resource_type="availability", resource_id=doc["id"],
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    return _strip_id(doc)
+    return doc
 
 
 @api.delete("/availability/{avail_id}")
 async def delete_availability(avail_id: str, request: Request,
                               user=Depends(require_roles("practitioner", "admin"))):
-    await db.availability.delete_one({"id": avail_id})
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.delete_availability(pg, avail_id)
     await log_audit(db, user["id"], user["email"], "availability.delete",
                     resource_type="availability", resource_id=avail_id,
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
@@ -210,16 +218,19 @@ async def availability_slots(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid date")
     weekday = d.weekday()
-    rules = await db.availability.find({"practitioner_id": practitioner_id, "weekday": weekday, "active": True}).to_list(50)
-    if not rules:
-        return {"date": date, "slots": []}
-    day_start = d.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end = day_start + timedelta(days=1)
-    taken = await db.appointments.find({
-        "practitioner_id": practitioner_id,
-        "start": {"$gte": day_start, "$lt": day_end},
-        "status": {"$in": ["requested", "confirmed"]},
-    }).to_list(200)
+    async with AsyncSessionLocal() as pg:
+        rules = await sched_repo.list_availability(
+            pg, practitioner_id=practitioner_id, weekday=weekday,
+            active_only=True, limit=50,
+        )
+        if not rules:
+            return {"date": date, "slots": []}
+        day_start = d.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        taken = await sched_repo.find_overlapping_appointments(
+            pg, practitioner_id=practitioner_id,
+            start=day_start, end=day_end,
+        )
     slots = []
     for r in rules:
         sh, sm = map(int, r["start_time"].split(":"))
@@ -585,7 +596,8 @@ async def amend_plan(plan_id: str, payload: dict, request: Request,
 # ---------- Reminder settings ----------
 @api.get("/reminders/settings", response_model=ReminderSettings)
 async def get_reminder_settings(user=Depends(require_roles("admin"))):
-    s = await db.reminder_settings.find_one({"id": "singleton"})
+    async with AsyncSessionLocal() as pg:
+        s = await sched_repo.get_reminder_settings(pg)
     if not s:
         return ReminderSettings()
     return ReminderSettings(**{k: v for k, v in s.items() if k in ReminderSettings.model_fields})
@@ -593,8 +605,9 @@ async def get_reminder_settings(user=Depends(require_roles("admin"))):
 
 @api.put("/reminders/settings", response_model=ReminderSettings)
 async def set_reminder_settings(payload: ReminderSettings, request: Request, user=Depends(require_roles("admin"))):
-    doc = {"id": "singleton", **payload.dict()}
-    await db.reminder_settings.update_one({"id": "singleton"}, {"$set": doc}, upsert=True)
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.upsert_reminder_settings(pg, payload.dict())
     await log_audit(db, user["id"], user["email"], "reminders.settings_update",
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return payload
@@ -604,7 +617,8 @@ async def set_reminder_settings(payload: ReminderSettings, request: Request, use
 async def run_reminders(user=Depends(require_roles("admin"))):
     """Manually tick the reminder scheduler: send due reminders (stubbed)."""
     now = datetime.now(timezone.utc)
-    due = await db.reminders.find({"status": "scheduled", "scheduled_at": {"$lte": now}}).to_list(200)
+    async with AsyncSessionLocal() as pg:
+        due = await sched_repo.list_due_reminders(pg, now=now, limit=200)
     sent = 0
     for r in due:
         # Stubbed send via SendGrid/Twilio
@@ -615,7 +629,9 @@ async def run_reminders(user=Depends(require_roles("admin"))):
             "payload": {"appointment_id": r["appointment_id"], "client_id": r["client_id"]},
             "_stubbed": True, "ts": now,
         })
-        await db.reminders.update_one({"id": r["id"]}, {"$set": {"status": "sent", "sent_at": now}})
+        async with AsyncSessionLocal() as pg:
+            async with pg.begin():
+                await sched_repo.mark_reminder_sent(pg, r["id"], now)
         sent += 1
     return {"processed": sent}
 

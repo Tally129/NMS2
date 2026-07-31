@@ -65,6 +65,8 @@ from deps import (
     close_mongo,
 )
 from pg_shims import find_client, find_user_by_email, insert_user, list_users_by_roles, update_user
+from postgres_db import AsyncSessionLocal
+from repositories import scheduling as sched_repo
 
 # Register modular routers (side-effect: each file adds routes to `api`)
 from routers import auth as _auth_routes  # noqa: F401
@@ -103,10 +105,11 @@ app = FastAPI(title="NatMedSol EMR API")
 async def public_appointment_request(payload: AppointmentRequestIn, request: Request):
     doc = payload.dict()
     doc["id"] = new_id()
-    doc["created_at"] = datetime.now(timezone.utc)
     doc["status"] = "new"
     doc["ip"] = get_client_ip(request)
-    await db.appointment_requests.insert_one(doc)
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            doc = await sched_repo.create_appointment_request(pg, doc)
     from notifiers import send_email as _send_email
     _delivery = await _send_email(
         db=db,
@@ -134,9 +137,9 @@ async def public_appointment_request(payload: AppointmentRequestIn, request: Req
 @api.get("/appointment-requests")
 async def list_appointment_requests(status: Optional[str] = None,
                                     user=Depends(require_roles("admin", "staff", "front_desk", "frontdesk"))):
-    q = {"status": status} if status else {}
-    rows = await db.appointment_requests.find(q).sort("created_at", -1).to_list(200)
-    return [_strip_id(r) for r in rows]
+    async with AsyncSessionLocal() as pg:
+        rows = await sched_repo.list_appointment_requests(pg, status=status, limit=200)
+    return rows
 
 
 async def _notify_patient(req_row: dict, action: str, extra: dict | None = None):
@@ -164,14 +167,18 @@ async def _notify_patient(req_row: dict, action: str, extra: dict | None = None)
 @api.post("/appointment-requests/{req_id}/approve")
 async def approve_request(req_id: str, request: Request,
                           user=Depends(require_roles("admin", "staff", "front_desk", "frontdesk"))):
-    req = await db.appointment_requests.find_one({"id": req_id})
+    async with AsyncSessionLocal() as pg:
+        req = await sched_repo.get_appointment_request(pg, req_id)
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
     if req.get("status") == "approved":
         return {"ok": True, "already_approved": True}
     now = datetime.now(timezone.utc)
-    await db.appointment_requests.update_one({"id": req_id},
-        {"$set": {"status": "approved", "reviewed_at": now, "reviewed_by": user["id"]}})
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.update_appointment_request(pg, req_id, {
+                "status": "approved", "reviewed_at": now, "reviewed_by": user["id"],
+            })
     delivery = await _notify_patient(req, "approve")
     await log_audit(db, user["id"], user["email"], "appointment_request.approve",
                     resource_type="appointment_request", resource_id=req_id,
@@ -184,14 +191,18 @@ async def approve_request(req_id: str, request: Request,
 @api.post("/appointment-requests/{req_id}/decline")
 async def decline_request(req_id: str, request: Request, payload: dict = None,
                           user=Depends(require_roles("admin", "staff", "front_desk", "frontdesk"))):
-    req = await db.appointment_requests.find_one({"id": req_id})
+    async with AsyncSessionLocal() as pg:
+        req = await sched_repo.get_appointment_request(pg, req_id)
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
     reason = str((payload or {}).get("reason") or "")
     now = datetime.now(timezone.utc)
-    await db.appointment_requests.update_one({"id": req_id},
-        {"$set": {"status": "declined", "reviewed_at": now, "reviewed_by": user["id"],
-                  "decline_reason": reason}})
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.update_appointment_request(pg, req_id, {
+                "status": "declined", "reviewed_at": now, "reviewed_by": user["id"],
+                "decline_reason": reason,
+            })
     delivery = await _notify_patient(req, "decline")
     await log_audit(db, user["id"], user["email"], "appointment_request.decline",
                     resource_type="appointment_request", resource_id=req_id,
@@ -204,16 +215,20 @@ async def decline_request(req_id: str, request: Request, payload: dict = None,
 @api.post("/appointment-requests/{req_id}/reschedule")
 async def reschedule_request(req_id: str, payload: dict, request: Request,
                              user=Depends(require_roles("admin", "staff", "front_desk", "frontdesk"))):
-    req = await db.appointment_requests.find_one({"id": req_id})
+    async with AsyncSessionLocal() as pg:
+        req = await sched_repo.get_appointment_request(pg, req_id)
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
     suggested = str((payload or {}).get("suggested_time") or "")
     if not suggested:
         raise HTTPException(status_code=400, detail="suggested_time is required")
     now = datetime.now(timezone.utc)
-    await db.appointment_requests.update_one({"id": req_id},
-        {"$set": {"status": "reschedule_proposed", "reviewed_at": now,
-                  "reviewed_by": user["id"], "suggested_time": suggested}})
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.update_appointment_request(pg, req_id, {
+                "status": "reschedule_proposed", "reviewed_at": now,
+                "reviewed_by": user["id"], "suggested_time": suggested,
+            })
     delivery = await _notify_patient(req, "reschedule", {"suggested_time": suggested})
     await log_audit(db, user["id"], user["email"], "appointment_request.reschedule",
                     resource_type="appointment_request", resource_id=req_id,
@@ -269,38 +284,46 @@ async def set_recurrence(appt_id: str, payload: dict,
     """Generate a recurring series. Body: {pattern: 'weekly'|'biweekly'|'monthly', count: int}"""
     pattern = payload.get("pattern", "weekly")
     count = max(1, min(int(payload.get("count", 4)), 26))
-    parent = await db.appointments.find_one({"id": appt_id})
+    async with AsyncSessionLocal() as pg:
+        parent = await sched_repo.get_appointment(pg, appt_id)
     if not parent:
         raise HTTPException(status_code=404, detail="Appointment not found")
     series_id = parent.get("series_id") or new_id()
-    await db.appointments.update_one({"id": appt_id}, {"$set": {"series_id": series_id, "series_pattern": pattern}})
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.update_appointment(pg, appt_id, {
+                "series_id": series_id, "series_pattern": pattern,
+            })
 
     delta_days = {"weekly": 7, "biweekly": 14}.get(pattern)
     use_months = pattern == "monthly"
     created = []
     base_start = parent["start"]
     base_end = parent["end"]
-    for i in range(1, count + 1):
-        if use_months:
-            try:
-                from dateutil.relativedelta import relativedelta
-                new_start = base_start + relativedelta(months=i)
-                new_end = base_end + relativedelta(months=i)
-            except ImportError:
-                new_start = base_start + timedelta(days=30 * i)
-                new_end = base_end + timedelta(days=30 * i)
-        else:
-            new_start = base_start + timedelta(days=delta_days * i)
-            new_end = base_end + timedelta(days=delta_days * i)
-        doc = {**{k: v for k, v in parent.items() if k != "_id"},
-               "id": new_id(),
-               "start": new_start, "end": new_end,
-               "series_id": series_id,
-               "series_pattern": pattern,
-               "status": "scheduled",
-               "created_at": datetime.now(timezone.utc)}
-        await db.appointments.insert_one(doc)
-        created.append(doc["id"])
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            for i in range(1, count + 1):
+                if use_months:
+                    try:
+                        from dateutil.relativedelta import relativedelta
+                        new_start = base_start + relativedelta(months=i)
+                        new_end = base_end + relativedelta(months=i)
+                    except ImportError:
+                        new_start = base_start + timedelta(days=30 * i)
+                        new_end = base_end + timedelta(days=30 * i)
+                else:
+                    new_start = base_start + timedelta(days=delta_days * i)
+                    new_end = base_end + timedelta(days=delta_days * i)
+                doc = {k: v for k, v in parent.items()
+                       if k not in {"id", "created_at", "updated_at"}}
+                doc.update({
+                    "id": new_id(),
+                    "start": new_start, "end": new_end,
+                    "series_id": series_id, "series_pattern": pattern,
+                    "status": "scheduled",
+                })
+                await sched_repo.create_appointment(pg, doc)
+                created.append(doc["id"])
     await log_audit(db, user["id"], user["email"], "appointment.recurrence",
                     resource_type="appointment", resource_id=appt_id,
                     metadata={"pattern": pattern, "count": count, "series_id": series_id})
@@ -312,11 +335,10 @@ async def cancel_series(series_id: str,
                          user=Depends(require_roles("practitioner", "admin", "staff"))):
     """Cancel all FUTURE appointments in a series."""
     now = datetime.now(timezone.utc)
-    res = await db.appointments.update_many(
-        {"series_id": series_id, "start": {"$gte": now}, "status": {"$ne": "completed"}},
-        {"$set": {"status": "canceled"}},
-    )
-    return {"cancelled": res.modified_count}
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            n = await sched_repo.bulk_cancel_series(pg, series_id, now)
+    return {"cancelled": n}
 
 
 # ---------- Inventory lots / expiration ----------
@@ -405,12 +427,13 @@ async def _appointment_reminder_loop():
             now = datetime.now(timezone.utc)
             window_start = now + timedelta(minutes=55)
             window_end = now + timedelta(minutes=65)
-            cursor = db.appointments.find({
-                "start": {"$gte": window_start, "$lte": window_end},
-                "status": {"$in": ["scheduled", "confirmed", "requested"]},
-                "reminder_sent_at": {"$exists": False},
-            })
-            async for a in cursor:
+            async with AsyncSessionLocal() as pg:
+                appts = await sched_repo.list_appointments(
+                    pg, start_gte=window_start, start_lte=window_end,
+                    status_in=["scheduled", "confirmed", "requested"],
+                    reminder_not_sent=True, limit=500,
+                )
+            for a in appts:
                 client = await find_client(client_id=a.get("client_id"))
                 if not client or not client.get("user_id"):
                     continue
@@ -423,10 +446,9 @@ async def _appointment_reminder_loop():
                     f"{mode} visit at {start_local}",
                     url=url, tag=f"appt-{a['id']}",
                 )
-                await db.appointments.update_one(
-                    {"id": a["id"]},
-                    {"$set": {"reminder_sent_at": now}},
-                )
+                async with AsyncSessionLocal() as pg:
+                    async with pg.begin():
+                        await sched_repo.update_appointment(pg, a["id"], {"reminder_sent_at": now})
         except Exception as e:
             logger.warning("reminder loop tick failed: %s", e)
         await _asyncio.sleep(300)  # 5 min

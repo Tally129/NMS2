@@ -16,6 +16,8 @@ from deps import (
 )
 from models import new_id
 from pg_shims import list_all_assignments_for_client
+from postgres_db import AsyncSessionLocal
+from repositories import scheduling as sched_repo
 
 
 @api.get("/compliance/baa-checklist")
@@ -75,11 +77,13 @@ async def patient_data_export(request: Request, user=Depends(get_current_user)):
     if not self_c:
         raise HTTPException(status_code=404, detail="No client record linked")
     cid = self_c["id"]
+    async with AsyncSessionLocal() as pg:
+        client_appts = await sched_repo.list_appointments(pg, client_id=cid, limit=1000)
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "patient": _strip_id(self_c),
         "user_account": {k: user.get(k) for k in ("id", "email", "full_name", "role", "created_at")},
-        "appointments": [_strip_id(a) async for a in db.appointments.find({"client_id": cid})],
+        "appointments": client_appts,
         "visit_notes": [_strip_id(n) async for n in db.visit_notes.find({"client_id": cid})],
         "treatment_plans": [_strip_id(t) async for t in db.treatment_plans.find({"client_id": cid})],
         "protocol_enrollments": [_strip_id(p) async for p in db.protocol_enrollments.find({"client_id": cid})],

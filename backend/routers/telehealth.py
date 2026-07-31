@@ -29,6 +29,21 @@ from deps import (
 from models import TelehealthConsentIn, new_id
 from auth_utils import decode_token
 from pg_shims import find_client, find_intake_by_client, find_user_by_id
+from postgres_db import AsyncSessionLocal
+from repositories import scheduling as sched_repo
+
+
+async def _get_appt(appt_id: str):
+    """Wrapper: fetch an appointment as a dict from PostgreSQL."""
+    async with AsyncSessionLocal() as pg:
+        return await sched_repo.get_appointment(pg, appt_id)
+
+
+async def _update_appt(appt_id: str, fields: dict) -> int:
+    """Wrapper: update an appointment row. Returns rowcount."""
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            return await sched_repo.update_appointment(pg, appt_id, fields)
 
 
 # ---------- Waiting room helpers ----------
@@ -51,7 +66,7 @@ def _serialize_waiting_room(wr: Optional[dict]) -> dict:
 
 
 async def _appointment_or_404(appt_id: str) -> dict:
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     return a
@@ -136,7 +151,7 @@ async def create_telehealth_room(
     request: Request,
     user=Depends(require_roles("practitioner", "admin", "staff")),
 ):
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     if a.get("telehealth", {}).get("room_url"):
@@ -150,7 +165,7 @@ async def create_telehealth_room(
         "created_at": datetime.now(timezone.utc),
         "_stubbed": info.get("_stubbed", False),
     }
-    await db.appointments.update_one({"id": appt_id}, {"$set": {"telehealth": telehealth, "visit_mode": "telehealth"}})
+    await _update_appt(appt_id, {"telehealth": telehealth, "visit_mode": "telehealth"})
     await db.integration_log.insert_one({
         "id": new_id(), "service": "daily", "action": "room.create",
         "payload": {"appointment_id": appt_id, "room_name": room_name},
@@ -164,7 +179,7 @@ async def create_telehealth_room(
 
 @api.get("/appointments/{appt_id}/telehealth/token")
 async def get_telehealth_token(appt_id: str, request: Request, user=Depends(get_current_user)):
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     # Access gate
@@ -189,7 +204,7 @@ async def get_telehealth_token(appt_id: str, request: Request, user=Depends(get_
             "created_at": datetime.now(timezone.utc),
             "_stubbed": info.get("_stubbed", False),
         }
-        await db.appointments.update_one({"id": appt_id}, {"$set": {"telehealth": telehealth}})
+        await _update_appt(appt_id, {"telehealth": telehealth})
 
     is_owner = user["role"] in ("practitioner", "admin", "staff")
     tok = await daily_meeting_token(telehealth["room_name"], is_owner=is_owner, user_name=user.get("full_name") or user["email"])
@@ -207,18 +222,18 @@ async def get_telehealth_token(appt_id: str, request: Request, user=Depends(get_
 
 @api.post("/appointments/{appt_id}/telehealth/consent")
 async def telehealth_consent(appt_id: str, payload: TelehealthConsentIn, request: Request, user=Depends(get_current_user)):
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     if user["role"] == "client":
         self_client = await _resolve_self_client(user)
         if not self_client or a["client_id"] != self_client["id"]:
             raise HTTPException(status_code=403, detail="Forbidden")
-    await db.appointments.update_one({"id": appt_id}, {"$set": {
+    await _update_appt(appt_id, {
         "consent_telehealth": True,
         "consent_telehealth_at": datetime.now(timezone.utc),
         "consent_telehealth_signature": payload.signature,
-    }})
+    })
     await log_audit(db, user["id"], user["email"], "telehealth.consent",
                     resource_type="appointment", resource_id=appt_id,
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
@@ -268,7 +283,7 @@ async def request_join(appt_id: str, request: Request, user=Depends(get_current_
         "ended_at": None,
         "ended_by": None,
     }
-    await db.appointments.update_one({"id": appt_id}, {"$set": {"waiting_room": wr}})
+    await _update_appt(appt_id, {"waiting_room": wr})
     await log_audit(db, user["id"], user["email"], "telehealth.waiting_room_request",
                     resource_type="appointment", resource_id=appt_id,
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
@@ -289,7 +304,7 @@ async def admit_visitor(appt_id: str, request: Request,
         })
     now = datetime.now(timezone.utc)
     new_wr = {**wr, "state": "admitted", "admitted_at": now, "admitted_by": user["id"]}
-    await db.appointments.update_one({"id": appt_id}, {"$set": {"waiting_room": new_wr}})
+    await _update_appt(appt_id, {"waiting_room": new_wr})
     await log_audit(db, user["id"], user["email"], "telehealth.waiting_room_admit",
                     resource_type="appointment", resource_id=appt_id,
                     severity="info",
@@ -320,7 +335,7 @@ async def decline_visitor(appt_id: str, payload: dict, request: Request,
     now = datetime.now(timezone.utc)
     new_wr = {**wr, "state": "declined", "declined_at": now,
               "decline_reason": reason, "declined_by": user["id"]}
-    await db.appointments.update_one({"id": appt_id}, {"$set": {"waiting_room": new_wr}})
+    await _update_appt(appt_id, {"waiting_room": new_wr})
     await log_audit(db, user["id"], user["email"], "telehealth.waiting_room_decline",
                     resource_type="appointment", resource_id=appt_id,
                     severity="high", outcome="success",
@@ -338,7 +353,7 @@ async def end_visit(appt_id: str, request: Request,
     wr = a.get("waiting_room") or {}
     now = datetime.now(timezone.utc)
     new_wr = {**wr, "state": "ended", "ended_at": now, "ended_by": user["id"]}
-    await db.appointments.update_one({"id": appt_id}, {"$set": {"waiting_room": new_wr}})
+    await _update_appt(appt_id, {"waiting_room": new_wr})
     await log_audit(db, user["id"], user["email"], "telehealth.waiting_room_end",
                     resource_type="appointment", resource_id=appt_id,
                     metadata={"client_id": a.get("client_id")},
@@ -363,9 +378,10 @@ async def waiting_room_status(appt_id: str, user=Depends(get_current_user)):
 @api.get("/telehealth/waiting-room/queue")
 async def waiting_room_queue(user=Depends(require_roles("practitioner", "admin", "staff", "medical_assistant"))):
     """Provider-facing queue: appointments with a client in the waiting room."""
-    rows = await db.appointments.find(
-        {"waiting_room.state": "requested"}
-    ).sort("waiting_room.request_at", 1).to_list(200)
+    async with AsyncSessionLocal() as pg:
+        rows = await sched_repo.list_appointments_with_waiting_state(
+            pg, state="requested", limit=200,
+        )
     out = []
     for a in rows:
         client = await find_client(client_id=a.get("client_id")) or {}
@@ -409,7 +425,7 @@ async def ws_visit(websocket: WebSocket, appt_id: str,
         await websocket.close(code=4401)
         return
 
-    appt = await db.appointments.find_one({"id": appt_id})
+    appt = await _get_appt(appt_id)
     if not appt:
         await websocket.close(code=4404)
         return
@@ -458,7 +474,7 @@ async def ws_visit(websocket: WebSocket, appt_id: str,
             t = data.get("type")
             # WebRTC signaling is BLOCKED until the provider admits the client.
             if t in ("webrtc-offer", "webrtc-answer", "ice-candidate", "screen-share"):
-                fresh = await db.appointments.find_one({"id": appt_id})
+                fresh = await _get_appt(appt_id)
                 wr_state = ((fresh or {}).get("waiting_room") or {}).get("state")
                 if wr_state != "admitted":
                     try:
@@ -516,7 +532,7 @@ async def ws_visit(websocket: WebSocket, appt_id: str,
 @api.get("/visits/{appt_id}/chat")
 async def visit_chat_history(appt_id: str, user=Depends(get_current_user)):
     """Recent chat history for a visit (self-hosted)."""
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     if user["role"] == "client":
@@ -535,7 +551,7 @@ async def upload_visit_recording(
     file: UploadFile = File(...),
     user=Depends(require_roles("practitioner", "admin", "staff")),
 ):
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     contents = await file.read()
@@ -545,10 +561,12 @@ async def upload_visit_recording(
         metadata={"appointment_id": appt_id, "uploader_id": user["id"], "kind": "visit_recording"},
     )
     fid = str(file_id)
-    await db.appointments.update_one({"id": appt_id}, {"$push": {"recordings": {
-        "file_id": fid, "size": len(contents), "uploaded_by": user["id"],
-        "ts": datetime.now(timezone.utc),
-    }}})
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.push_appointment_recording(pg, appt_id, {
+                "file_id": fid, "size": len(contents), "uploaded_by": user["id"],
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
     await log_audit(db, user["id"], user["email"], "telehealth.recording_upload",
                     resource_type="appointment", resource_id=appt_id,
                     metadata={"size": len(contents)},
@@ -559,7 +577,7 @@ async def upload_visit_recording(
 @api.get("/visits/{appt_id}/recordings")
 async def list_visit_recordings(appt_id: str, user=Depends(get_current_user)):
     """List recordings attached to an appointment."""
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     if user["role"] == "client":
@@ -582,7 +600,7 @@ async def list_visit_recordings(appt_id: str, user=Depends(get_current_user)):
 async def download_visit_recording(appt_id: str, file_id: str, request: Request,
                                    user=Depends(get_current_user)):
     """Stream a recorded visit WebM from GridFS. RBAC: client may only access their own."""
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     if user["role"] == "client":
@@ -627,7 +645,7 @@ import secrets as _secrets
 @api.post("/visits/{appt_id}/ws-ticket")
 async def issue_ws_ticket(appt_id: str, user=Depends(get_current_user)):
     """Issue a one-shot ticket (60s TTL) so the WebSocket handshake never carries a JWT."""
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     if user["role"] == "client":
@@ -668,7 +686,7 @@ async def webrtc_config(user=Depends(get_current_user)):
 @api.put("/visits/{appt_id}/live-soap")
 async def save_live_soap(appt_id: str, payload: dict,
                           user=Depends(require_roles("practitioner", "admin"))):
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     update = {
@@ -699,7 +717,7 @@ async def get_live_soap(appt_id: str, user=Depends(require_roles("practitioner",
 @api.post("/visits/{appt_id}/auto-draft")
 async def auto_draft_summary(appt_id: str, user=Depends(require_roles("practitioner", "admin"))):
     """Stitch chat transcript into a SOAP-shaped draft (rule-based, no LLM)."""
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     msgs = await db.visit_chat.find({"appointment_id": appt_id}).sort("ts", 1).to_list(500)
@@ -723,7 +741,7 @@ async def auto_draft_summary(appt_id: str, user=Depends(require_roles("practitio
 @api.post("/visits/{appt_id}/llm-soap")
 async def llm_soap_draft(appt_id: str, user=Depends(require_roles("practitioner", "admin"))):
     """Use Claude Sonnet 4.5 to draft a SOAP note from intake + last note + chat."""
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     client = await find_client(client_id=a.get("client_id"))

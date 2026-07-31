@@ -27,6 +27,8 @@ from audit import get_client_ip, log_audit
 from deps import api, db, get_current_user, require_roles
 from models import new_id
 from pg_shims import bulk_clear_marketing_consent, count_clients
+from postgres_db import AsyncSessionLocal
+from repositories import scheduling as sched_repo
 from routers.campaigns import (
     CHANNELS, FILTER_TYPES,
     _build_context, _fill_variables, _render_html, _render_plain,
@@ -621,8 +623,9 @@ async def segment_estimate(payload: SegmentEstimateIn,
     if ft == "active_patients":
         days = int(p.get("days", 90))
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        ids = {a["client_id"] async for a in db.appointments.find(
-            {"start": {"$gte": cutoff}}, {"client_id": 1}) if a.get("client_id")}
+        async with AsyncSessionLocal() as pg:
+            recent = await sched_repo.list_appointments(pg, start_gte=cutoff, limit=5000)
+        ids = {a["client_id"] for a in recent if a.get("client_id")}
         total = len(ids)
     elif ft == "new_patients":
         days = int(p.get("days", 30))
