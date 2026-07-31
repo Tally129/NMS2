@@ -181,8 +181,10 @@ async def push_to_user(user_id, title, body, url="/portal", tag=None):
     """Best-effort push to all active subscriptions for a user."""
     if not os.environ.get("VAPID_PRIVATE_KEY"):
         return 0
-    from deps import db  # lazy import to break the router→server cycle
-    subs = await db.push_subscriptions.find({"user_id": user_id}).to_list(20)
+    from postgres_db import AsyncSessionLocal
+    from repositories import clinical_and_messaging as cm_repo
+    async with AsyncSessionLocal() as pg:
+        subs = await cm_repo.list_push_subscriptions(pg, user_id)
     sent = 0
     payload = {"title": title, "body": body, "url": url, "tag": tag or title}
     dead = []
@@ -193,5 +195,8 @@ async def push_to_user(user_id, title, body, url="/portal", tag=None):
         else:
             dead.append(s["endpoint"])
     if dead:
-        await db.push_subscriptions.delete_many({"endpoint": {"$in": dead}})
+        async with AsyncSessionLocal() as pg:
+            async with pg.begin():
+                for ep in dead:
+                    await cm_repo.delete_push_subscription(pg, ep)
     return sent

@@ -392,15 +392,13 @@ async def push_subscribe(payload: dict, user=Depends(get_current_user)):
     sub = payload.get("subscription") or payload  # accept either shape
     if not sub.get("endpoint"):
         raise HTTPException(status_code=400, detail="Missing subscription endpoint")
-    await db.push_subscriptions.update_one(
-        {"user_id": user["id"], "endpoint": sub["endpoint"]},
-        {"$set": {
-            "user_id": user["id"], "endpoint": sub["endpoint"],
-            "keys": sub.get("keys", {}),
-            "updated_at": datetime.now(timezone.utc),
-        }, "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
-        upsert=True,
-    )
+    from repositories import clinical_and_messaging as _cm
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await _cm.upsert_push_subscription(
+                pg, user_id=user["id"], endpoint=sub["endpoint"],
+                keys=sub.get("keys", {}), new_id_fn=new_id,
+            )
     return {"ok": True}
 
 
@@ -408,7 +406,10 @@ async def push_subscribe(payload: dict, user=Depends(get_current_user)):
 async def push_unsubscribe(payload: dict, user=Depends(get_current_user)):
     endpoint = payload.get("endpoint")
     if endpoint:
-        await db.push_subscriptions.delete_one({"user_id": user["id"], "endpoint": endpoint})
+        from repositories import clinical_and_messaging as _cm
+        async with AsyncSessionLocal() as pg:
+            async with pg.begin():
+                await _cm.delete_push_subscription(pg, endpoint)
     return {"ok": True}
 
 
@@ -531,12 +532,11 @@ async def seed_demo():
     try:
         # Phase 3.1b: users/clients/intake_forms/client_supplement_assignments
         # live in PostgreSQL now. Only Mongo-resident collections keep indexes here.
-        await db.visit_notes.create_index("client_id")
+        # visit_notes lives in PostgreSQL now (Phase 3.3); indexes are managed by Alembic.
         await db.files.create_index("client_id")
         # Session 3.0b: audit_logs / security_events live in PostgreSQL now;
         # Mongo mirrors were dropped after the compliance viewer was cut over.
         await db.ws_tickets.create_index("expires_at", expireAfterSeconds=0)
-        await db.push_subscriptions.create_index([("user_id", 1), ("endpoint", 1)], unique=True)
         await db.form_templates.create_index([("builtin", 1), ("title", 1)])
         await db.form_submissions.create_index("token", unique=True)
         await db.form_submissions.create_index("client_id")
@@ -550,7 +550,8 @@ async def seed_demo():
         await db.breakglass_sessions.create_index("expires_at")
         await db.breakglass_sessions.create_index("target_client_id")
         await db.files.create_index("deleted_at")
-        await db.visit_notes.create_index("status")
+        # visit_notes lives in PostgreSQL now (Phase 3.3).
+        pass
     except Exception as e:
         logger.warning("Index creation warning: %s", e)
 

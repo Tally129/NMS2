@@ -19,7 +19,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from deps import db
+from postgres_db import AsyncSessionLocal
+from repositories import clinical_and_messaging as cm_repo
 
 
 ELIGIBLE_DELEGATE_ROLES = {"medical_assistant", "admin"}
@@ -39,20 +40,34 @@ async def has_active_delegation(
     role = user.get("role")
     if role not in ELIGIBLE_DELEGATE_ROLES:
         return None
-    now = datetime.now(timezone.utc)
-    query: dict = {
-        "delegate_id": user["id"],
-        "expires_at": {"$gt": now},
-        "revoked_at": None,
-    }
-    if provider_id:
-        query["provider_id"] = provider_id
-    # Match blanket delegation (client_id is None) OR client-scoped.
-    if client_id:
-        query["$or"] = [{"client_id": client_id}, {"client_id": None}]
-    else:
-        query["client_id"] = None
-    return await db.clinical_delegations.find_one(query)
+    async with AsyncSessionLocal() as pg:
+        if client_id:
+            deleg = await cm_repo.find_active_delegation(
+                pg, delegate_id=user["id"], client_id=client_id,
+            )
+            if deleg:
+                if provider_id and deleg.get("provider_id") != provider_id:
+                    return None
+                return deleg
+            # Fall through to blanket search (client_id NULL)
+        # Blanket delegation: client_id IS NULL — issue a manual query.
+        from sqlalchemy import select
+        from postgres_models.clinical_and_messaging import ClinicalDelegation
+        now = datetime.now(timezone.utc)
+        stmt = select(ClinicalDelegation).where(
+            ClinicalDelegation.delegate_id == user["id"],
+            ClinicalDelegation.client_id.is_(None),
+            ClinicalDelegation.active.is_(True),
+        )
+        if provider_id:
+            stmt = stmt.where(ClinicalDelegation.provider_id == provider_id)
+        stmt = stmt.order_by(ClinicalDelegation.created_at.desc()).limit(1)
+        row = (await pg.execute(stmt)).scalar_one_or_none()
+        if not row:
+            return None
+        if row.expires_at and row.expires_at <= now:
+            return None
+        return cm_repo.delegation_to_dict(row)
 
 
 def compute_edit_state(user: dict, record_status: Optional[str], delegation: Optional[dict]) -> str:

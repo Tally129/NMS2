@@ -41,6 +41,16 @@ from postgres_db import AsyncSessionLocal
 from repositories import scheduling as sched_repo
 
 
+async def _pg_visit_notes_in_window(start, end):
+    from postgres_models.clinical_and_messaging import VisitNote
+    from sqlalchemy import select
+    async with AsyncSessionLocal() as pg:
+        stmt = select(VisitNote).where(VisitNote.created_at >= start, VisitNote.created_at < end)
+        return [{"id": r.id, "client_id": r.client_id, "practitioner_id": r.practitioner_id,
+                 "created_at": r.created_at, "status": r.status}
+                for r in (await pg.execute(stmt)).scalars().all()]
+
+
 # =================== PHASE 4: TREATMENTS / INVENTORY / POS / TRANSACTIONS / TIME CLOCK / FRONT DESK / IMPORT / ACCOUNT ===================
 
 # ---------- Treatments ----------
@@ -949,7 +959,7 @@ async def analytics_overview(
     new_clients = await count_clients(created_since=start, created_before=end)
 
     # Active practitioners (with >=1 note in window)
-    notes = await db.visit_notes.find({"created_at": {"$gte": start, "$lt": end}}).to_list(2000)
+    notes = await _pg_visit_notes_in_window(start, end)
     by_provider = {}
     for n in notes:
         pid = n.get("provider_id") or "unknown"

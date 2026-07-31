@@ -25,6 +25,18 @@ from repositories import scheduling as sched_repo
 from repositories import user_sessions as sessions_repo
 from repositories import users as users_repo
 from pg_shims import count_clients
+
+
+async def _pg_visit_note_count(client_id=None, practitioner_id=None):
+    from postgres_models.clinical_and_messaging import VisitNote
+    from sqlalchemy import select, func as _f
+    async with AsyncSessionLocal() as pg:
+        stmt = select(_f.count(VisitNote.id))
+        if client_id:
+            stmt = stmt.where(VisitNote.client_id == client_id)
+        if practitioner_id:
+            stmt = stmt.where(VisitNote.practitioner_id == practitioner_id)
+        return int((await pg.execute(stmt)).scalar_one())
 from sessions import list_active_sessions_sanitized, revoke_all_user_sessions, revoke_family
 
 
@@ -40,7 +52,7 @@ async def dashboard_stats(user=Depends(get_current_user)):
         return {
             "role": role,
             "clients": await count_clients(),
-            "notes": await db.visit_notes.count_documents({}),
+            "notes": await _pg_visit_note_count(),
             "files": await db.files.count_documents({}),
             "appointments_requested": req_ct,
             "users": users_ct,
@@ -51,7 +63,7 @@ async def dashboard_stats(user=Depends(get_current_user)):
             "role": role,
             "my_patients": await count_clients(practitioner_id=user["id"]),
             "total_clients": await count_clients(),
-            "my_notes": await db.visit_notes.count_documents({"practitioner_id": user["id"]}),
+            "my_notes": await _pg_visit_note_count(practitioner_id=user['id']),
         }
     self_client = await _resolve_self_client(user)
     if not self_client:
@@ -60,7 +72,7 @@ async def dashboard_stats(user=Depends(get_current_user)):
         "role": role,
         "client_id": self_client["id"],
         "intake_completed": self_client.get("intake_completed", False),
-        "notes": await db.visit_notes.count_documents({"client_id": self_client["id"]}),
+        "notes": await _pg_visit_note_count(client_id=self_client['id']),
         "files": await db.files.count_documents({"client_id": self_client["id"]}),
     }
 

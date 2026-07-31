@@ -20,6 +20,13 @@ from postgres_db import AsyncSessionLocal
 from repositories import scheduling as sched_repo
 
 
+async def _pg_visit_notes_for_client(cid):
+    from repositories import clinical_and_messaging as _cm
+    from postgres_db import AsyncSessionLocal as _ASL
+    async with _ASL() as pg:
+        return await _cm.list_notes_for_client(pg, cid, limit=1000)
+
+
 @api.get("/compliance/baa-checklist")
 async def get_baa_checklist(user=Depends(require_roles("admin"))):
     """Return the BAA checklist rows (idempotent — seeds defaults on first read)."""
@@ -84,7 +91,7 @@ async def patient_data_export(request: Request, user=Depends(get_current_user)):
         "patient": _strip_id(self_c),
         "user_account": {k: user.get(k) for k in ("id", "email", "full_name", "role", "created_at")},
         "appointments": client_appts,
-        "visit_notes": [_strip_id(n) async for n in db.visit_notes.find({"client_id": cid})],
+        "visit_notes": await _pg_visit_notes_for_client(cid),
         "treatment_plans": [_strip_id(t) async for t in db.treatment_plans.find({"client_id": cid})],
         "protocol_enrollments": [_strip_id(p) async for p in db.protocol_enrollments.find({"client_id": cid})],
         "supplement_assignments": await list_all_assignments_for_client(cid),

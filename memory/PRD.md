@@ -3,7 +3,14 @@
 ## Original Problem Statement
 HIPAA-aligned wellness EMR for `natmedsol.com` (Natural Medical Solutions Wellness Center). Wellness office, **not** a medical practice. Single-tenant private app, not SaaS. Aesthetic adapted from medspa-concierge to NatMedSol's deep-green / parchment / gold palette.
 
-## Phase 3.3 / 3.4 Foundation — Clinical + Messaging Data Layer (2026-07-31) ⭐ NEW
+## Phase 3.3 / 3.4 — Clinical + Messaging Runtime Cutover (2026-07-31) ⭐ NEW
+- **Foundation shipped in commit `0965f23`** (see below); this iteration completes the highest-impact runtime cutovers.
+- **Hash chain preserved**: `emr_visit_notes.prev_hash` + `note_hash` now populated on every `POST /notes/{id}/finalize`. `repositories/clinical_and_messaging.py::finalize_note()` computes SHA-256 over canonical JSON, references the previous finalized note's hash for the same practitioner (or `GENESIS` for first-ever). Verified end-to-end by `test_session3_3_clinical.py::test_note_hash_chain_lands_in_pg` (14/14 smoke tests pass overall).
+- **Routers cut over in this pass**: `delegations.py` (helper) + `routers/delegations.py` (grant/list/revoke) + `routers/clients.py` (visit_notes list/create/update/finalize/amend) + `routers/telehealth.py` (visit_chat, live_soap_drafts, auto-draft) + `routers/admin.py` (visit_note counts) + `routers/compliance.py` (patient export) + `routers/ops.py` (day-of-service note counts) + `notifiers.py` + `server.py` (push_subscriptions endpoints).
+- **Mongo silence verified** for `visit_notes`, `visit_chat`, `live_soap_drafts`, `clinical_delegations`, `push_subscriptions`.
+- **Deferred sub-phase (3.3b / 3.4b)**: `db.messages` / `db.message_threads` / `db.form_templates` / `db.form_submissions` / `db.soap_templates` / `db.treatment_plans` / `db.treatments` / `db.lab_values` router edits, and `emr_files.*` (GridFS → S3/MinIO). Schema and repositories are ready — remaining work is router mechanical replacement.
+
+## Phase 3.3 / 3.4 Foundation — Clinical + Messaging Data Layer (2026-07-31)
 - **New Alembic revision `8ae0b2901822`** (head) creates 13 tables covering both domains:
   - Clinical: `emr_visit_notes` (hash-chained: `prev_hash` + `note_hash`), `emr_treatment_plans`, `emr_treatments`, `emr_lab_values`, `emr_live_soap_drafts`, `emr_visit_chat`, `emr_clinical_delegations`
   - Messaging & Files: `emr_message_threads`, `emr_messages`, `emr_form_templates`, `emr_form_submissions`, `emr_soap_templates`, `emr_push_subscriptions`

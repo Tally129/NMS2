@@ -501,12 +501,14 @@ async def ws_visit(websocket: WebSocket, appt_id: str,
                         pass
                 if t == "chat":
                     # persist chat
-                    await db.visit_chat.insert_one({
-                        "id": new_id(), "appointment_id": appt_id,
-                        "from_user": u["id"], "from_role": role,
-                        "body": data.get("body", "")[:2000],
-                        "ts": datetime.now(timezone.utc),
-                    })
+                    from repositories import clinical_and_messaging as cm_repo
+                    async with AsyncSessionLocal() as pg:
+                        async with pg.begin():
+                            await cm_repo.append_visit_chat(pg, {
+                                "id": new_id(), "appointment_id": appt_id,
+                                "sender_id": u["id"], "sender_role": role,
+                                "body": data.get("body", "")[:2000],
+                            })
             elif t == "ping":
                 await websocket.send_json({"type": "pong"})
     except WebSocketDisconnect:
@@ -539,8 +541,10 @@ async def visit_chat_history(appt_id: str, user=Depends(get_current_user)):
         sc = await _resolve_self_client(user)
         if not sc or a.get("client_id") != sc["id"]:
             raise HTTPException(status_code=403, detail="Forbidden")
-    msgs = await db.visit_chat.find({"appointment_id": appt_id}).sort("ts", 1).to_list(500)
-    return [_strip_id(m) for m in msgs]
+    from repositories import clinical_and_messaging as cm_repo
+    async with AsyncSessionLocal() as pg:
+        msgs = await cm_repo.list_visit_chat(pg, appt_id, limit=500)
+    return msgs
 
 
 # ---------- Visit recording upload (chunked WebM to GridFS) ----------
@@ -689,28 +693,31 @@ async def save_live_soap(appt_id: str, payload: dict,
     a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
-    update = {
-        "appointment_id": appt_id,
-        "client_id": a.get("client_id"),
-        "provider_id": user["id"],
+    from repositories import clinical_and_messaging as cm_repo
+    body = {
         "subjective": payload.get("subjective", ""),
         "objective": payload.get("objective", ""),
         "assessment": payload.get("assessment", ""),
         "plan": payload.get("plan", ""),
-        "updated_at": datetime.now(timezone.utc),
     }
-    await db.live_soap_drafts.update_one(
-        {"appointment_id": appt_id, "provider_id": user["id"]},
-        {"$set": update, "$setOnInsert": {"id": new_id(), "created_at": datetime.now(timezone.utc)}},
-        upsert=True,
-    )
-    return {"saved_at": update["updated_at"].isoformat()}
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            saved = await cm_repo.upsert_live_soap(
+                pg, id=new_id(), appointment_id=appt_id,
+                author_id=user["id"], body=body,
+            )
+    return {"saved_at": (saved.get("updated_at") or datetime.now(timezone.utc)).isoformat()}
 
 
 @api.get("/visits/{appt_id}/live-soap")
 async def get_live_soap(appt_id: str, user=Depends(require_roles("practitioner", "admin"))):
-    d = await db.live_soap_drafts.find_one({"appointment_id": appt_id, "provider_id": user["id"]})
-    return _strip_id(d) if d else {"subjective": "", "objective": "", "assessment": "", "plan": ""}
+    from repositories import clinical_and_messaging as cm_repo
+    async with AsyncSessionLocal() as pg:
+        d = await cm_repo.get_live_soap(pg, appt_id)
+    if not d:
+        return {"subjective": "", "objective": "", "assessment": "", "plan": ""}
+    b = d.get("body") or {}
+    return {**b, "updated_at": d.get("updated_at")}
 
 
 # ---------- Auto-draft visit summary from chat transcript ----------
@@ -720,9 +727,11 @@ async def auto_draft_summary(appt_id: str, user=Depends(require_roles("practitio
     a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
-    msgs = await db.visit_chat.find({"appointment_id": appt_id}).sort("ts", 1).to_list(500)
-    client_lines = [m.get("body", "") for m in msgs if m.get("from_role") == "client"]
-    provider_lines = [m.get("body", "") for m in msgs if m.get("from_role") == "provider"]
+    from repositories import clinical_and_messaging as cm_repo
+    async with AsyncSessionLocal() as pg:
+        msgs = await cm_repo.list_visit_chat(pg, appt_id, limit=500)
+    client_lines = [m.get("body", "") for m in msgs if m.get("sender_role") == "client"]
+    provider_lines = [m.get("body", "") for m in msgs if m.get("sender_role") == "provider"]
     subjective = " ".join(client_lines)[:2000]
     objective = "Telehealth visit · video and audio established · provider observed client throughout the visit."
     assessment = " ".join(provider_lines[: max(1, len(provider_lines) // 2)])[:1500]
@@ -748,12 +757,13 @@ async def llm_soap_draft(appt_id: str, user=Depends(require_roles("practitioner"
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
     intake = await find_intake_by_client(client["id"]) or {}
-    last_note = await db.visit_notes.find_one(
-        {"client_id": client["id"]}, sort=[("created_at", -1)]
-    )
-    msgs = await db.visit_chat.find({"appointment_id": appt_id}).sort("ts", 1).to_list(500)
+    from repositories import clinical_and_messaging as cm_repo
+    async with AsyncSessionLocal() as pg:
+        notes = await cm_repo.list_notes_for_client(pg, client["id"], limit=1)
+        msgs = await cm_repo.list_visit_chat(pg, appt_id, limit=500)
+    last_note = notes[0] if notes else None
     transcript = "\n".join(
-        f"[{m.get('from_role','?')}] {m.get('body','')}" for m in msgs
+        f"[{m.get('sender_role','?')}] {m.get('body','')}" for m in msgs
     )[:6000]
 
     from llm_client import complete_text, DEFAULT_ANTHROPIC_MODEL, provider

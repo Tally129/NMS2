@@ -32,6 +32,18 @@ from pg_shims import (
     list_active_supplement_sheets, list_clients, touch_assignment_reference,
     update_client as _pg_update_client, upsert_intake, deactivate_assignment,
 )
+from postgres_db import AsyncSessionLocal
+from repositories import clinical_and_messaging as cm_repo
+
+
+async def _fetch_note(note_id: str):
+    async with AsyncSessionLocal() as pg:
+        return await cm_repo.get_note(pg, note_id)
+
+
+async def _fetch_notes_for_client(client_id: str):
+    async with AsyncSessionLocal() as pg:
+        return await cm_repo.list_notes_for_client(pg, client_id, limit=500)
 
 
 # =================== CLIENTS ===================
@@ -178,7 +190,7 @@ async def list_notes(request: Request, client_id: str = Query(...),
         self_client = await _resolve_self_client(user)
         if not self_client or self_client["id"] != client_id:
             raise HTTPException(status_code=403, detail="Forbidden")
-    items = await db.visit_notes.find({"client_id": client_id}).sort("created_at", -1).to_list(500)
+    items = await _fetch_notes_for_client(client_id)
     await log_audit(db, user["id"], user["email"], "note.list",
                     resource_type="client", resource_id=client_id,
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
@@ -193,10 +205,15 @@ async def list_all_notes(request: Request,
                          user=Depends(require_roles("admin", "practitioner", "staff", "medical_assistant"))):
     """Clinic-wide notes index for admin/practitioner/staff drill-down screens.
     Optional filters: practitioner_id (author), search (matches client_name)."""
-    q: Dict[str, Any] = {}
-    if practitioner_id:
-        q["practitioner_id"] = practitioner_id
-    rows = await db.visit_notes.find(q).sort("created_at", -1).to_list(limit)
+    async with AsyncSessionLocal() as pg:
+        if practitioner_id:
+            rows = await cm_repo.list_notes_by_practitioner(pg, practitioner_id, limit=limit)
+        else:
+            from sqlalchemy import select
+            from postgres_models.clinical_and_messaging import VisitNote
+            stmt = select(VisitNote).order_by(VisitNote.created_at.desc()).limit(limit)
+            rows = [cm_repo.note_to_dict(n)
+                    for n in (await pg.execute(stmt)).scalars().all()]
     # Hydrate with client_name
     client_ids = list({r.get("client_id") for r in rows if r.get("client_id")})
     clients = {c["id"]: c for c in await find_clients_by_ids(client_ids)}
@@ -254,7 +271,9 @@ async def create_note(payload: NoteIn, request: Request,
     doc["finalized_at"] = None
     doc["finalized_by"] = None
     doc["prior_versions"] = []
-    await db.visit_notes.insert_one(doc)
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            doc = await cm_repo.create_note(pg, doc)
 
     # ---- Phase 14: auto-attach referenced supplement directions to the patient chart ----
     matched = await _fan_out_supplements_for_note(doc, user)
@@ -274,7 +293,7 @@ async def create_note(payload: NoteIn, request: Request,
 async def update_note(note_id: str, payload: NoteIn, request: Request,
                       user=Depends(require_roles("practitioner", "admin", "medical_assistant"))):
     """Draft-only edit. Once finalized, editing is refused (must amend instead)."""
-    note = await db.visit_notes.find_one({"id": note_id})
+    note = await _fetch_note(note_id)
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     if note.get("status") == "finalized":
@@ -299,14 +318,16 @@ async def update_note(note_id: str, payload: NoteIn, request: Request,
     updates = payload.dict()
     updates.pop("client_id", None)  # locked to original
     updates["updated_at"] = datetime.now(timezone.utc)
-    await db.visit_notes.update_one({"id": note_id}, {"$set": updates})
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await cm_repo.update_note(pg, note_id, updates)
     await log_audit(db, user["id"], user["email"], "note.update_draft",
                     resource_type="note", resource_id=note_id,
                     metadata={"fields": list(updates.keys()),
                               "authorizing_provider_id": authorizing_provider_id,
                               "actor_role": user.get("role")},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    note = await db.visit_notes.find_one({"id": note_id})
+    note = await _fetch_note(note_id)
     return _strip_id(note)
 
 
@@ -315,7 +336,7 @@ async def finalize_note(note_id: str, request: Request,
                         user=Depends(require_roles("practitioner"))):
     """Transition a draft note to `finalized`. The finalized version is
     immutable — future changes must go through `/amend`. Provider-only."""
-    note = await db.visit_notes.find_one({"id": note_id})
+    note = await _fetch_note(note_id)
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     if note.get("status") == "finalized":
@@ -323,7 +344,7 @@ async def finalize_note(note_id: str, request: Request,
     if note.get("practitioner_id") != user["id"]:
         raise HTTPException(status_code=403, detail="Only the assigned provider may finalize")
     now = datetime.now(timezone.utc)
-    # Snapshot the current content as the immutable version 1.
+    # Snapshot the current content as the immutable version 1 + chain the hash.
     snapshot = {
         "version": 1,
         "subjective": note.get("subjective"),
@@ -332,21 +353,21 @@ async def finalize_note(note_id: str, request: Request,
         "plan": note.get("plan"),
         "author_id": note.get("practitioner_id"),
         "author_name": note.get("practitioner_name"),
-        "finalized_at": now,
+        "finalized_at": now.isoformat(),
     }
-    await db.visit_notes.update_one(
-        {"id": note_id, "status": {"$ne": "finalized"}},
-        {"$set": {"status": "finalized", "finalized_at": now,
-                  "finalized_by": user["id"], "updated_at": now},
-         "$push": {"prior_versions": snapshot}},
-    )
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            prev = list(note.get("prior_versions") or [])
+            prev.append(snapshot)
+            await cm_repo.update_note(pg, note_id, {"prior_versions": prev})
+            finalized = await cm_repo.finalize_note(pg, note_id, user_id=user["id"])
     await log_audit(db, user["id"], user["email"], "note.finalize",
                     resource_type="note", resource_id=note_id,
                     severity="high", outcome="success",
-                    metadata={"client_id": note.get("client_id"), "version": 1},
+                    metadata={"client_id": note.get("client_id"), "version": 1,
+                              "note_hash": (finalized or {}).get("note_hash")},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    note = await db.visit_notes.find_one({"id": note_id})
-    return _strip_id(note)
+    return finalized or note
 
 
 async def _fan_out_supplements_for_note(note: dict, user: dict) -> list:
@@ -483,7 +504,7 @@ async def remove_client_supplement_assignment(client_id: str, assignment_id: str
 @api.post("/notes/{note_id}/amend", response_model=NoteOut)
 async def amend_note(note_id: str, payload: AmendIn, request: Request,
                      user=Depends(require_roles("practitioner"))):
-    note = await db.visit_notes.find_one({"id": note_id})
+    note = await _fetch_note(note_id)
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     # Amendment workflow only applies to finalized notes. Drafts should be edited via PUT.
@@ -510,13 +531,15 @@ async def amend_note(note_id: str, payload: AmendIn, request: Request,
         "reason": reason,
         "ts": datetime.now(timezone.utc),
     }
-    await db.visit_notes.update_one({"id": note_id}, {"$push": {"amendments": amendment}})
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await cm_repo.append_amendment(pg, note_id, amendment)
     await log_audit(db, user["id"], user["email"], "note.amend",
                     resource_type="note", resource_id=note_id,
                     severity="high", outcome="success",
                     metadata={"client_id": note.get("client_id"), "reason_preview": reason[:80]},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    note = await db.visit_notes.find_one({"id": note_id})
+    note = await _fetch_note(note_id)
     return _strip_id(note)
 
 
