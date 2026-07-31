@@ -15,16 +15,13 @@ import pymongo
 import pytest
 import requests
 
+from tests.smoketest_bootstrap import (
+    ensure_smoketest_admin_and_practitioner,
+    login_smoketest_admin,
+    ADMIN_EMAIL,
+)
+
 BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8001") + "/api"
-ADMIN = ("admin@natmedsol.local", "Admin!2345")
-
-
-def _login(email, password):
-    r = requests.post(f"{BASE_URL}/auth/login", json={
-        "email": email, "password": password,
-    })
-    r.raise_for_status()
-    return r.json()["access_token"]
 
 
 def _mongo():
@@ -34,7 +31,8 @@ def _mongo():
 
 @pytest.fixture(scope="module")
 def admin_token():
-    return _login(*ADMIN)
+    ensure_smoketest_admin_and_practitioner()
+    return login_smoketest_admin(BASE_URL)
 
 
 def _bearer(tok):
@@ -130,4 +128,4 @@ def test_admin_users_list_from_pg(admin_token):
     r = requests.get(f"{BASE_URL}/admin/users", headers=_bearer(admin_token))
     assert r.status_code == 200, r.text
     emails = {u["email"] for u in r.json()}
-    assert "admin@natmedsol.local" in emails
+    assert ADMIN_EMAIL in emails

@@ -564,6 +564,13 @@ async def seed_demo():
         logger.warning("HIPAA_MODE=on — skipping predictable-password demo seed.")
         return
 
+    # Explicit env-driven kill-switch for the demo seeder. Set
+    # `DEMO_SEED_DISABLE=1` after a `scripts/reset_test_data.py` run so the
+    # environment stays empty across restarts.
+    if os.environ.get("DEMO_SEED_DISABLE", "").lower() in {"1", "true", "yes", "on"}:
+        logger.info("DEMO_SEED_DISABLE=on — skipping demo seed accounts.")
+        return
+
     # Phase 3.1b: users live in PostgreSQL. Seed demo accounts only when the
     # `auth_users` table is empty (fresh dev DB) — never dual-write to Mongo.
     from postgres_db import AsyncSessionLocal as _PG

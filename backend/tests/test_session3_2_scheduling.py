@@ -16,29 +16,16 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pymongo
-import pyotp
 import pytest
 import requests
 
+from tests.smoketest_bootstrap import (
+    ensure_smoketest_admin_and_practitioner,
+    login_smoketest_admin,
+    PRACTITIONER_EMAIL,
+)
+
 BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8001") + "/api"
-ADMIN = ("tallyravello@gmail.com", "TEST123")
-FIXTURE_TOTP_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
-
-
-def _login(email, password):
-    r = requests.post(f"{BASE_URL}/auth/login", json={
-        "email": email, "password": password,
-    }, timeout=15)
-    r.raise_for_status()
-    body = r.json()
-    if body.get("mfa_required"):
-        r2 = requests.post(f"{BASE_URL}/auth/mfa/verify-login", json={
-            "email": email, "password": password,
-            "mfa_token": pyotp.TOTP(FIXTURE_TOTP_SECRET).now(),
-        }, timeout=15)
-        r2.raise_for_status()
-        body = r2.json()
-    return body["access_token"]
 
 
 def _mongo():
@@ -48,8 +35,8 @@ def _mongo():
 
 @pytest.fixture(scope="module")
 def admin_token():
-    # conftest.py already enrols MFA on tallyravello + admin@natmedsol
-    return _login(*ADMIN)
+    ensure_smoketest_admin_and_practitioner()
+    return login_smoketest_admin(BASE_URL)
 
 
 def _b(tok):
@@ -163,10 +150,9 @@ def test_dashboard_stats_uses_pg_appointment_requests(admin_token):
 
 def test_availability_create_delete_list(admin_token):
     """Availability CRUD."""
-    # Create availability using seed practitioner
-    prac_email = "ravello@natmedsol.local"
+    # Create availability using bootstrap practitioner
     from tests.pg_test_helpers import pg_users_find_one
-    prac = pg_users_find_one({"email": prac_email})
+    prac = pg_users_find_one({"email": PRACTITIONER_EMAIL})
     if not prac:
         pytest.skip("Seed practitioner missing")
 

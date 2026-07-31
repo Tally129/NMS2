@@ -3,7 +3,13 @@
 ## Original Problem Statement
 HIPAA-aligned wellness EMR for `natmedsol.com` (Natural Medical Solutions Wellness Center). Wellness office, **not** a medical practice. Single-tenant private app, not SaaS. Aesthetic adapted from medspa-concierge to NatMedSol's deep-green / parchment / gold palette.
 
-## Phase 3.2 — MongoDB → PostgreSQL Migration for Scheduling (2026-07-31) ⭐ NEW
+## Phase 3.2b — Test Data Reset (2026-07-31) ⭐ NEW
+- **All application data wiped.** New `scripts/reset_test_data.py` truncates every PG table (except `alembic_version`) and deletes every doc across all Mongo collections including GridFS chunks/files — without dropping tables, collections, indexes, or migrations.
+- **`DEMO_SEED_DISABLE=1`** env flag added to `backend/.env` + honoured by `server.py::seed_demo`. Restarting the backend after a reset no longer recreates demo users, clients, appointments, or any other test records.
+- **Smoke-test bootstrap** helper `tests/smoketest_bootstrap.py` materialises two workforce fixtures (`smoketest-admin@natmedsol.local` + `smoketest-prac@natmedsol.local`, both MFA-enrolled with the conftest fixture secret) directly against PG so Phase 3.1b/3.2 smoke tests keep running against a clean environment.
+- **Verification**: post-reset backend restart cold-boots successfully with 0 rows in every migrated PG table and 0 docs across all Mongo collections. Alembic remains at `c8f4a2e7b3d1`. Both smoke-test suites still pass (12/12) using their bootstrap helper.
+
+## Phase 3.2 — MongoDB → PostgreSQL Migration for Scheduling (2026-07-31)
 - **Full runtime cutover** of the Scheduling domain: `appointments`, `appointment_requests`, `availability`, `reminders`, `reminder_settings`. All eight routers that read/wrote these collections now route through `repositories.scheduling` on async SQLAlchemy: `routers/appointments.py`, `routers/telehealth.py`, `routers/campaigns.py`, `routers/campaign_extras.py`, `routers/portal_ops.py`, `routers/compliance.py`, `routers/ops.py`, `routers/admin.py`, and `server.py` (public appointment-request + staff review + recurrence + reminder loop).
 - **New Alembic head**: `c8f4a2e7b3d1` creates `emr_appointments`, `emr_appointment_requests`, `emr_availability`, `emr_reminders`, `emr_reminder_settings` with nullable FKs to `auth_users` / `emr_clients` (preserves legacy Mongo refs via `legacy_*` columns).
 - **New repository**: `repositories/scheduling.py` (Router → Repository → SQLAlchemy → PostgreSQL). Includes `list_appointments_with_waiting_state` for the telehealth waiting-room JSONB query and `push_appointment_recording` for the recordings JSONB array.
