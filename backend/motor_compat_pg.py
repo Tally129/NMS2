@@ -37,6 +37,17 @@ from postgres_models.crm_and_ops import (
     Campaign, FileMeta, FrontDeskVisit, IntegrationLog, InternalTask,
     ProtocolEnrollment, ProtocolTemplate,
 )
+from postgres_models.structured_rest import (
+    ChartOfAccount, JournalEntry, TransactionRow, Expense, Invoice,
+    VendorBill, Vendor, AccountingBackfillRun, AccountingEvent,
+    BankAccount, BankImportBatch, BankTransaction, BankTransfer,
+    ImportedBatch, Reconciliation,
+    Employee, PayrollRun, TimeEntry,
+    InventoryItem, InventoryTransaction,
+    BaaRecord, LegalAcceptance, LegalPolicy,
+    BreakglassSession,
+    PostingDeadLetter, VipListEntry, WsTicket, UserSessionCompat,
+)
 
 
 _MODEL_BY_NAME = {
@@ -57,6 +68,35 @@ _MODEL_BY_NAME = {
     "protocol_enrollments": ProtocolEnrollment,
     "protocol_templates": ProtocolTemplate,
     "files": FileMeta,
+    # Phase 3.6 — accounting / banking / payroll / inventory / legal / ops
+    "chart_of_accounts": ChartOfAccount,
+    "journal_entries": JournalEntry,
+    "transactions": TransactionRow,
+    "expenses": Expense,
+    "invoices": Invoice,
+    "vendor_bills": VendorBill,
+    "vendors": Vendor,
+    "accounting_backfill_runs": AccountingBackfillRun,
+    "accounting_events": AccountingEvent,
+    "bank_accounts": BankAccount,
+    "bank_import_batches": BankImportBatch,
+    "bank_transactions": BankTransaction,
+    "bank_transfers": BankTransfer,
+    "imported_batches": ImportedBatch,
+    "reconciliations": Reconciliation,
+    "employees": Employee,
+    "payroll_runs": PayrollRun,
+    "time_entries": TimeEntry,
+    "inventory_items": InventoryItem,
+    "inventory_transactions": InventoryTransaction,
+    "baa_records": BaaRecord,
+    "legal_acceptances": LegalAcceptance,
+    "legal_policies": LegalPolicy,
+    "breakglass_sessions": BreakglassSession,
+    "posting_dead_letters": PostingDeadLetter,
+    "vip_list": VipListEntry,
+    "ws_tickets": WsTicket,
+    "user_sessions": UserSessionCompat,
 }
 
 

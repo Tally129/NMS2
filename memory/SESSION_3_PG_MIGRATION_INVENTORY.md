@@ -630,3 +630,86 @@ transparently routes to PostgreSQL.
 
 _Last updated: 2026-08-01 (Phase 3.5 · CRM & Operations Adapter cutover)_
 
+
+
+---
+
+## Phase 3.6 — Remaining Structured-Data Cutover (2026-08-01)
+
+**Strategy**: Extend the `motor_compat_pg` adapter with 28 new tables +
+retire 8 empty index shells left behind by earlier phases. No router
+edits, no repository additions. The generic `id + created_at + payload`
+schema (with select typed columns promoted where router filters need
+indexes) covers every access pattern.
+
+**Retired collections (28, dropped, non-regenerative):**
+- Accounting: `chart_of_accounts`, `journal_entries`, `transactions`,
+  `expenses`, `invoices`, `vendor_bills`, `vendors`,
+  `accounting_backfill_runs`, `accounting_events`
+- Banking: `bank_accounts`, `bank_import_batches`, `bank_transactions`,
+  `bank_transfers`, `imported_batches`, `reconciliations`
+- Payroll: `employees`, `payroll_runs`, `time_entries`
+- Inventory: `inventory_items`, `inventory_transactions`
+- Legal: `baa_records`, `legal_acceptances`, `legal_policies`
+- Security: `breakglass_sessions`
+- Ops/Infra: `posting_dead_letters`, `vip_list`, `ws_tickets`,
+  `user_sessions`
+
+**Empty shells removed (8):** `users`, `clients`, `appointments`,
+`visit_notes`, `clinical_delegations`, `push_subscriptions`,
+`live_soap_drafts`, `visit_chat`. Confirmed zero runtime references
+before dropping.
+
+**Schema additions (Alembic `c3d4e5f6a7b8`):**
+- 28 new tables in `postgres_models/structured_rest.py` following the
+  Phase 3.5 pattern (`id` PK + `created_at` indexed + `payload` JSONB +
+  `legacy_mongo_id`).
+- Typed indexed columns promoted where routers filter/sort:
+  - `emr_chart_of_accounts` — `code`, `active`
+  - `emr_transactions` — `client_id`, `status`
+  - `emr_accounting_events` — `idempotency_key`
+  - `emr_bank_accounts` — `active`
+  - `emr_bank_transactions` — `bank_account_id`, `reconciliation_id`
+  - `emr_reconciliations` — `bank_account_id`
+  - `emr_time_entries`, `emr_legal_acceptances`,
+    `emr_breakglass_sessions`, `emr_user_sessions_legacy` — `user_id`
+  - `emr_legal_policies` — `slug`
+  - `emr_ws_tickets` — `expires_at`
+- No PG tables dropped; earlier migration history untouched.
+
+**Adapter changes:**
+- `motor_compat_pg._MODEL_BY_NAME` extended from 15 → 43 entries.
+- `MotorCompatDb._RETIRED` therefore covers all 43 retired collections.
+  Any `db.<retired>` access resolves to `MotorCompatCollection`
+  unconditionally — no Mongo fallback.
+- No new adapter operations needed; existing `find / find_one /
+  find_one_and_update / insert_one / update_one / update_many /
+  delete_one / delete_many / count_documents / distinct` plus operators
+  (`$in`, `$ne`, `$gt/$gte/$lt/$lte`, `$exists`, `$regex`, `$or`, `$set`,
+  `$unset`, `$inc`, `$push`, `$addToSet`, `$pull`, upsert) covered every
+  call site.
+
+**Router edits:** none.
+
+**Verification:**
+- Alembic head: `c3d4e5f6a7b8` (up from `b2c3d4e5f6a7`).
+- 35/35 Phase 3.1b–3.6 smoke tests pass (35 = 6 + 6 + 2 + 6 + 6 + 9).
+- New test file `tests/test_session3_6_structured_rest.py` covers:
+  accounts + journal entries, transactions + expenses, invoices + vendor
+  bills + vendors, bank account/import batch/transactions/transfer/
+  reconciliation flow, employee + payroll_run + time_entry flow,
+  inventory item + adjustment (via `/inventory/{id}/adjust` HTTP), legal
+  policy + acceptance + BAA, break-glass + WS ticket persistence with
+  `find_one_and_update` semantics, accounting events + dead-letter +
+  backfill runs + VIP list + imported batches.
+- Post-restart regen check: **0 of 43** retired collections regenerate.
+  Only `emr_files.chunks` / `emr_files.files` remain in Mongo (GridFS
+  blob storage, explicitly excluded from this phase).
+
+**Remaining Motor imports (runtime):** `deps.py` (wraps + re-exports),
+`mongo_db.py` (still owns GridFS + the raw Motor client). Everything
+else — every router — reads/writes exclusively via PG through the
+adapter.
+
+_Last updated: 2026-08-01 (Phase 3.6 · Structured data fully on PG)_
+

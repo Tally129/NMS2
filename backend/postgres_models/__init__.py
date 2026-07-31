@@ -30,4 +30,15 @@ from .crm_and_ops import (  # noqa: F401
     Campaign, FrontDeskVisit, InternalTask, IntegrationLog,
     ProtocolEnrollment, ProtocolTemplate, FileMeta,
 )
+from .structured_rest import (  # noqa: F401
+    ChartOfAccount, JournalEntry, TransactionRow, Expense, Invoice,
+    VendorBill, Vendor, AccountingBackfillRun, AccountingEvent,
+    BankAccount, BankImportBatch, BankTransaction, BankTransfer,
+    ImportedBatch, Reconciliation,
+    Employee, PayrollRun, TimeEntry,
+    InventoryItem, InventoryTransaction,
+    BaaRecord, LegalAcceptance, LegalPolicy,
+    BreakglassSession,
+    PostingDeadLetter, VipListEntry, WsTicket, UserSessionCompat,
+)
 
