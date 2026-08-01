@@ -117,3 +117,9 @@ frontend/node_modules/.cache/default-development/26.pack
 frontend/node_modules/.cache/default-development/28.pack
 frontend/node_modules/.cache/default-development/31.pack
 frontend/node_modules/.cache/default-development/35.pack
+
+# Test artifacts (generated per-run, may embed credentials/tokens)
+/test_reports/
+/backend/backend/tests/pytest/
+/backend/data/blobs/
+/tmp/gridfs_pre_drop_snapshot.json

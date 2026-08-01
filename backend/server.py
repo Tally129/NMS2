@@ -571,71 +571,12 @@ async def seed_demo():
         logger.info("DEMO_SEED_DISABLE=on — skipping demo seed accounts.")
         return
 
-    # Phase 3.1b: users live in PostgreSQL. Seed demo accounts only when the
-    # `auth_users` table is empty (fresh dev DB) — never dual-write to Mongo.
-    from postgres_db import AsyncSessionLocal as _PG
-    from postgres_models import User as _U
-    from sqlalchemy import func as _f, select as _s
-    async with _PG() as _pg:
-        _user_count = int((await _pg.execute(_s(_f.count(_U.id)))).scalar_one())
-    if _user_count == 0:
-        await insert_user({
-            "id": new_id(), "email": "admin@natmedsol.local",
-            "password_hash": hash_password("Admin!2345"),
-            "full_name": "Site Administrator", "phone": None,
-            "role": "admin", "mfa_enabled": False, "mfa_secret": None,
-            "is_active": True, "created_at": datetime.now(timezone.utc), "last_login_at": None,
-        })
-        await insert_user({
-            "id": new_id(), "email": "ravello@natmedsol.local",
-            "password_hash": hash_password("Ravello!2345"),
-            "full_name": "Dr. Gail Ravello", "phone": None,
-            "role": "practitioner", "mfa_enabled": False, "mfa_secret": None,
-            "is_active": True, "created_at": datetime.now(timezone.utc), "last_login_at": None,
-        })
-        logger.info("Seeded demo admin + practitioner users (PostgreSQL).")
-
-    # Idempotent: ensure a real staff-role front-desk user exists for QA / RBAC testing
-    if not await find_user_by_email("frontdesk@natmedsol.local"):
-        await insert_user({
-            "id": new_id(), "email": "frontdesk@natmedsol.local",
-            "password_hash": hash_password("FrontDesk!2345"),
-            "full_name": "Front Desk Staff", "phone": None,
-            "role": "staff", "mfa_enabled": False, "mfa_secret": None,
-            "is_active": True, "created_at": datetime.now(timezone.utc), "last_login_at": None,
-        })
-        logger.info("Seeded demo staff (front desk) user.")
-
-    # Idempotent break-glass auditor account (read-only, all reads stamped emergency=true)
-    if not await find_user_by_email("auditor@natmedsol.local"):
-        await insert_user({
-            "id": new_id(), "email": "auditor@natmedsol.local",
-            "password_hash": hash_password("Auditor!2345"),
-            "full_name": "Compliance Auditor", "phone": None,
-            "role": "auditor", "mfa_enabled": False, "mfa_secret": None,
-            "is_active": True, "created_at": datetime.now(timezone.utc), "last_login_at": None,
-        })
-        logger.info("Seeded break-glass auditor user.")
-
-    # Idempotent: seed a Medical Assistant test account for delegated-editing QA.
-    ma_doc = await find_user_by_email("ma@natmedsol.local")
-    if not ma_doc:
-        await insert_user({
-            "id": new_id(), "email": "ma@natmedsol.local",
-            "password_hash": hash_password("MedAssist!2345"),
-            "full_name": "Morgan Assistant", "phone": None,
-            "role": "medical_assistant", "mfa_enabled": False, "mfa_secret": None,
-            "is_active": True, "created_at": datetime.now(timezone.utc), "last_login_at": None,
-        })
-        logger.info("Seeded demo medical assistant user.")
-    elif ma_doc.get("role") != "medical_assistant":
-        # Self-heal: an earlier build shipped this seed with role="client".
-        # Correct it on boot without wiping the record so audit history is preserved.
-        await update_user(ma_doc["id"], {"role": "medical_assistant"})
-        logger.info("Self-healed medical assistant role for ma@natmedsol.local.")
-
-    # Session 2b sync path (Mongo → PG mirror) is retired now that identity
-    # is 100% PostgreSQL. Nothing to sync anymore.
+    # Phase 3.7 hardening: predictable-password demo seeding was removed
+    # from application startup. Production admins are created via the
+    # first-admin bootstrap flow (`BOOTSTRAP_SECRET` + POST /api/auth/bootstrap
+    # or the `BOOTSTRAP_ADMIN_EMAIL` one-shot below). For local development
+    # convenience, run `python -m scripts.seed_demo_users` (guarded by
+    # HIPAA_MODE=false + ENVIRONMENT != production + CONFIRM_DEMO_SEED=YES).
 
     # Session 2c (dev only): seed a brand-new bootstrap admin whose email
     # is set via BOOTSTRAP_ADMIN_EMAIL. Skipped in HIPAA_MODE and skipped if
