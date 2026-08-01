@@ -5,11 +5,64 @@ Response semantics (uniform "if that email is registered" text) unchanged.
 """
 from ._common import *  # noqa: F401,F403
 
+import logging
+
+logger = logging.getLogger("nms.auth.password_reset")
+
 
 _RESET_WINDOW_MIN = 15
 _RESET_MAX_PER_EMAIL_WINDOW = 3      # per (email_hash, window)
 _RESET_MAX_PER_IP_WINDOW = 10        # per IP, window
 _RESET_GLOBAL_ABUSE_THRESHOLD = 200  # per window (blocks system-wide brute force)
+
+
+# --------------------------------------------------------------------------- #
+# FRONTEND_ORIGIN validation                                                  #
+# ---                                                                         #
+# Never emit a reset email whose link points at a broken / placeholder /      #
+# scheme-less origin — an emailed link like `//reset-password?token=...` or   #
+# `example.com/reset-password?token=...` renders unusable in the mail client. #
+# We refuse to dispatch, log a sanitized reason, and let the caller fall      #
+# through the generic "if that email is registered..." response so no PII     #
+# or token ever leaks to logs or clients.                                     #
+# --------------------------------------------------------------------------- #
+_PLACEHOLDER_ORIGIN_MARKERS = (
+    "example.com", "your-domain", "changeme", "change_me", "todo",
+    "yourapp", "placeholder", "localhost.invalid",
+)
+
+
+def _validated_frontend_origin() -> Optional[str]:
+    """Return a trusted `https?://host[:port]` origin, or None if the env
+    var is missing / blank / malformed / still a placeholder.
+
+    The value is intentionally never returned to the caller or written to
+    logs verbatim beyond the redacted diagnostics below.
+    """
+    from urllib.parse import urlparse
+    raw = (os.environ.get("FRONTEND_ORIGIN") or "").strip().rstrip("/")
+    if not raw:
+        logger.warning("password_reset: FRONTEND_ORIGIN is missing/blank")
+        return None
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        logger.warning("password_reset: FRONTEND_ORIGIN failed to parse")
+        return None
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        logger.warning(
+            "password_reset: FRONTEND_ORIGIN malformed (scheme=%r netloc-present=%s)",
+            parsed.scheme, bool(parsed.netloc),
+        )
+        return None
+    host_lower = parsed.netloc.lower()
+    for marker in _PLACEHOLDER_ORIGIN_MARKERS:
+        if marker in host_lower:
+            logger.warning(
+                "password_reset: FRONTEND_ORIGIN looks like a placeholder"
+            )
+            return None
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 async def _reset_rate_limit_ok(email_hash: str, ip: Optional[str]) -> bool:
@@ -77,18 +130,26 @@ async def forgot_password(payload: dict, request: Request):
                 ip=ip,
             )
 
-    frontend_origin = (os.environ.get("FRONTEND_ORIGIN") or "").rstrip("/")
+    frontend_origin = _validated_frontend_origin()
+    if not frontend_origin:
+        # Config guard: refuse to send a mail whose link is unusable.
+        # We already recorded the reset attempt above; drop out via the
+        # generic response so no user-visible enumeration happens.
+        return generic
+
     # `secrets.token_urlsafe` already produces URL-safe base64 (only
     # `[A-Za-z0-9_-]`), but we still run it through `quote` with an empty
     # safe-set as a defensive measure in case the token generator ever
     # changes.
     from urllib.parse import quote as _url_quote
     _encoded_token = _url_quote(raw_token, safe="")
-    reset_url = (
-        f"{frontend_origin}/reset-password?token={_encoded_token}"
-        if frontend_origin
-        else f"/reset-password?token={_encoded_token}"
-    )
+    if not _encoded_token:
+        # Token generator returned an empty string — never build a
+        # `.../reset-password?token=` link. Log a redacted diagnostic
+        # (no token, no URL) and fall through to the generic response.
+        logger.error("password_reset: refusing dispatch — empty encoded token")
+        return generic
+    reset_url = f"{frontend_origin}/reset-password?token={_encoded_token}"
 
     from notifiers import send_password_reset_email
     await send_password_reset_email(

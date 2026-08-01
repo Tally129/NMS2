@@ -168,3 +168,68 @@ def test_frontend_page_reads_token_from_query_string():
     assert "clearAccessToken" in src
     assert 'localStorage.removeItem(LS.user)' in src
     assert 'window.location.assign("/login")' in src
+
+
+# ============================================================ FRONTEND_ORIGIN guards
+def test_validated_frontend_origin_accepts_valid_https(monkeypatch):
+    from routers.auth_impl.password_reset import _validated_frontend_origin
+    monkeypatch.setenv("FRONTEND_ORIGIN", "https://app.natmedsol.org/")
+    assert _validated_frontend_origin() == "https://app.natmedsol.org"
+
+
+def test_validated_frontend_origin_rejects_missing(monkeypatch):
+    from routers.auth_impl.password_reset import _validated_frontend_origin
+    monkeypatch.delenv("FRONTEND_ORIGIN", raising=False)
+    assert _validated_frontend_origin() is None
+
+
+def test_validated_frontend_origin_rejects_blank(monkeypatch):
+    from routers.auth_impl.password_reset import _validated_frontend_origin
+    monkeypatch.setenv("FRONTEND_ORIGIN", "   ")
+    assert _validated_frontend_origin() is None
+
+
+def test_validated_frontend_origin_rejects_scheme_less(monkeypatch):
+    from routers.auth_impl.password_reset import _validated_frontend_origin
+    monkeypatch.setenv("FRONTEND_ORIGIN", "app.natmedsol.org")
+    assert _validated_frontend_origin() is None
+
+
+def test_validated_frontend_origin_rejects_unknown_scheme(monkeypatch):
+    from routers.auth_impl.password_reset import _validated_frontend_origin
+    monkeypatch.setenv("FRONTEND_ORIGIN", "ftp://app.natmedsol.org")
+    assert _validated_frontend_origin() is None
+
+
+@pytest.mark.parametrize("placeholder", [
+    "https://example.com",
+    "https://your-domain.com",
+    "https://app.CHANGEME.io",
+    "https://TODO.example",
+    "https://placeholder.local",
+])
+def test_validated_frontend_origin_rejects_placeholders(monkeypatch, placeholder):
+    from routers.auth_impl.password_reset import _validated_frontend_origin
+    monkeypatch.setenv("FRONTEND_ORIGIN", placeholder)
+    assert _validated_frontend_origin() is None, f"should reject {placeholder}"
+
+
+def test_validated_frontend_origin_strips_path_and_trailing_slash(monkeypatch):
+    from routers.auth_impl.password_reset import _validated_frontend_origin
+    monkeypatch.setenv("FRONTEND_ORIGIN", "https://app.natmedsol.org/some/path/")
+    # Only origin (scheme://host) is returned; any path is discarded.
+    assert _validated_frontend_origin() == "https://app.natmedsol.org"
+
+
+# ============================================================ log-safety scan (extended)
+def test_password_reset_router_never_logs_reset_url_or_token_literals():
+    """Belt-and-braces: no logger call anywhere in the router references
+    `reset_url` or `raw_token` — even in f-strings."""
+    with open("routers/auth_impl/password_reset.py") as f:
+        src = f.read()
+    forbidden_substrings = ("reset_url", "raw_token", "_encoded_token")
+    for line in src.splitlines():
+        s = line.strip()
+        if s.startswith("logger.") or ".info(" in s or ".warning(" in s or ".error(" in s:
+            for bad in forbidden_substrings:
+                assert bad not in s, f"log line references {bad!r}: {s}"

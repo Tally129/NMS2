@@ -44,8 +44,25 @@ export function AuthProvider({ children }) {
   }, []);
 
   // Sprint 2 bootstrap: on app-start, try the refresh cookie for a new access token.
+  // Public auth routes (`/login`, `/staff-login`, `/forgot-password`,
+  // `/reset-password`, `/patient-login`, `/register`) MUST NOT depend on a
+  // refresh cookie. When the user lands on one of them directly (e.g. from
+  // an emailed reset link), we do not call `/auth/refresh` at all — a 401
+  // there is expected but can still confuse users if a downstream layer
+  // ever surfaces the response body.
+  const _isPublicAuthPath = () => {
+    try {
+      const p = (typeof window !== "undefined" && window.location.pathname) || "";
+      return /^\/(reset-password|forgot-password|login|staff-login|patient-login|register)(\/|$)/.test(p);
+    } catch { return false; }
+  };
   useEffect(() => {
     let mounted = true;
+    if (_isPublicAuthPath()) {
+      // Anonymous session — do not touch /auth/refresh.
+      setLoading(false);
+      return () => { mounted = false; };
+    }
     (async () => {
       try {
         await doRefresh();
