@@ -31,13 +31,13 @@ class ReturnDocument:  # noqa: N801 (mirror pymongo's public constant name)
 from audit import get_client_ip, log_audit
 from deps import _strip_id, api, db, require_roles
 from models import new_id
-from notifiers import email_status, send_email, send_sms, sms_status
+from notifiers import email_status, send_email
 from pg_shims import list_clients_filtered_by_ids
 from postgres_db import AsyncSessionLocal
 from repositories import scheduling as sched_repo
 
 
-CHANNELS = ("email", "sms")
+CHANNELS = ("email",)
 FILTER_TYPES = (
     "all_marketing", "inactive", "upcoming_appointments",
     "due_for_followup", "membership", "treatment_group",
@@ -175,12 +175,9 @@ def _classify(client: dict, channel: str) -> tuple[str, str]:
     """Return (status, reason) — status is 'eligible' | 'skipped'."""
     if client.get("consent_marketing") is False:
         return "skipped", "marketing_opt_out"
-    if channel == "email":
-        if not _is_valid_email(client.get("email")):
-            return "skipped", "invalid_email"
-    elif channel == "sms":
-        if not _is_valid_phone(client.get("phone")):
-            return "skipped", "invalid_phone"
+    # Email is the only supported channel post-2026-08 (SMS retired).
+    if not _is_valid_email(client.get("email")):
+        return "skipped", "invalid_email"
     return "eligible", ""
 
 
@@ -272,38 +269,29 @@ async def _run_campaign(campaign: dict, *, worker_id: Optional[str] = None) -> d
 
     for c in eligible:
         try:
-            if campaign["channel"] == "email":
-                # Compliance footer + per-client unsubscribe link. The campaign
-                # `kind` classifies whether the unsubscribe link is offered
-                # (marketing) or hidden (transactional). Defaults to marketing.
-                from routers.campaign_extras import unsub_link_for, compliance_footer
-                kind = campaign.get("kind") or "marketing"
-                unsub = unsub_link_for(c["id"]) if kind == "marketing" else None
-                # `portal.login_link` merge value: absolute /patient-login URL.
-                origin = (os.environ.get("FRONTEND_ORIGIN") or "").rstrip("/")
-                ctx_extra = {"portal": {"login_link": f"{origin}/patient-login"}}
-                merged_ctx = {**_build_context(c), **ctx_extra}
-                html = _render_html(campaign["message"], c)
-                html = _fill_variables(html, ctx_extra)  # substitute {{portal.login_link}}
-                html += compliance_footer(unsub, kind == "marketing")
-                status = await send_email(
-                    db, c["email"],
-                    _fill_variables(campaign.get("subject") or campaign["title"], merged_ctx),
-                    html,
-                    plain_text=_render_plain(campaign["message"], c),
-                    action="campaign.email",
-                    payload_metadata={"campaign_id": campaign["id"], "kind": kind},
-                )
-            else:
-                status = await send_sms(
-                    db, c.get("phone", ""),
-                    _render_plain(campaign["message"], c),
-                    action="campaign.sms",
-                    payload_metadata={"campaign_id": campaign["id"]},
-                )
+            # Email is the only supported channel post-2026-08. Campaigns
+            # with any other channel are rejected at create-time; this
+            # path is safe to treat as email-only.
+            from routers.campaign_extras import unsub_link_for, compliance_footer
+            kind = campaign.get("kind") or "marketing"
+            unsub = unsub_link_for(c["id"]) if kind == "marketing" else None
+            origin = (os.environ.get("FRONTEND_ORIGIN") or "").rstrip("/")
+            ctx_extra = {"portal": {"login_link": f"{origin}/patient-login"}}
+            merged_ctx = {**_build_context(c), **ctx_extra}
+            html = _render_html(campaign["message"], c)
+            html = _fill_variables(html, ctx_extra)  # substitute {{portal.login_link}}
+            html += compliance_footer(unsub, kind == "marketing")
+            status = await send_email(
+                db, c["email"],
+                _fill_variables(campaign.get("subject") or campaign["title"], merged_ctx),
+                html,
+                plain_text=_render_plain(campaign["message"], c),
+                action="campaign.email",
+                payload_metadata={"campaign_id": campaign["id"], "kind": kind},
+            )
             delivery_log.append({
                 "client_id": c.get("id"), "status": status, "ts": started_at,
-                "channel": campaign["channel"],
+                "channel": "email",
             })
             if status in ("sent", "sent_stub"):
                 success += 1
@@ -761,14 +749,8 @@ async def delivery_config(user=Depends(require_roles("admin", "practitioner", "s
             "sendgrid_from_email": bool(os.environ.get("SENDGRID_FROM_EMAIL")),
             "mode": email_status(),  # "live" | "sent_stub"
         },
-        "sms": {
-            "twilio_account_sid": bool(os.environ.get("TWILIO_ACCOUNT_SID")),
-            "twilio_auth_token": bool(os.environ.get("TWILIO_AUTH_TOKEN")),
-            "twilio_from_number": bool(os.environ.get("TWILIO_FROM_NUMBER")),
-            "mode": sms_status(),
-        },
         "hipaa_mode": bool(os.environ.get("HIPAA_MODE")),
-        "simulated": email_status() != "live" or sms_status() != "live",
+        "simulated": email_status() != "live",
     }
 
 

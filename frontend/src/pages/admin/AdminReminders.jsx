@@ -53,7 +53,7 @@ export default function AdminReminders() {
 
   return (
     <PortalLayout>
-      <PortalHeader title="Reminders" subtitle="Appointment notification settings (SendGrid / Twilio wiring is stubbed until keys are provided)." />
+      <PortalHeader title="Reminders" subtitle="Appointment notification settings (SendGrid wiring is stubbed until keys are provided)." />
 
       <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-6 max-w-2xl space-y-5">
         <div className="flex items-center justify-between">
@@ -86,12 +86,8 @@ export default function AdminReminders() {
               <Checkbox checked={settings.appointment_reminder_channels.includes("email")} onCheckedChange={() => toggleChannel("email")} />
               <Mail size={14} /> Email (SendGrid)
             </label>
-            <label className="inline-flex items-center gap-2 rounded-full border border-[#e0d6bc] bg-[#f6f1e6] px-3 py-2 cursor-pointer text-sm">
-              <Checkbox checked={settings.appointment_reminder_channels.includes("sms")} onCheckedChange={() => toggleChannel("sms")} />
-              <Smartphone size={14} /> SMS (Twilio)
-            </label>
           </div>
-          <p className="text-xs text-[#6a6a6a] mt-2">Messages never include PHI — just a generic reminder.</p>
+          <p className="text-xs text-[#6a6a6a] mt-2">Messages never include PHI — just a generic reminder that directs patients to the secure portal.</p>
         </div>
 
         <div>

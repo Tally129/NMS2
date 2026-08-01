@@ -619,7 +619,6 @@ function SendFormDialog({ template, onOpenChange, onSent }) {
   React.useEffect(() => {
     // Auto-fill target when client + channel combo selected
     if (channel === "email") setTarget(selectedClient?.email || "");
-    else if (channel === "sms") setTarget(selectedClient?.phone || "");
     else setTarget("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channel, clientId]);
@@ -655,7 +654,7 @@ function SendFormDialog({ template, onOpenChange, onSent }) {
       <DialogContent className="bg-[#fbf7ee] border-[#e7dfc9]">
         <DialogHeader>
           <DialogTitle className="font-display text-2xl">Send "{template.title}"</DialogTitle>
-          <DialogDescription>Create a tokenized soft-link the patient can open without signing in. Optionally email or SMS the link.</DialogDescription>
+          <DialogDescription>Create a tokenized soft-link the patient can open without signing in. Optionally email the link.</DialogDescription>
         </DialogHeader>
         {!resultUrl ? (
           <div className="space-y-4">
@@ -672,11 +671,10 @@ function SendFormDialog({ template, onOpenChange, onSent }) {
             </div>
             <div>
               <Label>Delivery</Label>
-              <div className="grid grid-cols-3 gap-2 mt-2" data-testid="forms-send-channel">
+              <div className="grid grid-cols-2 gap-2 mt-2" data-testid="forms-send-channel">
                 {[
                   { v: "link",  label: "Copy link" },
                   { v: "email", label: "Email" },
-                  { v: "sms",   label: "SMS" },
                 ].map((opt) => (
                   <button
                     key={opt.v}
@@ -728,7 +726,7 @@ function SendFormDialog({ template, onOpenChange, onSent }) {
               </a>
             </div>
             {resultStatus !== "sent_stub" && (
-              <p className="text-xs text-[#6a6a6a]">SMS/email delivery is stubbed in this environment — production credentials wire to SendGrid + Twilio respectively.</p>
+              <p className="text-xs text-[#6a6a6a]">Email delivery is stubbed in this environment — production credentials wire to SendGrid.</p>
             )}
           </div>
         )}

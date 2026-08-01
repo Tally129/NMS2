@@ -270,7 +270,6 @@ async def health():
         "integrations": {
             "llm": llm_client.provider(),
             "email": notifiers.email_status(),
-            "sms": notifiers.sms_status(),
         },
     }
 

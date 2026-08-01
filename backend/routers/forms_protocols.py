@@ -298,14 +298,17 @@ async def send_form(payload: FormSendIn, request: Request,
     base_url = os.environ.get("PUBLIC_BASE_URL", "") or str(request.base_url).rstrip("/").replace("/api", "")
     submit_url = f"{base_url}/forms/respond/{token}"
 
-    from notifiers import send_email as notify_email, send_sms as notify_sms
+    from notifiers import send_email as notify_email
 
     delivery_status = "skipped"
     target = payload.delivery_target
     if (payload.channel or "link") == "email" and not target:
         target = (client or {}).get("email")
-    if (payload.channel or "link") == "sms" and not target:
-        target = (client or {}).get("phone")
+    if (payload.channel or "link") == "sms":
+        # SMS was removed in 2026-08 (product decision). Fall through to
+        # the tokenized link path — the caller can copy the submit_url or
+        # switch the channel to email.
+        payload.channel = "link"
 
     if payload.channel == "email" and target:
         html = (
@@ -318,13 +321,6 @@ async def send_form(payload: FormSendIn, request: Request,
             db, target, f"Please complete: {tpl.get('title','')}", html,
             action="form.email",
             payload_metadata={"submission_id": doc["id"], "submit_url": submit_url},
-        )
-    elif payload.channel == "sms" and target:
-        body = f"{tpl.get('title','')} — please complete: {submit_url}"
-        delivery_status = await notify_sms(
-            db, target, body,
-            action="form.sms",
-            payload_metadata={"submission_id": doc["id"]},
         )
 
     await db.form_submissions.update_one({"id": doc["id"]}, {"$set": {"delivery_status": delivery_status, "delivery_target": target}})

@@ -203,7 +203,6 @@ export default function AddPatientWizard({ open, onOpenChange, onCreated }) {
                   <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="email">Email</SelectItem>
-                    <SelectItem value="sms">SMS</SelectItem>
                     <SelectItem value="phone">Phone call</SelectItem>
                   </SelectContent>
                 </Select>

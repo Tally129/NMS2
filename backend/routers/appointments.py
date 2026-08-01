@@ -621,14 +621,27 @@ async def run_reminders(user=Depends(require_roles("admin"))):
         due = await sched_repo.list_due_reminders(pg, now=now, limit=200)
     sent = 0
     for r in due:
-        # Stubbed send via SendGrid/Twilio
-        await db.integration_log.insert_one({
-            "id": new_id(),
-            "service": "sendgrid" if r["channel"] == "email" else "twilio",
-            "action": f"reminder.{r['channel']}",
-            "payload": {"appointment_id": r["appointment_id"], "client_id": r["client_id"]},
-            "_stubbed": True, "ts": now,
-        })
+        # Email-only reminders (SMS retired 2026-08).
+        if r["channel"] != "email":
+            # Legacy scheduling rows that still say channel=sms are converted
+            # to a no-op that is marked "sent" so we don't retry forever.
+            await db.integration_log.insert_one({
+                "id": new_id(),
+                "service": "sendgrid",
+                "action": f"reminder.{r['channel']}.skipped_sms_retired",
+                "payload": {"appointment_id": r["appointment_id"],
+                              "client_id": r["client_id"]},
+                "_stubbed": True, "ts": now,
+            })
+        else:
+            await db.integration_log.insert_one({
+                "id": new_id(),
+                "service": "sendgrid",
+                "action": f"reminder.{r['channel']}",
+                "payload": {"appointment_id": r["appointment_id"],
+                              "client_id": r["client_id"]},
+                "_stubbed": True, "ts": now,
+            })
         async with AsyncSessionLocal() as pg:
             async with pg.begin():
                 await sched_repo.mark_reminder_sent(pg, r["id"], now)
