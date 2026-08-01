@@ -162,3 +162,9 @@ def test_frontend_page_reads_token_from_query_string():
     assert "reset-password-missing-token" in src
     # Success UI branch
     assert "reset-password-success" in src
+    # Session cleanup: prevent the stale-cache flash / auto-logout bug
+    # reported by the user (2026-08). The page must purge client auth
+    # state and hard-navigate to /login so AuthProvider re-initializes.
+    assert "clearAccessToken" in src
+    assert 'localStorage.removeItem(LS.user)' in src
+    assert 'window.location.assign("/login")' in src

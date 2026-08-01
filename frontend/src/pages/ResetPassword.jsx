@@ -1,6 +1,7 @@
 import React from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import axios from "axios";
+import { clearAccessToken, LS, broadcastAuth } from "../lib/api";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -14,7 +15,6 @@ const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
  */
 export default function ResetPassword() {
   const [params] = useSearchParams();
-  const navigate = useNavigate();
   const token = params.get("token") || "";
   const [pw, setPw] = React.useState("");
   const [pw2, setPw2] = React.useState("");
@@ -43,13 +43,29 @@ export default function ResetPassword() {
         token,
         new_password: pw,
       });
+      // The backend revoked every session for this user. Purge every
+      // fragment of client-side auth state so the AuthProvider does not
+      // briefly re-hydrate from a stale cache and bounce us into a
+      // Protected route before landing on /login.
+      try {
+        clearAccessToken();
+        localStorage.removeItem(LS.user);
+        localStorage.removeItem(LS.lastActivity);
+        // Best-effort clear of the refresh cookie for this device.
+        await axios.post(`${API}/auth/logout`, {}, { withCredentials: true }).catch(() => {});
+        broadcastAuth("logout");
+      } catch (_) { /* non-fatal */ }
       setDone(true);
-      // Strip the token from the URL immediately after a successful reset
-      // so it does not sit in the browser history in a usable form.
+      // Strip the token from the URL before the redirect so it does not
+      // sit in browser history in a usable form.
       try {
         window.history.replaceState({}, "", "/reset-password");
       } catch (_) { /* history API unavailable — safe to ignore */ }
-      setTimeout(() => navigate("/login", { replace: true }), 2200);
+      // Hard navigation ensures the AuthProvider re-initializes with a
+      // clean refresh call rather than replaying the cached user.
+      setTimeout(() => {
+        window.location.assign("/login");
+      }, 1400);
     } catch (e) {
       // Never surface the raw backend error message — map every failure
       // to a safe generic string so an invalid/expired token cannot be
