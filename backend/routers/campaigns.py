@@ -31,7 +31,7 @@ class ReturnDocument:  # noqa: N801 (mirror pymongo's public constant name)
 from audit import get_client_ip, log_audit
 from deps import _strip_id, api, db, require_roles
 from models import new_id
-from notifiers import email_status, send_email
+from notifiers import email_status, send_campaign_email, send_email
 from pg_shims import list_clients_filtered_by_ids
 from postgres_db import AsyncSessionLocal
 from repositories import scheduling as sched_repo
@@ -281,13 +281,12 @@ async def _run_campaign(campaign: dict, *, worker_id: Optional[str] = None) -> d
             html = _render_html(campaign["message"], c)
             html = _fill_variables(html, ctx_extra)  # substitute {{portal.login_link}}
             html += compliance_footer(unsub, kind == "marketing")
-            status = await send_email(
+            status = await send_campaign_email(
                 db, c["email"],
-                _fill_variables(campaign.get("subject") or campaign["title"], merged_ctx),
-                html,
+                subject=_fill_variables(campaign.get("subject") or campaign["title"], merged_ctx),
+                safe_html=html,
                 plain_text=_render_plain(campaign["message"], c),
-                action="campaign.email",
-                payload_metadata={"campaign_id": campaign["id"], "kind": kind},
+                campaign_id=campaign["id"],
             )
             delivery_log.append({
                 "client_id": c.get("id"), "status": status, "ts": started_at,

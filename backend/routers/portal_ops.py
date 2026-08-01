@@ -484,20 +484,12 @@ async def portal_invite(client_id: str, request: Request,
     linked_user, created = await _get_or_create_portal_user(client, email)
 
     raw, url = await _issue_portal_link(linked_user, request, ttl_min=RESET_TTL_MIN * 24)  # 24h for first-time
-    subject = "Welcome to your Natural Medical Solutions patient portal"
-    html = (
-        f"<p>Hi {client.get('full_name') or 'there'},</p>"
-        "<p>Your patient portal at Natural Medical Solutions Wellness Center is ready. "
-        "Click the link below within 24 hours to choose a password and sign in:</p>"
-        f"<p><a href=\"{url}\">{url}</a></p>"
-        "<p>Once signed in you can review your appointments, treatment plan, labs, "
-        "messages, and secure documents.</p>"
-        "<p>— Natural Medical Solutions</p>"
-    )
-    delivery_status = await notify_email(
-        db, email, subject, html,
-        action="portal.invite_dispatch",
-        redact_recipient=True,
+    from notifiers import send_account_setup_email
+    delivery_status = await send_account_setup_email(
+        db, email,
+        first_name=(client.get("full_name") or "").split(" ")[0] or None,
+        setup_url=url,
+        expires_in_hours=int((RESET_TTL_MIN * 24) / 60),
     )
     await log_audit(db, user["id"], user["email"], "portal.invite",
                     resource_type="client", resource_id=client_id,
@@ -534,18 +526,12 @@ async def portal_reset_password(client_id: str, request: Request,
         raise HTTPException(status_code=404, detail="Linked user not found")
 
     raw, url = await _issue_portal_link(linked, request, ttl_min=RESET_TTL_MIN)
-    subject = "Reset your Natural Medical Solutions portal password"
-    html = (
-        f"<p>Hi {linked.get('full_name') or 'there'},</p>"
-        "<p>An administrator sent you a fresh password-reset link. "
-        f"Use it within {RESET_TTL_MIN} minutes:</p>"
-        f"<p><a href=\"{url}\">{url}</a></p>"
-        "<p>If you didn't expect this, you can safely ignore it — your current password stays valid.</p>"
-    )
-    delivery_status = await notify_email(
-        db, linked["email"], subject, html,
-        action="portal.reset_dispatch",
-        redact_recipient=True,
+    from notifiers import send_password_reset_email
+    delivery_status = await send_password_reset_email(
+        db, linked["email"],
+        first_name=(linked.get("full_name") or "").split(" ")[0] or None,
+        reset_url=url,
+        expires_in_minutes=RESET_TTL_MIN,
     )
     await log_audit(db, user["id"], user["email"], "portal.reset_password",
                     resource_type="client", resource_id=client_id,

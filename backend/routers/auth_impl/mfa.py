@@ -31,6 +31,12 @@ async def mfa_verify(payload: MfaVerifyIn, request: Request, user=Depends(get_au
                 await sessions_repo.set_mfa_satisfied(pg, sid)
     await log_audit(db, user["id"], user["email"], "auth.mfa_enabled",
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+    # Post-commit alert; no PHI, no TOTP secret.
+    from notifiers import send_mfa_enabled_email
+    await send_mfa_enabled_email(
+        db, user["email"],
+        first_name=(user.get("full_name") or "").split(" ")[0] or None,
+    )
     return {"ok": True, "mfa_enabled": True}
 
 

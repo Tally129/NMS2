@@ -71,14 +71,17 @@ async def send_email(
 
     api_key = os.environ["SENDGRID_API_KEY"]
     from_email = os.environ["SENDGRID_FROM_EMAIL"]
+    reply_to = os.environ.get("SENDGRID_REPLY_TO") or None
 
     def _blocking_send() -> int:
         from sendgrid import SendGridAPIClient
-        from sendgrid.helpers.mail import Mail
+        from sendgrid.helpers.mail import Mail, ReplyTo
         msg = Mail(
             from_email=from_email, to_emails=to, subject=subject,
             html_content=html, plain_text_content=plain_text or "",
         )
+        if reply_to:
+            msg.reply_to = ReplyTo(reply_to)
         sg = SendGridAPIClient(api_key)
         r = sg.send(msg)
         return r.status_code
@@ -89,10 +92,124 @@ async def send_email(
         await db.integration_log.insert_one(log_doc)
         return "sent" if 200 <= code < 300 else "failed"
     except Exception as e:
-        log_doc.update({"error": str(e), "_stubbed": False, "failed": True})
+        # `str(e)` from the SendGrid SDK includes only the HTTP status
+        # and a redacted body — the API key is never in the exception.
+        # Even so, we strip anything that looks like a bearer token.
+        safe_err = _redact_secrets(str(e))
+        log_doc.update({"error": safe_err, "_stubbed": False, "failed": True})
         await db.integration_log.insert_one(log_doc)
-        logger.warning("SendGrid send failed: %s", e)
+        logger.warning("SendGrid send failed: %s", safe_err)
         return "failed"
+
+
+# --------------------------------------------------------------------------- #
+# High-level typed helpers — every call site uses these instead of send_email  #
+# so the templates + redaction rules apply consistently.                       #
+# --------------------------------------------------------------------------- #
+async def send_account_setup_email(db, to: str, *, first_name: Optional[str],
+                                     setup_url: str, expires_in_hours: int) -> str:
+    from email_templates import account_setup
+    subject, html, text = account_setup(
+        first_name=first_name, setup_url=setup_url,
+        expires_in_hours=expires_in_hours,
+    )
+    return await send_email(db, to, subject, html, plain_text=text,
+                             action="auth.account_setup", redact_recipient=True)
+
+
+async def send_password_reset_email(db, to: str, *, first_name: Optional[str],
+                                      reset_url: str, expires_in_minutes: int) -> str:
+    from email_templates import password_reset
+    subject, html, text = password_reset(
+        first_name=first_name, reset_url=reset_url,
+        expires_in_minutes=expires_in_minutes,
+    )
+    return await send_email(db, to, subject, html, plain_text=text,
+                             action="auth.password_reset_dispatch",
+                             redact_recipient=True)
+
+
+async def send_password_changed_email(db, to: str, *,
+                                        first_name: Optional[str]) -> str:
+    from email_templates import password_changed
+    subject, html, text = password_changed(first_name=first_name)
+    return await send_email(db, to, subject, html, plain_text=text,
+                             action="auth.password_changed",
+                             redact_recipient=True)
+
+
+async def send_mfa_enabled_email(db, to: str, *,
+                                   first_name: Optional[str]) -> str:
+    from email_templates import mfa_enabled
+    subject, html, text = mfa_enabled(first_name=first_name)
+    return await send_email(db, to, subject, html, plain_text=text,
+                             action="auth.mfa_enabled",
+                             redact_recipient=True)
+
+
+async def send_recovery_code_used_email(db, to: str, *,
+                                          first_name: Optional[str]) -> str:
+    from email_templates import recovery_code_used
+    subject, html, text = recovery_code_used(first_name=first_name)
+    return await send_email(db, to, subject, html, plain_text=text,
+                             action="auth.recovery_code_used",
+                             redact_recipient=True)
+
+
+async def send_security_alert_email(db, to: str, *, first_name: Optional[str],
+                                      event_label: str) -> str:
+    from email_templates import security_alert
+    subject, html, text = security_alert(first_name=first_name,
+                                          event_label=event_label)
+    return await send_email(db, to, subject, html, plain_text=text,
+                             action=f"security.{event_label[:32]}",
+                             redact_recipient=True)
+
+
+async def send_generic_portal_notification(db, to: str, *,
+                                             first_name: Optional[str],
+                                             headline: str = "You have a new notification"
+                                             ) -> str:
+    from email_templates import portal_notification
+    subject, html, text = portal_notification(first_name=first_name,
+                                                 headline=headline)
+    return await send_email(db, to, subject, html, plain_text=text,
+                             action="notify.portal",
+                             redact_recipient=True)
+
+
+async def send_campaign_email(db, to: str, *, subject: str,
+                                safe_html: str, plain_text: Optional[str],
+                                campaign_id: str) -> str:
+    from email_templates import wrap_campaign
+    subj, html, text = wrap_campaign(subject=subject, safe_html=safe_html,
+                                       plain_text=plain_text)
+    return await send_email(
+        db, to, subj, html, plain_text=text,
+        action="campaign.email",
+        payload_metadata={"campaign_id": campaign_id},
+        redact_recipient=True,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Secret + PII redaction for log lines.                                        #
+# --------------------------------------------------------------------------- #
+import re as _re
+
+_BEARER_RE = _re.compile(r"(SG\.[A-Za-z0-9._\-]+|Bearer\s+[A-Za-z0-9._\-]+)")
+_EMAIL_RE = _re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+
+
+def _redact_secrets(text: str) -> str:
+    """Redact SendGrid keys, bearer tokens, and full email addresses from
+    strings before writing to logs or audit records."""
+    if not text:
+        return text
+    text = _BEARER_RE.sub("<redacted-token>", text)
+    text = _EMAIL_RE.sub("<redacted-email>", text)
+    return text
+
 
 
 # --------------------------------------------------------------------------- #

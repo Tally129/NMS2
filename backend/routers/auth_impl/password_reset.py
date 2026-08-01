@@ -84,20 +84,12 @@ async def forgot_password(payload: dict, request: Request):
         else f"[configure FRONTEND_ORIGIN]?token={raw_token}"
     )
 
-    from notifiers import send_email as notify_email
-    subject = "Reset your NatMedSol password"
-    html = (
-        "<p>Hi,</p>"
-        "<p>Someone (hopefully you) asked to reset the password on your NatMedSol account. "
-        f"Follow this link within {RESET_TOKEN_TTL_MIN} minutes to choose a new password:</p>"
-        f"<p><a href=\"{reset_url}\">{reset_url}</a></p>"
-        "<p>If you didn't request this, you can safely ignore this email.</p>"
-        "<p>— NatMedSol Security</p>"
-    )
-    await notify_email(
-        db, email, subject, html,
-        action="auth.password_reset_dispatch",
-        redact_recipient=True,
+    from notifiers import send_password_reset_email
+    await send_password_reset_email(
+        db, email,
+        first_name=(user.get("full_name") or "").split(" ")[0] or None,
+        reset_url=reset_url,
+        expires_in_minutes=RESET_TOKEN_TTL_MIN,
     )
 
     await log_audit(
@@ -165,6 +157,13 @@ async def reset_password(payload: dict, request: Request):
         resource_type="user", resource_id=user["id"],
         metadata={"revoked_sessions": revoked_ct}, ip=ip,
         user_agent=request.headers.get("user-agent"),
+    )
+    # Password-changed alert. Fire AFTER the DB commit so a mail-provider
+    # failure never rolls back the password change.
+    from notifiers import send_password_changed_email
+    await send_password_changed_email(
+        db, user["email"],
+        first_name=(user.get("full_name") or "").split(" ")[0] or None,
     )
     return {"ok": True, "must_relogin": True}
 

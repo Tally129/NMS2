@@ -302,6 +302,12 @@ async def bootstrap_mfa_verify(payload: MfaVerifyIn, request: Request):
                     resource_type="user", resource_id=user_id,
                     ip=get_client_ip(request),
                     user_agent=request.headers.get("user-agent"))
+    # Post-commit MFA-enabled alert. Never carries the TOTP secret or recovery codes.
+    from notifiers import send_mfa_enabled_email
+    await send_mfa_enabled_email(
+        db, user["email"],
+        first_name=(user.get("full_name") or "").split(" ")[0] or None,
+    )
     return {
         "ok": True,
         "mfa_enabled": True,

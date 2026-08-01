@@ -180,6 +180,12 @@ async def login(payload: LoginIn, request: Request):
                             severity="high", outcome="success",
                             metadata={"code_id": recovery_used_id},
                             ip=ip, user_agent=ua)
+            # Recovery-code security alert. No code value ever ships.
+            from notifiers import send_recovery_code_used_email
+            await send_recovery_code_used_email(
+                db, user["email"],
+                first_name=(user.get("full_name") or "").split(" ")[0] or None,
+            )
         elif not payload.mfa_token:
             return {"access_token": "", "refresh_token": "", "user": to_user_out(user), "mfa_required": True}
         elif not verify_mfa(user.get("mfa_secret") or "", payload.mfa_token):
