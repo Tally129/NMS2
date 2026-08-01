@@ -87,7 +87,11 @@ async def _issue_portal_link(user: dict, request: Request, ttl_min: int = RESET_
         purpose="portal_invite",
     )
     origin = _frontend_origin(request)
-    url = f"{origin}/reset-password?token={raw}" if origin else f"[configure FRONTEND_ORIGIN]?token={raw}"
+    from urllib.parse import quote as _url_quote
+    _encoded = _url_quote(raw, safe="")
+    url = (f"{origin}/reset-password?token={_encoded}"
+            if origin
+            else f"/reset-password?token={_encoded}")
     return raw, url
 
 

@@ -57,6 +57,7 @@ import Accounting from "./pages/portal/Accounting";
 import StaffLogin from "./pages/StaffLogin";
 import MfaChallenge from "./pages/MfaChallenge";
 import ChangePassword from "./pages/ChangePassword";
+import ResetPassword from "./pages/ResetPassword";
 import Unsubscribe from "./pages/Unsubscribe";
 import LegalHub from "./pages/LegalHub";
 import LegalPolicyPage from "./pages/LegalPolicyPage";
@@ -95,6 +96,7 @@ function App() {
             <Route path="/staff-login" element={<StaffLogin />} />
             <Route path="/mfa-challenge" element={<MfaChallenge />} />
             <Route path="/change-password" element={<Protected><ChangePassword /></Protected>} />
+            <Route path="/reset-password" element={<ResetPassword />} />
             <Route path="/unsubscribe" element={<Unsubscribe />} />
             {/* Legal & Policies (publicly readable) */}
             <Route path="/legal" element={<LegalHub />} />

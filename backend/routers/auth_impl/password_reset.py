@@ -77,11 +77,17 @@ async def forgot_password(payload: dict, request: Request):
                 ip=ip,
             )
 
-    frontend_origin = os.environ.get("FRONTEND_ORIGIN") or ""
+    frontend_origin = (os.environ.get("FRONTEND_ORIGIN") or "").rstrip("/")
+    # `secrets.token_urlsafe` already produces URL-safe base64 (only
+    # `[A-Za-z0-9_-]`), but we still run it through `quote` with an empty
+    # safe-set as a defensive measure in case the token generator ever
+    # changes.
+    from urllib.parse import quote as _url_quote
+    _encoded_token = _url_quote(raw_token, safe="")
     reset_url = (
-        f"{frontend_origin.rstrip('/')}/reset-password?token={raw_token}"
+        f"{frontend_origin}/reset-password?token={_encoded_token}"
         if frontend_origin
-        else f"[configure FRONTEND_ORIGIN]?token={raw_token}"
+        else f"/reset-password?token={_encoded_token}"
     )
 
     from notifiers import send_password_reset_email
