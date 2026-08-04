@@ -125,3 +125,12 @@ frontend/node_modules/.cache/default-development/35.pack
 /tmp/gridfs_pre_drop_snapshot.json
 frontend/node_modules/.cache/default-development/21.pack
 frontend/node_modules/.cache/default-development/22.pack
+
+# Local code-edit backups
+**/*.before-*
+**/*.bootstrap-backup
+**/*.invite-backup
+**/*.pre-session-fix
+**/*.pre-aggregate-fix
+**/*.pre-*
+frontend/src.before-patient-wording/
