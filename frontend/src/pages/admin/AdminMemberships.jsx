@@ -33,7 +33,7 @@ export default function AdminMemberships() {
           <table className="w-full text-sm">
             <thead className="bg-[#f1ead8] text-[#8a6a3c] uppercase text-[11px] tracking-widest">
               <tr>
-                <th className="text-left py-3 px-4">Client</th>
+                <th className="text-left py-3 px-4">Patient</th>
                 <th className="text-left py-3 px-4">Tier</th>
                 <th className="text-left py-3 px-4">Price</th>
                 <th className="text-left py-3 px-4">Method</th>

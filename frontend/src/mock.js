@@ -21,7 +21,7 @@ export const membershipTiers = [
     name: "Essentials Wellness",
     price: 99,
     cadence: "/ month",
-    blurb: "Monthly check-ins with a naturopathic doctor \u2014 ideal for clients beginning their holistic journey.",
+    blurb: "Monthly check-ins with a naturopathic doctor \u2014 ideal for patients beginning their holistic journey.",
     perks: [
       "1 naturopathic consult per month",
       "Seasonal detox guidance included",
@@ -34,7 +34,7 @@ export const membershipTiers = [
     name: "Core Wellness",
     price: 199,
     cadence: "/ month",
-    blurb: "Advanced protocols and targeted testing \u2014 for clients ready to address chronic imbalances.",
+    blurb: "Advanced protocols and targeted testing \u2014 for patients ready to address chronic imbalances.",
     perks: [
       "1 advanced consult + lab review",
       "Hormone or thyroid panel included quarterly",

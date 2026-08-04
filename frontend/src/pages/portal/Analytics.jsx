@@ -34,7 +34,7 @@ export default function Analytics() {
     <PortalLayout>
       <PortalHeader
         title="Analytics"
-        subtitle="Practice performance · revenue · client trends"
+        subtitle="Practice performance · revenue · patient trends"
         actions={
           <Select value={String(days)} onValueChange={(v) => setDays(parseInt(v))}>
             <SelectTrigger className="w-40 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="analytics-window-select">
@@ -62,7 +62,7 @@ export default function Analytics() {
               icon={AlertTriangle}
               accent={data.appointments.no_show_rate > 10 ? "text-[#7a2a2a]" : "text-[#2f4a3a]"}
             />
-            <StatCard label="New clients" value={data.clients.new_clients} icon={Users} />
+            <StatCard label="New patients" value={data.clients.new_clients} icon={Users} />
           </div>
 
           <div className="grid lg:grid-cols-3 gap-6 mb-8">

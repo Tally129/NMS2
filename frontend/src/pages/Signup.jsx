@@ -53,7 +53,7 @@ export default function Signup() {
     setBusy(true);
     try {
       const { user } = await registerNew(form);
-      toast({ title: "Welcome aboard", description: "Your client account has been created." });
+      toast({ title: "Welcome aboard", description: "Your patient account has been created." });
       // Record acknowledgments AFTER account creation — the axios interceptor
       // now carries the bearer for the fresh session.
       await Promise.all(REQUIRED_POLICIES.map((p) =>
@@ -85,7 +85,7 @@ export default function Signup() {
 
       <section className="max-w-md mx-auto px-6 text-center mt-6">
         <div className="flex justify-center"><Logo size={86} /></div>
-        <h1 className="font-display text-[40px] text-[#1f2a22] mt-8">Create a Client Account</h1>
+        <h1 className="font-display text-[40px] text-[#1f2a22] mt-8">Create a Patient Account</h1>
         <p className="text-[#5a5a5a] mt-2 text-sm">Begin your holistic journey with Natural Medical Solutions.</p>
       </section>
 

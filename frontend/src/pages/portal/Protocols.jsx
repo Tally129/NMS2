@@ -135,7 +135,7 @@ export default function Protocols() {
           <div className="flex flex-col md:flex-row gap-3 mb-5 flex-wrap">
             <div className="relative flex-1 min-w-[220px] max-w-md">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8a6a3c]" />
-              <Input placeholder="Search client or protocol…" value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="protocol-search" />
+              <Input placeholder="Search patient or protocol…" value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="protocol-search" />
             </div>
             <Select value={statusFilter} onValueChange={setStatusFilter}>
               <SelectTrigger className="w-44 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="protocol-status-filter"><SelectValue /></SelectTrigger>
@@ -155,9 +155,9 @@ export default function Protocols() {
               </SelectContent>
             </Select>
             <Select value={clientFilter} onValueChange={setClientFilter}>
-              <SelectTrigger className="w-52 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="protocol-client-filter"><SelectValue placeholder="All clients" /></SelectTrigger>
+              <SelectTrigger className="w-52 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="protocol-client-filter"><SelectValue placeholder="All patients" /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">All clients</SelectItem>
+                <SelectItem value="all">All patients</SelectItem>
                 {clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}
               </SelectContent>
             </Select>
@@ -165,7 +165,7 @@ export default function Protocols() {
 
           {filteredEnr.length === 0 ? (
             <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-12 text-center text-[#6a6a6a]">
-              No active enrollments. Propose a protocol to a client from the <strong>Templates</strong> tab.
+              No active enrollments. Propose a protocol to a patient from the <strong>Templates</strong> tab.
             </div>
           ) : (
             <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] overflow-hidden" data-testid="protocol-enrollments-table">
@@ -173,7 +173,7 @@ export default function Protocols() {
                 <thead className="bg-[#f1ead8] text-[#8a6a3c] uppercase text-[11px] tracking-widest">
                   <tr>
                     <th className="text-left py-3 px-4">Proposed</th>
-                    <th className="text-left py-3 px-4">Client</th>
+                    <th className="text-left py-3 px-4">Patient</th>
                     <th className="text-left py-3 px-4">Protocol</th>
                     <th className="text-left py-3 px-4">Provider</th>
                     <th className="text-left py-3 px-4">Status</th>
@@ -372,7 +372,7 @@ function parseList(v) {
   return String(v).split(",").map((s) => s.trim()).filter(Boolean);
 }
 
-// ---------- Propose to client ----------
+// ---------- Propose to patient ----------
 function ProposeProtocolDialog({ template, clients, onOpenChange, onProposed }) {
   const { toast } = useToast();
   const [clientId, setClientId] = React.useState("");
@@ -384,7 +384,7 @@ function ProposeProtocolDialog({ template, clients, onOpenChange, onProposed }) 
   if (!template) return null;
 
   const submit = async () => {
-    if (!clientId) { toast({ title: "Select a client" }); return; }
+    if (!clientId) { toast({ title: "Select a patient" }); return; }
     setSubmitting(true);
     try {
       await api.post("/protocols/enrollments", {
@@ -402,13 +402,13 @@ function ProposeProtocolDialog({ template, clients, onOpenChange, onProposed }) 
       <DialogContent className="bg-[#fbf7ee] border-[#e7dfc9]">
         <DialogHeader>
           <DialogTitle className="font-display text-2xl">Propose "{template.title}"</DialogTitle>
-          <DialogDescription>Customize weeks/sessions for this client. They will be notified to accept.</DialogDescription>
+          <DialogDescription>Customize weeks/sessions for this patient. They will be notified to accept.</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           <div>
-            <Label>Client</Label>
+            <Label>Patient</Label>
             <Select value={clientId} onValueChange={setClientId}>
-              <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="protocol-propose-client"><SelectValue placeholder="Select client…" /></SelectTrigger>
+              <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="protocol-propose-client"><SelectValue placeholder="Select patient…" /></SelectTrigger>
               <SelectContent>{clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}</SelectContent>
             </Select>
           </div>
@@ -422,7 +422,7 @@ function ProposeProtocolDialog({ template, clients, onOpenChange, onProposed }) 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button onClick={submit} disabled={submitting} className="bg-[#c19a4b] hover:bg-[#a8853f] text-[#1f2a22] rounded-full" data-testid="protocol-propose-submit">
-            {submitting ? <Loader2 size={14} className="animate-spin mr-1" /> : <Send size={14} className="mr-1" />} Send to client
+            {submitting ? <Loader2 size={14} className="animate-spin mr-1" /> : <Send size={14} className="mr-1" />} Send to patient
           </Button>
         </DialogFooter>
       </DialogContent>

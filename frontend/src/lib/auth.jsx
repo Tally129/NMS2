@@ -28,16 +28,37 @@ export function AuthProvider({ children }) {
     broadcastAuth("logout-all");
   }, []);
 
-  const refreshMe = useCallback(async () => {
-    if (!getAccessToken()) { setLoading(false); return; }
+  const refreshMe = useCallback(async ({ allowRefresh = true } = {}) => {
     try {
+      if (!getAccessToken()) {
+        if (!allowRefresh) {
+          setUser(null);
+          return null;
+        }
+        await doRefresh();
+      }
+
+      if (!getAccessToken()) {
+        setUser(null);
+        return null;
+      }
+
       const { data } = await api.get("/auth/me");
       setUser(data);
       localStorage.setItem(LS.user, JSON.stringify(data));
-    } catch {
-      setUser(null);
-      clearAccessToken();
-      localStorage.removeItem(LS.user);
+      return data;
+    } catch (error) {
+      const status = error?.response?.status;
+
+      // Only destroy the local session when authentication is definitively
+      // rejected. Temporary network/server failures should not log users out.
+      if (status === 401 || status === 403) {
+        clearAccessToken();
+        localStorage.removeItem(LS.user);
+        setUser(null);
+      }
+
+      throw error;
     } finally {
       setLoading(false);
     }
@@ -53,24 +74,47 @@ export function AuthProvider({ children }) {
   const _isPublicAuthPath = () => {
     try {
       const p = (typeof window !== "undefined" && window.location.pathname) || "";
-      return /^\/(reset-password|forgot-password|login|staff-login|patient-login|register)(\/|$)/.test(p);
+      return /^\/(reset-password|forgot-password|login|staff-login|patient-login|register|change-password|bootstrap-mfa)(\/|$)/.test(p);
     } catch { return false; }
   };
   useEffect(() => {
     let mounted = true;
     if (_isPublicAuthPath()) {
-      // Anonymous session — do not touch /auth/refresh.
-      setLoading(false);
+      // Public routes must work without a refresh cookie. If this tab already
+      // has a valid in-memory token, resolve the current user without forcing
+      // another refresh-token rotation.
+      if (getAccessToken()) {
+        refreshMe({ allowRefresh: false }).catch(() => {});
+      } else {
+        setLoading(false);
+      }
       return () => { mounted = false; };
     }
     (async () => {
       try {
-        await doRefresh();
-        const cached = localStorage.getItem(LS.user);
-        if (mounted && cached) setUser(JSON.parse(cached));
-        await refreshMe();
-      } catch {
-        if (mounted) { clearAccessToken(); setUser(null); setLoading(false); }
+        const restoredUser = await refreshMe();
+        if (mounted && restoredUser) {
+          setUser(restoredUser);
+        }
+      } catch (error) {
+        if (!mounted) return;
+
+        const status = error?.response?.status;
+
+        if (status === 401 || status === 403) {
+          clearAccessToken();
+          localStorage.removeItem(LS.user);
+          setUser(null);
+        } else {
+          // Keep any cached user only as a temporary UI hint during a
+          // network outage. It never grants API access without a token.
+          const cached = localStorage.getItem(LS.user);
+          if (cached) {
+            try { setUser(JSON.parse(cached)); } catch {}
+          }
+        }
+
+        setLoading(false);
       }
     })();
     const off = onAuthBroadcast((msg) => {
@@ -90,12 +134,47 @@ export function AuthProvider({ children }) {
   }, [refreshMe]);
 
   async function loginWithPassword(email, password, mfa_token) {
-    const { data } = await api.post("/auth/login", { email, password, mfa_token: mfa_token || null });
-    if (data.mfa_required) return { mfa_required: true };
+    const { data } = await api.post("/auth/login", {
+      email,
+      password,
+      mfa_token: mfa_token || null,
+    });
+
+    // Workforce first-login onboarding uses a short-lived bootstrap JWT.
+    // The backend intentionally does not issue an access token or refresh
+    // cookie until password change and MFA enrollment are complete.
+    if (data.bootstrap_token && data.bootstrap_stage) {
+      sessionStorage.setItem("nms_bootstrap_token", data.bootstrap_token);
+      sessionStorage.setItem("nms_bootstrap_stage", data.bootstrap_stage);
+      sessionStorage.setItem("nms_bootstrap_user", JSON.stringify(data.user || {}));
+      sessionStorage.setItem("nms_bootstrap_email", email);
+
+      return {
+        bootstrap_required: true,
+        bootstrap_stage: data.bootstrap_stage,
+        user: data.user,
+      };
+    }
+
+    if (data.mfa_required) {
+      return { mfa_required: true };
+    }
+
+    if (!data.access_token || !data.user) {
+      throw new Error("Login did not return a completed authenticated session.");
+    }
+
     setAccessToken(data.access_token);
     localStorage.setItem(LS.user, JSON.stringify(data.user));
     touchActivity();
     setUser(data.user);
+
+    // Bootstrap state must never survive a completed normal login.
+    sessionStorage.removeItem("nms_bootstrap_token");
+    sessionStorage.removeItem("nms_bootstrap_stage");
+    sessionStorage.removeItem("nms_bootstrap_user");
+    sessionStorage.removeItem("nms_bootstrap_email");
+
     return { user: data.user, notice: data.notice };
   }
 

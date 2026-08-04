@@ -67,10 +67,21 @@ export default function ResetPassword() {
         window.location.assign("/login");
       }, 1400);
     } catch (e) {
-      // Never surface the raw backend error message — map every failure
-      // to a safe generic string so an invalid/expired token cannot be
-      // distinguished from an unknown backend fault.
-      setErr("This reset link is invalid or has expired. Please request a new one.");
+      const detail = e?.response?.data?.detail;
+
+      // Password-strength messages are safe and useful to display. Token
+      // failures remain generic so the page does not expose account state.
+      if (
+        typeof detail === "string" &&
+        detail !== "Invalid or expired reset token" &&
+        detail !== "Account not eligible for reset"
+      ) {
+        setErr(detail);
+      } else {
+        setErr(
+          "This reset link is invalid or has expired. Please request a new one."
+        );
+      }
     } finally {
       setBusy(false);
     }

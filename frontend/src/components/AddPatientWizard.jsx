@@ -52,12 +52,12 @@ export default function AddPatientWizard({ open, onOpenChange, onCreated }) {
         if (payload[k] === "" || payload[k] === null) delete payload[k];
       });
       const r = await api.post("/clients", payload);
-      toast({ title: `Client created · MRN ${r.data.mrn || r.data.id.slice(0, 8)}` });
+      toast({ title: `Patient created · MRN ${r.data.mrn || r.data.id.slice(0, 8)}` });
       onCreated && onCreated(r.data);
       reset();
       onOpenChange(false);
     } catch (e) {
-      toast({ title: "Failed to create client", description: getErrorMessage(e) || "" });
+      toast({ title: "Failed to create patient", description: getErrorMessage(e) || "" });
     } finally {
       setSubmitting(false);
     }
@@ -67,8 +67,8 @@ export default function AddPatientWizard({ open, onOpenChange, onCreated }) {
     <Dialog open={open} onOpenChange={(o) => { onOpenChange(o); if (!o) reset(); }}>
       <DialogContent className="bg-[#fbf7ee] border-[#e7dfc9] max-w-2xl">
         <DialogHeader>
-          <DialogTitle className="font-display text-2xl">Add new client</DialogTitle>
-          <DialogDescription>Complete the four steps to create the client record.</DialogDescription>
+          <DialogTitle className="font-display text-2xl">Add new patient</DialogTitle>
+          <DialogDescription>Complete the four steps to create the patient record.</DialogDescription>
         </DialogHeader>
 
         {/* Step indicator */}
@@ -228,7 +228,7 @@ export default function AddPatientWizard({ open, onOpenChange, onCreated }) {
             </Button>
           ) : (
             <Button onClick={submit} disabled={submitting} className="rounded-full bg-[#c19a4b] hover:bg-[#a8853f] text-[#1f2a22]" data-testid="wiz-create-btn">
-              {submitting ? "Creating…" : "Create client"}
+              {submitting ? "Creating…" : "Create patient"}
             </Button>
           )}
         </div>

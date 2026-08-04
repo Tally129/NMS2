@@ -1,17 +1,80 @@
 import React from "react";
 import PortalLayout, { PortalHeader } from "../PortalLayout";
 import api from "../../lib/api";
-import { TestTube2 } from "lucide-react";
+import { TestTube2, Upload } from "lucide-react";
+import { Button } from "../../components/ui/button";
+import { useToast } from "../../hooks/use-toast";
+import { getErrorMessage } from "../../lib/errors";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceArea } from "recharts";
 
 export default function PatientLabs() {
+  const { toast } = useToast();
   const [labs, setLabs] = React.useState([]);
   const [presets, setPresets] = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+  const [loadError, setLoadError] = React.useState("");
+  const [uploading, setUploading] = React.useState(false);
+  const inputRef = React.useRef(null);
 
   React.useEffect(() => {
-    api.get("/lab-values").then((r) => setLabs(r.data || []));
-    api.get("/labs/presets").then((r) => setPresets(r.data.presets || []));
+    const load = async () => {
+      setLoading(true);
+      setLoadError("");
+
+      try {
+        const [labsResponse, presetsResponse] = await Promise.all([
+          api.get("/lab-values"),
+          api.get("/labs/presets"),
+        ]);
+
+        setLabs(labsResponse.data || []);
+        setPresets(presetsResponse.data?.presets || []);
+      } catch (error) {
+        setLabs([]);
+        setPresets([]);
+        setLoadError(
+          error?.response?.data?.detail?.message ||
+          error?.response?.data?.detail ||
+          "Could not load your lab results."
+        );
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    load();
   }, []);
+
+  const uploadOutsideLab = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setUploading(true);
+
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("category", "lab");
+
+      await api.post("/files/upload", form, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+
+      toast({
+        title: "Outside lab report uploaded",
+        description: "Your care team can now review this report.",
+      });
+
+      event.target.value = "";
+    } catch (error) {
+      toast({
+        title: "Upload failed",
+        description: getErrorMessage(error) || "Please try again.",
+      });
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const byTest = React.useMemo(() => {
     const g = {};
@@ -31,8 +94,50 @@ export default function PatientLabs() {
 
   return (
     <PortalLayout>
-      <PortalHeader title="Lab Results" subtitle="Recorded by your care team. Trends help spot progress over time." />
-      {Object.keys(byTest).length === 0 ? (
+      <PortalHeader
+        title="Lab Results"
+        subtitle="View verified results and securely share outside lab reports with your care team."
+      />
+
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".pdf,.png,.jpg,.jpeg"
+        onChange={uploadOutsideLab}
+        className="hidden"
+      />
+
+      <div className="mb-6 rounded-2xl border border-[#e7dfc9] bg-white p-5 shadow-sm">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="font-display text-xl text-[#1f2a22]">
+              Upload an outside lab report
+            </h2>
+
+            <p className="mt-1 max-w-2xl text-sm leading-6 text-[#6a6a6a]">
+              Share a PDF or image from another laboratory or provider. Your
+              care team will review the report before any values are added to
+              your verified lab history.
+            </p>
+          </div>
+
+          <Button
+            onClick={() => inputRef.current?.click()}
+            disabled={uploading}
+            className="h-11 rounded-full bg-[#2f4a3a] text-white hover:bg-[#263d30]"
+          >
+            <Upload size={16} className="mr-2" />
+            {uploading ? "Uploading…" : "Upload report"}
+          </Button>
+        </div>
+      </div>
+      {loading ? (
+        <div className="text-[#6a6a6a]">Loading lab results…</div>
+      ) : loadError ? (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-6 text-center">
+          <div className="text-sm text-amber-900">{loadError}</div>
+        </div>
+      ) : Object.keys(byTest).length === 0 ? (
         <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-10 text-center text-[#6a6a6a]">
           <TestTube2 size={28} className="mx-auto text-[#c19a4b]" />
           <div className="mt-3">No lab results yet.</div>

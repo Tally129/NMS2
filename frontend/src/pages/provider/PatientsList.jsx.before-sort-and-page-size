@@ -1,0 +1,327 @@
+import React from "react";
+import { Link } from "react-router-dom";
+import PortalLayout, { PortalHeader } from "../PortalLayout";
+import api from "../../lib/api";
+import { Input } from "../../components/ui/input";
+import { Button } from "../../components/ui/button";
+import {
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Circle,
+  Loader2,
+  Search,
+  UserPlus,
+} from "lucide-react";
+import { useToast } from "../../hooks/use-toast";
+import AddPatientWizard from "../../components/AddPatientWizard";
+import { getErrorMessage } from "../../lib/errors";
+
+const PAGE_SIZE = 50;
+
+export default function PatientsList() {
+  const { toast } = useToast();
+
+  const [patients, setPatients] = React.useState([]);
+  const [q, setQ] = React.useState("");
+  const [debouncedQ, setDebouncedQ] = React.useState("");
+  const [page, setPage] = React.useState(1);
+  const [total, setTotal] = React.useState(0);
+  const [pages, setPages] = React.useState(0);
+  const [loading, setLoading] = React.useState(true);
+  const [showWizard, setShowWizard] = React.useState(false);
+
+  React.useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedQ(q.trim());
+      setPage(1);
+    }, 300);
+
+    return () => window.clearTimeout(timer);
+  }, [q]);
+
+  const load = React.useCallback(async () => {
+    setLoading(true);
+
+    try {
+      const response = await api.get("/clients", {
+        params: {
+          page,
+          page_size: PAGE_SIZE,
+          q: debouncedQ || undefined,
+        },
+      });
+
+      const data = response.data || {};
+
+      setPatients(
+        Array.isArray(data.items)
+          ? data.items
+          : Array.isArray(data)
+            ? data
+            : []
+      );
+
+      setTotal(
+        typeof data.total === "number"
+          ? data.total
+          : Array.isArray(data)
+            ? data.length
+            : 0
+      );
+
+      setPages(
+        typeof data.pages === "number"
+          ? data.pages
+          : 1
+      );
+    } catch (error) {
+      setPatients([]);
+      setTotal(0);
+      setPages(0);
+
+      toast({
+        title: "Could not load patients",
+        description:
+          getErrorMessage(error) ||
+          "Please refresh and try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, [page, debouncedQ, toast]);
+
+  React.useEffect(() => {
+    load();
+  }, [load]);
+
+  const firstRow =
+    total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+
+  const lastRow = Math.min(
+    page * PAGE_SIZE,
+    total
+  );
+
+  const goToPrevious = () => {
+    setPage((current) => Math.max(1, current - 1));
+  };
+
+  const goToNext = () => {
+    setPage((current) =>
+      Math.min(pages || 1, current + 1)
+    );
+  };
+
+  return (
+    <PortalLayout>
+      <PortalHeader
+        title="Patients"
+        subtitle={`${total.toLocaleString()} total`}
+        actions={
+          <Button
+            onClick={() => setShowWizard(true)}
+            className="btn-lift h-11 rounded-full bg-[#2f4a3a] text-[#f6f1e6] hover:bg-[#263d30]"
+            data-testid="patients-add-btn"
+          >
+            <UserPlus size={16} className="mr-2" />
+            Add patient
+          </Button>
+        }
+      />
+
+      <AddPatientWizard
+        open={showWizard}
+        onOpenChange={setShowWizard}
+        onCreated={() => {
+          setPage(1);
+          load();
+        }}
+      />
+
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="relative w-full max-w-md">
+          <Search
+            size={16}
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8a6a3c]"
+          />
+
+          <Input
+            value={q}
+            onChange={(event) =>
+              setQ(event.target.value)
+            }
+            placeholder="Search by name, email, phone, or MRN…"
+            className="bg-[#fbf7ee] pl-9 border-[#e0d6bc]"
+            data-testid="patients-search-input"
+          />
+
+          {loading && (
+            <Loader2
+              size={14}
+              className="absolute right-3 top-1/2 -translate-y-1/2 animate-spin text-[#8a6a3c]"
+            />
+          )}
+        </div>
+
+        <div className="text-sm text-[#6a6a6a]">
+          {total > 0
+            ? `Showing ${firstRow.toLocaleString()}–${lastRow.toLocaleString()} of ${total.toLocaleString()}`
+            : "No matching patients"}
+        </div>
+      </div>
+
+      <div className="overflow-x-auto rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee]">
+        <table className="w-full min-w-[900px] text-sm">
+          <thead className="bg-[#f1ead8] text-[11px] uppercase tracking-widest text-[#8a6a3c]">
+            <tr>
+              <th className="px-4 py-3 text-left">
+                MRN
+              </th>
+              <th className="px-4 py-3 text-left">
+                Name
+              </th>
+              <th className="px-4 py-3 text-left">
+                DOB
+              </th>
+              <th className="px-4 py-3 text-left">
+                Email
+              </th>
+              <th className="px-4 py-3 text-left">
+                Phone
+              </th>
+              <th className="px-4 py-3 text-left">
+                Intake
+              </th>
+              <th className="px-4 py-3 text-right">
+                Action
+              </th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {!loading && patients.length === 0 && (
+              <tr>
+                <td
+                  colSpan={7}
+                  className="py-10 text-center text-[#6a6a6a]"
+                >
+                  {debouncedQ
+                    ? `No patients found for “${debouncedQ}”.`
+                    : "No patients found."}
+                </td>
+              </tr>
+            )}
+
+            {loading && patients.length === 0 && (
+              <tr>
+                <td
+                  colSpan={7}
+                  className="py-10 text-center text-[#6a6a6a]"
+                >
+                  <Loader2
+                    size={16}
+                    className="mr-2 inline animate-spin"
+                  />
+                  Loading patients…
+                </td>
+              </tr>
+            )}
+
+            {patients.map((patient) => (
+              <tr
+                key={patient.id}
+                className="border-t border-[#e7dfc9] hover:bg-[#f1ead8]/60"
+                data-testid={`patient-row-${patient.id}`}
+              >
+                <td className="px-4 py-3 font-mono text-xs text-[#8a6a3c]">
+                  {patient.mrn ||
+                    patient.id
+                      ?.slice(0, 8)
+                      .toUpperCase() ||
+                    "—"}
+                </td>
+
+                <td className="px-4 py-3 font-medium text-[#1f2a22]">
+                  {patient.full_name || "—"}
+                </td>
+
+                <td className="px-4 py-3 text-xs text-[#6a6a6a]">
+                  {patient.dob || "—"}
+                </td>
+
+                <td className="px-4 py-3 text-[#3a3a3a]">
+                  {patient.email || "—"}
+                </td>
+
+                <td className="px-4 py-3 text-[#3a3a3a]">
+                  {patient.phone || "—"}
+                </td>
+
+                <td className="px-4 py-3">
+                  {patient.intake_completed ? (
+                    <span className="inline-flex items-center gap-1 text-xs text-[#2f4a3a]">
+                      <CheckCircle2 size={14} />
+                      Complete
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 text-xs text-[#8a6a3c]">
+                      <Circle size={14} />
+                      Pending
+                    </span>
+                  )}
+                </td>
+
+                <td className="px-4 py-3 text-right">
+                  <Link
+                    to={`/portal/provider/patients/${patient.id}`}
+                    className="text-sm text-[#2f4a3a] hover:underline"
+                  >
+                    Open chart
+                  </Link>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="text-sm text-[#6a6a6a]">
+          Page {pages === 0 ? 0 : page} of {pages}
+        </div>
+
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={goToPrevious}
+            disabled={loading || page <= 1}
+            className="rounded-full border-[#2f4a3a] text-[#2f4a3a]"
+            data-testid="patients-previous-page"
+          >
+            <ChevronLeft size={15} className="mr-1" />
+            Previous
+          </Button>
+
+          <Button
+            type="button"
+            variant="outline"
+            onClick={goToNext}
+            disabled={
+              loading ||
+              pages === 0 ||
+              page >= pages
+            }
+            className="rounded-full border-[#2f4a3a] text-[#2f4a3a]"
+            data-testid="patients-next-page"
+          >
+            Next
+            <ChevronRight size={15} className="ml-1" />
+          </Button>
+        </div>
+      </div>
+    </PortalLayout>
+  );
+}

@@ -69,11 +69,37 @@ export default function AuthCard({
     setBusy(true);
     try {
       const res = await loginWithPassword(form.email, form.password, form.mfa || undefined);
+      if (res.bootstrap_required) {
+        if (res.bootstrap_stage === "password_change") {
+          toast({
+            title: "Password update required",
+            description: "Choose a permanent password before continuing.",
+          });
+          navigate("/change-password", { replace: true });
+          return;
+        }
+
+        if (res.bootstrap_stage === "mfa_enrollment") {
+          toast({
+            title: "MFA enrollment required",
+            description: "Set up your authenticator before continuing.",
+          });
+          navigate("/bootstrap-mfa", { replace: true });
+          return;
+        }
+
+        throw new Error("Unsupported onboarding stage.");
+      }
+
       if (res.mfa_required) {
         setMfaRequired(true);
-        toast({ title: "Two-factor required", description: "Enter the 6-digit code from your authenticator app." });
+        toast({
+          title: "Two-factor required",
+          description: "Enter the 6-digit code from your authenticator app.",
+        });
         return;
       }
+
       finishLogin(res);
     } catch (err) {
       toast({ title: "Sign in failed", description: getErrorMessage(err) || "Please try again." });

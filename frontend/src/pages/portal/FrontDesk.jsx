@@ -13,6 +13,7 @@ import {
   ClipboardCheck, FileText, FolderOpen, CheckCircle2, XCircle, CreditCard,
 } from "lucide-react";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
 
 const STATUSES = [
   { v: "checked_in", label: "Checked in" },
@@ -42,15 +43,19 @@ export default function FrontDesk() {
       const in30 = new Date(todayStart.getTime() + 30 * 24 * 3600 * 1000);
       const [v, c, r] = await Promise.all([
         api.get("/front-desk/today"),
-        api.get("/clients"),
+        api.getList("/clients", {}, ["clients"]),
         // Handoff #1: patient-initiated appointments arrive as `requested`.
         api.get("/appointments", {
           params: { start: todayStart.toISOString(), end: in30.toISOString() },
         }).catch(() => ({ data: [] })),
       ]);
-      setVisits(v.data || []);
-      setClients(c.data || []);
-      setRequests((r.data || []).filter((a) => a.status === "requested"));
+      setVisits(normalizeArray(v.data, ["visits"]));
+      setClients(normalizeArray(c.data, ["clients"]));
+      setRequests(
+        normalizeArray(r.data, ["appointments"]).filter(
+          (appointment) => appointment.status === "requested"
+        )
+      );
     } catch (e) {
       toast({ title: "Failed to load", description: getErrorMessage(e) || "" });
     } finally {
@@ -67,7 +72,7 @@ export default function FrontDesk() {
 
   const checkIn = async () => {
     if (!form.client_id) {
-      toast({ title: "Select a client" });
+      toast({ title: "Select a patient" });
       return;
     }
     try {
@@ -114,7 +119,7 @@ export default function FrontDesk() {
     navigate(`/portal/staff/pos?${params.toString()}`);
   };
 
-  const filtered = visits.filter((v) => {
+  const filtered = normalizeArray(visits).filter((v) => {
     if (search && !(v.client_name || "").toLowerCase().includes(search.toLowerCase())) return false;
     if (filterKey === "in_clinic") return v.status === "checked_in" || v.status === "in_room";
     if (filterKey === "walk_in") return v.walk_in;
@@ -130,9 +135,9 @@ export default function FrontDesk() {
   };
 
   const counts = {
-    in: visits.filter((v) => v.status === "checked_in" || v.status === "in_room").length,
-    walk: visits.filter((v) => v.walk_in).length,
-    out: visits.filter((v) => v.status === "checked_out").length,
+    in: normalizeArray(visits).filter((v) => v.status === "checked_in" || v.status === "in_room").length,
+    walk: normalizeArray(visits).filter((v) => v.walk_in).length,
+    out: normalizeArray(visits).filter((v) => v.status === "checked_out").length,
   };
 
   return (
@@ -200,7 +205,7 @@ export default function FrontDesk() {
             <span className="text-[10px] uppercase tracking-wider text-[#8a6a3c]">Awaiting confirmation</span>
           </div>
           <ul className="space-y-2">
-            {requests.map((a) => (
+            {normalizeArray(requests).map((a) => (
               <li key={a.id} className="flex items-center justify-between gap-3 rounded-lg bg-white/70 border border-[#e6d38a] px-3 py-2"
                   data-testid={`frontdesk-request-${a.id}`}>
                 <div className="min-w-0 text-sm">
@@ -231,7 +236,7 @@ export default function FrontDesk() {
       )}
 
       <Input
-        placeholder="Search by client name…"
+        placeholder="Search by patient name…"
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         className="mb-4 max-w-sm bg-[#f6f1e6] border-[#e0d6bc]"
@@ -242,7 +247,7 @@ export default function FrontDesk() {
         <table className="w-full text-sm">
           <thead className="bg-[#f1ead8] text-[#8a6a3c] uppercase text-[11px] tracking-widest">
             <tr>
-              <th className="text-left py-3 px-4">Client</th>
+              <th className="text-left py-3 px-4">Patient</th>
               <th className="text-left py-3 px-4">Status</th>
               <th className="text-left py-3 px-4">Room</th>
               <th className="text-left py-3 px-4">Type</th>
@@ -318,18 +323,18 @@ export default function FrontDesk() {
       <Dialog open={showCheckin} onOpenChange={setShowCheckin}>
         <DialogContent className="bg-[#fbf7ee] border-[#e7dfc9]">
           <DialogHeader>
-            <DialogTitle>Check in client</DialogTitle>
+            <DialogTitle>Check in patient</DialogTitle>
             <DialogDescription>Record a scheduled or walk-in visit and assign a room.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div>
-              <Label>Client</Label>
+              <Label>Patient</Label>
               <Select value={form.client_id} onValueChange={(v) => setForm({ ...form, client_id: v })}>
                 <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="checkin-client-select">
-                  <SelectValue placeholder="Select client…" />
+                  <SelectValue placeholder="Select patient…" />
                 </SelectTrigger>
                 <SelectContent>
-                  {clients.map((c) => (
+                  {normalizeArray(clients).map((c) => (
                     <SelectItem key={c.id} value={c.id}>{c.full_name || c.email || c.id}</SelectItem>
                   ))}
                 </SelectContent>

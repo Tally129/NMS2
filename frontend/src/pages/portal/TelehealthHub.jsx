@@ -44,9 +44,22 @@ export default function TelehealthHub() {
     const s = new Date(a.start);
     return s >= now && s <= inOneHour;
   };
-  const isActive = (a) => a.status === "in_session" || a.status === "arrived";
-  const isUpcoming = (a) => new Date(a.start) >= now && !["completed", "canceled", "no_show"].includes(a.status);
-  const isHistory = (a) => ["completed", "no_show", "canceled"].includes(a.status) || new Date(a.end || a.start) < now;
+  const isEnded = (a) =>
+    a.waiting_room?.state === "ended";
+
+  const isUpcoming = (a) =>
+    !isEnded(a) &&
+    new Date(a.start) >= now &&
+    !["completed", "canceled", "no_show"].includes(a.status);
+
+  const isActive = (a) =>
+    !isEnded(a) &&
+    (a.status === "in_session" || a.status === "arrived");
+
+  const isHistory = (a) =>
+    isEnded(a) ||
+    ["completed", "no_show", "canceled"].includes(a.status) ||
+    new Date(a.end || a.start) < now;
 
   const filtered = (list) => filter === "all" ? list :
     list.filter((a) => filter === "today" ? new Date(a.start).toDateString() === now.toDateString() :
@@ -87,6 +100,7 @@ export default function TelehealthHub() {
       </div>
 
       {isProvider && <WaitingRoomQueue />}
+      {!isProvider && <PatientVisitInvitations rows={appts} />}
 
       <Tabs defaultValue="upcoming">
         <TabsList className="bg-[#f1ead8]">
@@ -105,7 +119,14 @@ export default function TelehealthHub() {
         </TabsContent>
 
         <TabsContent value="history" className="mt-4">
-          <VisitList rows={history} loading={false} emptyMsg="No past telehealth visits yet." showRecordings={isProvider} />
+          <VisitList
+            rows={history}
+            loading={false}
+            emptyMsg="No past telehealth visits yet."
+            showRecordings={isProvider}
+            canArchive={isProvider}
+            onChanged={load}
+          />
         </TabsContent>
 
         <TabsContent value="equipment" className="mt-4">
@@ -118,23 +139,74 @@ export default function TelehealthHub() {
   );
 }
 
-function VisitList({ rows, loading, emptyMsg, showJoinHints, showRecordings, active }) {
+function VisitList({
+  rows,
+  loading,
+  emptyMsg,
+  showJoinHints,
+  showRecordings,
+  active,
+  canArchive = false,
+  onChanged,
+}) {
   if (loading) return <div className="text-center text-[#6a6a6a] py-12"><Loader2 className="inline animate-spin mr-2" size={16} /> Loading…</div>;
   if (rows.length === 0) return <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-12 text-center text-[#6a6a6a]">{emptyMsg}</div>;
   return (
     <div className="space-y-3">
-      {rows.map((a) => <VisitCard key={a.id} a={a} canJoin={showJoinHints || active} active={active} showRecordings={showRecordings} />)}
+      {rows.map((a) => (
+        <VisitCard
+          key={a.id}
+          a={a}
+          canJoin={showJoinHints || active}
+          active={active}
+          showRecordings={showRecordings}
+          canArchive={canArchive}
+          onChanged={onChanged}
+        />
+      ))}
     </div>
   );
 }
 
-function VisitCard({ a, canJoin, active, showRecordings }) {
+function VisitCard({
+  a,
+  canJoin,
+  active,
+  showRecordings,
+  canArchive = false,
+  onChanged,
+}) {
+  const { toast } = useToast();
+  const [archiving, setArchiving] = React.useState(false);
   const start = new Date(a.start);
   const now = new Date();
   const minsUntil = Math.round((start - now) / 60_000);
   const joinable = active || (minsUntil >= -10 && minsUntil <= 60);  // 10-min grace, 1h pre
   const dateLabel = start.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
   const timeLabel = start.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+  const archiveVisit = async () => {
+    const confirmed = window.confirm(
+      "Archive this telehealth visit? It will be removed from the normal list, but its clinical history will be preserved."
+    );
+
+    if (!confirmed) return;
+
+    setArchiving(true);
+
+    try {
+      await api.post(`/appointments/${a.id}/archive`);
+      toast({ title: "Visit archived" });
+      await onChanged?.();
+    } catch (error) {
+      toast({
+        title: "Archive failed",
+        description: getErrorMessage(error) || "Try again.",
+      });
+    } finally {
+      setArchiving(false);
+    }
+  };
 
   return (
     <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5 flex flex-col md:flex-row md:items-center gap-4" data-testid={`th-visit-${a.id}`}>
@@ -165,6 +237,29 @@ function VisitCard({ a, canJoin, active, showRecordings }) {
         </Link>
         {showRecordings && (a.recordings || []).length > 0 && (
           <span className="text-xs text-[#6a6a6a] flex items-center gap-1"><FileVideo size={11} /> {a.recordings.length} recording(s)</span>
+        )}
+
+        {canArchive && (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={archiveVisit}
+            disabled={archiving}
+            className="rounded-full h-9 w-full border-[#8a6a3c] text-[#8a6a3c] hover:bg-[#f1ead8]"
+            data-testid={`th-archive-${a.id}`}
+          >
+            {archiving ? (
+              <>
+                <Loader2 size={13} className="mr-2 animate-spin" />
+                Archiving…
+              </>
+            ) : (
+              <>
+                <History size={13} className="mr-2" />
+                Archive
+              </>
+            )}
+          </Button>
         )}
       </div>
     </div>
@@ -257,6 +352,110 @@ function Diag({ label, value, ok, warn, fail }) {
   );
 }
 
+function PatientVisitInvitations({ rows }) {
+  const navigate = useNavigate();
+  const { toast } = useToast();
+  const [joiningId, setJoiningId] = React.useState("");
+
+  const invitations = (rows || []).filter((appointment) => {
+    const waitingRoom = appointment.waiting_room || {};
+    const state = waitingRoom.state;
+
+    if (state !== "invited") return false;
+
+    const expiresAt = waitingRoom.expires_at
+      ? new Date(waitingRoom.expires_at)
+      : null;
+
+    return !expiresAt || expiresAt.getTime() > Date.now();
+  });
+
+  const join = async (appointment) => {
+    setJoiningId(appointment.id);
+
+    try {
+      await api.post(
+        `/appointments/${appointment.id}/telehealth/request-join`
+      );
+
+      navigate(`/portal/visit/${appointment.id}`);
+    } catch (error) {
+      toast({
+        title: "Unable to join",
+        description:
+          getErrorMessage(error) ||
+          "The telehealth invitation may have expired.",
+      });
+    } finally {
+      setJoiningId("");
+    }
+  };
+
+  if (!invitations.length) return null;
+
+  return (
+    <div
+      className="mb-8 rounded-2xl border border-[#c19a4b] bg-[#fbf3df] p-5"
+      data-testid="patient-telehealth-invitations"
+    >
+      <div className="eyebrow text-[#8a6a3c]">
+        Telehealth request
+      </div>
+
+      <div className="mt-3 space-y-3">
+        {invitations.map((appointment) => {
+          const waitingRoom = appointment.waiting_room || {};
+
+          return (
+            <div
+              key={appointment.id}
+              className="flex flex-col justify-between gap-4 rounded-xl border border-[#e0d6bc] bg-[#fbf7ee] p-4 md:flex-row md:items-center"
+            >
+              <div>
+                <div className="font-display text-xl text-[#1f2a22]">
+                  {waitingRoom.provider_name ||
+                    appointment.practitioner_name ||
+                    "Your provider"}{" "}
+                  is inviting you to a video visit
+                </div>
+
+                <div className="mt-1 text-sm text-[#6a6a6a]">
+                  Select Join waiting room. Your provider will admit
+                  you when ready.
+                </div>
+
+                {waitingRoom.expires_at && (
+                  <div className="mt-2 text-xs text-[#8a6a3c]">
+                    Invitation expires at{" "}
+                    {new Date(
+                      waitingRoom.expires_at
+                    ).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <Button
+                onClick={() => join(appointment)}
+                disabled={joiningId === appointment.id}
+                className="rounded-full bg-[#2f4a3a] text-[#f6f1e6] hover:bg-[#263d30]"
+                data-testid={`patient-join-instant-${appointment.id}`}
+              >
+                {joiningId === appointment.id
+                  ? "Joining…"
+                  : "Join waiting room"}
+              </Button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+
 function InstantVisitDialog({ open, onOpenChange, onCreated }) {
   const { toast } = useToast();
   const navigate = useNavigate();
@@ -267,21 +466,35 @@ function InstantVisitDialog({ open, onOpenChange, onCreated }) {
   React.useEffect(() => { if (open) api.get("/clients").then((r) => setClients(r.data || [])); }, [open]);
 
   const submit = async () => {
-    if (!form.client_id) { toast({ title: "Select a client" }); return; }
+    if (!form.client_id) { toast({ title: "Select a patient" }); return; }
     setSubmitting(true);
     try {
       const start = new Date();
       const end = new Date(start.getTime() + form.duration * 60_000);
       const r = await api.post("/appointments", {
         client_id: form.client_id,
-        start: start.toISOString(), end: end.toISOString(),
-        visit_mode: "telehealth", visit_type: "Instant telehealth",
-        reason: form.reason, status: "in_session",
+        start: start.toISOString(),
+        end: end.toISOString(),
+        visit_mode: "telehealth",
+        visit_type: "Instant telehealth",
+        reason: form.reason,
+        status: "scheduled",
       });
-      toast({ title: "Instant visit started" });
+
+      await api.post(
+        `/appointments/${r.data.id}/telehealth/invite`
+      );
+
+      toast({
+        title: "Invitation sent",
+        description:
+          "The patient can now join your waiting room from their portal.",
+      });
+
       onOpenChange(false);
       onCreated && onCreated();
-      // Open the visit immediately (preserve auth context via React Router)
+
+      // Provider enters their waiting-room view immediately.
       navigate(`/portal/visit/${r.data.id}`);
     } catch (e) {
       toast({ title: "Failed to start", description: getErrorMessage(e) || "" });
@@ -297,9 +510,9 @@ function InstantVisitDialog({ open, onOpenChange, onCreated }) {
         </DialogHeader>
         <div className="space-y-4">
           <div>
-            <Label>Client</Label>
+            <Label>Patient</Label>
             <Select value={form.client_id} onValueChange={(v) => setForm({ ...form, client_id: v })}>
-              <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="th-instant-client"><SelectValue placeholder="Select client…" /></SelectTrigger>
+              <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="th-instant-client"><SelectValue placeholder="Select patient…" /></SelectTrigger>
               <SelectContent>{clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}</SelectContent>
             </Select>
           </div>

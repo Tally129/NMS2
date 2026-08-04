@@ -2,6 +2,13 @@ import React from "react";
 import PortalLayout, { PortalHeader } from "../PortalLayout";
 import api, { downloadBlob } from "../../lib/api";
 import { Button } from "../../components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../../components/ui/select";
 import { Upload, Download, FolderOpen } from "lucide-react";
 import { useToast } from "../../hooks/use-toast";
 import { getErrorMessage } from "../../lib/errors";
@@ -11,7 +18,7 @@ export default function PatientFiles({ clientIdProp }) {
   const [files, setFiles] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
   const [uploading, setUploading] = React.useState(false);
-  const [clientId, setClientId] = React.useState(clientIdProp || null);
+  const [category, setCategory] = React.useState("doc");
   const inputRef = React.useRef(null);
 
   const [loadError, setLoadError] = React.useState(null);
@@ -20,13 +27,9 @@ export default function PatientFiles({ clientIdProp }) {
     setLoading(true);
     setLoadError(null);
     try {
-      let cid = clientIdProp || clientId;
-      if (!cid) {
-        const me = await api.get("/clients/me");
-        cid = me.data.id;
-        setClientId(cid);
-      }
-      const r = await api.get("/files", { params: { client_id: cid } });
+      // The backend automatically resolves the signed-in patient's record.
+      // Do not submit or trust a patient-provided client_id.
+      const r = await api.get("/files");
       setFiles(r.data || []);
     } catch (e) {
       setFiles([]);
@@ -34,7 +37,7 @@ export default function PatientFiles({ clientIdProp }) {
     } finally {
       setLoading(false);
     }
-  }, [clientId, clientIdProp]);
+  }, []);
 
   React.useEffect(() => {
     load();
@@ -48,8 +51,7 @@ export default function PatientFiles({ clientIdProp }) {
     try {
       const fd = new FormData();
       fd.append("file", file);
-      fd.append("category", "lab");
-      if (clientId) fd.append("client_id", clientId);
+      fd.append("category", category);
       await api.post("/files/upload", fd, { headers: { "Content-Type": "multipart/form-data" } });
       toast({ title: "Uploaded", description: file.name });
       e.target.value = "";
@@ -75,15 +77,41 @@ export default function PatientFiles({ clientIdProp }) {
   return (
     <PortalLayout>
       <PortalHeader
-        title="Files & Labs"
-        subtitle="Encrypted storage. Only you and your care team can access."
+        title="My Documents"
+        subtitle="Upload personal records, outside reports, forms, and images to share securely with your care team."
         actions={
-          <Button onClick={onPick} disabled={uploading} className="btn-lift h-11 rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]">
-            <Upload size={16} className="mr-2" /> {uploading ? "Uploading…" : "Upload"}
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Select value={category} onValueChange={setCategory}>
+              <SelectTrigger className="h-11 w-56 bg-white border-[#e0d6bc]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="lab">Outside lab report</SelectItem>
+                <SelectItem value="doc">Medical record or document</SelectItem>
+                <SelectItem value="image">Image or scan</SelectItem>
+                <SelectItem value="intake">Intake paperwork</SelectItem>
+                <SelectItem value="other">Other document</SelectItem>
+              </SelectContent>
+            </Select>
+
+            <Button
+              onClick={onPick}
+              disabled={uploading}
+              className="btn-lift h-11 rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]"
+            >
+              <Upload size={16} className="mr-2" />
+              {uploading ? "Uploading…" : "Upload document"}
+            </Button>
+          </div>
         }
       />
-      <input ref={inputRef} type="file" onChange={onFile} className="hidden" />
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".pdf,.png,.jpg,.jpeg,.doc,.docx,.txt,.csv"
+        onChange={onFile}
+        className="hidden"
+      />
 
       {loading ? (
         <div className="text-[#6a6a6a]">Loading…</div>
@@ -102,7 +130,7 @@ export default function PatientFiles({ clientIdProp }) {
       ) : files.length === 0 ? (
         <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-10 text-center text-[#6a6a6a]">
           <FolderOpen size={28} className="mx-auto text-[#c19a4b]" />
-          <div className="mt-3">No files yet. Upload labs or documents to share with your care team.</div>
+          <div className="mt-3">No documents yet. Upload a personal record, report, image, or form to share with your care team.</div>
         </div>
       ) : (
         <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] overflow-hidden">

@@ -203,7 +203,7 @@ export default function StaffDashboard() {
 
       <div className="mt-8 grid sm:grid-cols-3 gap-3">
         <QuickLink to="/portal/staff/appointments" icon={CalendarDays} label="Schedule" />
-        <QuickLink to="/portal/staff/patients" icon={Users} label="Clients" />
+        <QuickLink to="/portal/staff/patients" icon={Users} label="Patients" />
         <QuickLink to="/portal/staff/transactions" icon={Receipt} label="Transactions" />
       </div>
     </PortalLayout>

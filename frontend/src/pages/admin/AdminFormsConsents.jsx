@@ -29,6 +29,53 @@ const FIELD_TYPES = [
   { v: "signature", label: "Signature" },
 ];
 
+const INTAKE_MAPPINGS = {
+  Demographics: [
+    "demographics.first_name",
+    "demographics.last_name",
+    "demographics.date_of_birth",
+    "demographics.sex",
+    "demographics.phone",
+    "demographics.email",
+    "demographics.address",
+    "demographics.marital_status",
+    "demographics.emergency_contact",
+  ],
+
+  "Health History": [
+    "health_history.medical_history",
+    "health_history.medications",
+    "health_history.allergies",
+    "health_history.surgeries",
+    "health_history.family_history",
+    "health_history.current_supplements",
+  ],
+
+  Symptoms: [
+    "symptoms.primary_concern",
+    "symptoms.current",
+    "symptoms.duration",
+    "symptoms.severity",
+  ],
+
+  Lifestyle: [
+    "lifestyle.wellness_goals",
+    "lifestyle.exercise",
+    "lifestyle.sleep",
+    "lifestyle.diet",
+    "lifestyle.stress",
+  ],
+
+  Consent: [
+    "consent.telehealth",
+    "consent.photo",
+    "consent.marketing",
+    "consent.hipaa",
+  ],
+
+  Other: [],
+};
+
 const CATEGORIES = [
   { v: "consent", label: "Consent" },
   { v: "treatment", label: "Treatment" },
@@ -371,7 +418,17 @@ function FormEditorDialog({ open, onOpenChange, template, onSaved }) {
   });
   const addField = () => setT((prev) => ({
     ...prev,
-    fields: [...(prev.fields || []), { id: `field-${(prev.fields || []).length + 1}`, type: "text", label: "New question", required: false, options: [] }],
+    fields: [...(prev.fields || []), {
+      id: `field-${(prev.fields || []).length + 1}`,
+      type: "text",
+      label: "New question",
+      required: false,
+      options: [],
+      section: "Other",
+      mapping: null,
+      mapping_status: "unmapped",
+      mapping_confidence: null,
+    }],
   }));
   const removeField = (idx) => setT((prev) => ({ ...prev, fields: prev.fields.filter((_, i) => i !== idx) }));
   const moveField = (idx, dir) => setT((prev) => {
@@ -391,6 +448,20 @@ function FormEditorDialog({ open, onOpenChange, template, onSaved }) {
         description: t.description || "",
         category: t.category || "other",
         active: t.active !== false,
+        source: t.source || "manual",
+        source_filename: t.source_filename || null,
+        form_type: t.form_type || (
+          t.category === "intake" ? "intake" :
+          ["consent", "hipaa", "photo_release", "treatment"].includes(t.category)
+            ? "consent"
+            : "other"
+        ),
+        version: Number(t.version || 1),
+        publication_status: t.publication_status || "draft",
+        requires_signature:
+          t.requires_signature ??
+          (t.fields || []).some((f) => f.type === "signature"),
+        auto_assign_new_patients: !!t.auto_assign_new_patients,
         fields: (t.fields || []).map((f, i) => ({
           id: f.id || `field-${i + 1}`,
           type: f.type || "text",
@@ -399,6 +470,16 @@ function FormEditorDialog({ open, onOpenChange, template, onSaved }) {
           placeholder: f.placeholder || null,
           options: Array.isArray(f.options) ? f.options : (f.options || "").split(",").map((s) => s.trim()).filter(Boolean),
           help_text: f.help_text || null,
+          section: f.section || "Other",
+          mapping: f.mapping || null,
+          mapping_status: f.mapping
+            ? (f.mapping_status || "approved")
+            : "unmapped",
+          mapping_confidence:
+            f.mapping_confidence === null ||
+            f.mapping_confidence === undefined
+              ? null
+              : Number(f.mapping_confidence),
         })),
       };
       if (t.id) await api.put(`/forms/templates/${t.id}`, body);
@@ -433,7 +514,49 @@ function FormEditorDialog({ open, onOpenChange, template, onSaved }) {
           </div>
           <div>
             <Label>Description</Label>
-            <Textarea className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" rows={2} value={t.description || ""} onChange={(e) => update({ description: e.target.value })} data-testid="form-editor-description" />
+            <Textarea
+              className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]"
+              rows={2}
+              value={t.description || ""}
+              onChange={(e) => update({ description: e.target.value })}
+              data-testid="form-editor-description"
+            />
+          </div>
+
+          <div className="grid gap-3 rounded-xl border border-[#e7dfc9] bg-[#f6f1e6] p-4 md:grid-cols-2">
+            <div>
+              <Label>Publication status</Label>
+              <Select
+                value={t.publication_status || "draft"}
+                onValueChange={(publication_status) =>
+                  update({ publication_status })
+                }
+              >
+                <SelectTrigger className="mt-2 bg-[#fbf7ee] border-[#e0d6bc]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="draft">Draft — admin review</SelectItem>
+                  <SelectItem value="published">Published — ready to assign</SelectItem>
+                  <SelectItem value="archived">Archived</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex items-end">
+              <label className="flex min-h-10 items-center gap-2 rounded-lg border border-[#e0d6bc] bg-[#fbf7ee] px-3 text-sm text-[#3a3a3a]">
+                <input
+                  type="checkbox"
+                  checked={!!t.auto_assign_new_patients}
+                  onChange={(e) =>
+                    update({
+                      auto_assign_new_patients: e.target.checked,
+                    })
+                  }
+                />
+                Automatically assign to new patients
+              </label>
+            </div>
           </div>
           <div>
             <div className="flex items-center justify-between mb-2">
@@ -468,17 +591,141 @@ function FormEditorDialog({ open, onOpenChange, template, onSaved }) {
                       )}
                       <div className="flex items-center gap-4 text-xs text-[#3a3a3a]">
                         <label className="inline-flex items-center gap-1.5">
-                          <input type="checkbox" checked={!!f.required} onChange={(e) => updField(idx, { required: e.target.checked })} />
+                          <input
+                            type="checkbox"
+                            checked={!!f.required}
+                            onChange={(e) =>
+                              updField(idx, { required: e.target.checked })
+                            }
+                          />
                           Required
                         </label>
-                        {f.help_text !== undefined && (
-                          <Input
-                            placeholder="Helper text (optional)"
-                            value={f.help_text || ""}
-                            onChange={(e) => updField(idx, { help_text: e.target.value })}
-                            className="flex-1 h-8 bg-[#fbf7ee] border-[#e0d6bc] text-xs"
-                          />
-                        )}
+
+                        <Input
+                          placeholder="Helper text (optional)"
+                          value={f.help_text || ""}
+                          onChange={(e) =>
+                            updField(idx, { help_text: e.target.value })
+                          }
+                          className="flex-1 h-8 bg-[#fbf7ee] border-[#e0d6bc] text-xs"
+                        />
+                      </div>
+
+                      <div className="mt-3 rounded-lg border border-[#e0d6bc] bg-[#fbf7ee] p-3">
+                        <div className="mb-2 flex items-center justify-between">
+                          <div>
+                            <div className="text-xs font-semibold uppercase tracking-wider text-[#8a6a3c]">
+                              Intake mapping
+                            </div>
+                            <div className="mt-0.5 text-xs text-[#6a6a6a]">
+                              Review the AI suggestion before publishing.
+                            </div>
+                          </div>
+
+                          {f.mapping_confidence !== null &&
+                            f.mapping_confidence !== undefined && (
+                              <span className="rounded-full border border-[#e0d6bc] bg-[#f1ead8] px-2 py-1 text-[10px] font-medium text-[#8a6a3c]">
+                                AI {Math.round(Number(f.mapping_confidence || 0) * 100)}%
+                              </span>
+                            )}
+                        </div>
+
+                        <div className="grid gap-2 md:grid-cols-2">
+                          <div>
+                            <Label className="text-xs">Section</Label>
+                            <Select
+                              value={f.section || "Other"}
+                              onValueChange={(section) => {
+                                const allowed =
+                                  INTAKE_MAPPINGS[section] || [];
+
+                                const keepCurrent =
+                                  f.mapping &&
+                                  allowed.includes(f.mapping);
+
+                                updField(idx, {
+                                  section,
+                                  mapping: keepCurrent ? f.mapping : null,
+                                  mapping_status: keepCurrent
+                                    ? (f.mapping_status || "suggested")
+                                    : "unmapped",
+                                });
+                              }}
+                            >
+                              <SelectTrigger className="mt-1 bg-white border-[#e0d6bc]">
+                                <SelectValue />
+                              </SelectTrigger>
+
+                              <SelectContent>
+                                {Object.keys(INTAKE_MAPPINGS).map((section) => (
+                                  <SelectItem key={section} value={section}>
+                                    {section}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+
+                          <div>
+                            <Label className="text-xs">Structured intake field</Label>
+                            <Select
+                              value={f.mapping || "__unmapped__"}
+                              onValueChange={(mapping) =>
+                                updField(idx, {
+                                  mapping:
+                                    mapping === "__unmapped__"
+                                      ? null
+                                      : mapping,
+                                  mapping_status:
+                                    mapping === "__unmapped__"
+                                      ? "unmapped"
+                                      : "approved",
+                                })
+                              }
+                            >
+                              <SelectTrigger className="mt-1 bg-white border-[#e0d6bc]">
+                                <SelectValue placeholder="Do not map" />
+                              </SelectTrigger>
+
+                              <SelectContent>
+                                <SelectItem value="__unmapped__">
+                                  Do not map — keep with submission
+                                </SelectItem>
+
+                                {(INTAKE_MAPPINGS[f.section || "Other"] || []).map(
+                                  (mapping) => (
+                                    <SelectItem key={mapping} value={mapping}>
+                                      {mapping}
+                                    </SelectItem>
+                                  )
+                                )}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+
+                        <div className="mt-2 flex items-center justify-between text-xs">
+                          <span className="text-[#6a6a6a]">
+                            Status:{" "}
+                            <strong className="text-[#3a3a3a]">
+                              {f.mapping_status || "unmapped"}
+                            </strong>
+                          </span>
+
+                          {f.mapping && f.mapping_status !== "approved" && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                updField(idx, {
+                                  mapping_status: "approved",
+                                })
+                              }
+                              className="font-medium text-[#2f4a3a] hover:underline"
+                            >
+                              Approve suggestion
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
                     <button onClick={() => removeField(idx)} className="text-[#7a2a2a] hover:opacity-70 mt-1" title="Remove">
@@ -659,11 +906,11 @@ function SendFormDialog({ template, onOpenChange, onSent }) {
         {!resultUrl ? (
           <div className="space-y-4">
             <div>
-              <Label>Client (optional)</Label>
+              <Label>Patient (optional)</Label>
               <Select value={clientId} onValueChange={setClientId}>
                 <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="forms-send-client"><SelectValue placeholder="Unlinked link" /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="none">No client (unlinked link)</SelectItem>
+                  <SelectItem value="none">No patient (unlinked link)</SelectItem>
                   {clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}
                 </SelectContent>
               </Select>
@@ -703,7 +950,7 @@ function SendFormDialog({ template, onOpenChange, onSent }) {
                   onChange={(e) => setTarget(e.target.value)}
                   data-testid="forms-send-target"
                 />
-                {!target && selectedClient && <p className="text-xs text-[#7a2a2a] mt-1">No {channel} on file for this client — enter one above.</p>}
+                {!target && selectedPatient && <p className="text-xs text-[#7a2a2a] mt-1">No {channel} on file for this patient — enter one above.</p>}
               </div>
             )}
             <div>

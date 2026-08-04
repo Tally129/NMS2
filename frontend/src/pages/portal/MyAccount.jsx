@@ -178,7 +178,7 @@ function MyDataExportCard() {
     setDisclosuresBusy(true);
     try {
       const me = await api.get("/clients/me");
-      if (!me.data?.id) throw new Error("no client record");
+      if (!me.data?.id) throw new Error("no patient record");
       const r = await api.get(`/clients/${me.data.id}/disclosures`);
       const blob = new Blob([JSON.stringify(r.data, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);

@@ -1,3 +1,4 @@
+
 import React from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
@@ -39,9 +40,11 @@ import {
   BarChart3,
   Home,
   Search,
+  Brain,
   Scale,
 } from "lucide-react";
 import GlobalSearchPalette from "../components/GlobalSearchPalette";
+import PortalErrorBoundary from "../components/PortalErrorBoundary";
 
 // =============== NAV CONFIG (grouped) ===============
 const NAV = {
@@ -84,17 +87,18 @@ const NAV = {
       items: [
         { to: "/portal/provider", label: "Dashboard", icon: LayoutDashboard },
         { to: "/portal/provider/front-desk", label: "Front Desk", icon: Briefcase },
+        { to: "/portal/provider/telehealth", label: "Telehealth", icon: Video },
         { to: "/portal/provider/appointments", label: "Appointments", icon: CalendarDays },
         { to: "/portal/provider/time-clock", label: "Time Clock", icon: Timer },
       ],
     },
     {
-      group: "Clients",
+      group: "Patients",
       items: [
-        { to: "/portal/provider/patients", label: "Clients", icon: Users },
+        { to: "/portal/provider/patients", label: "Patients", icon: Users },
         { to: "/portal/staff/tasks", label: "Tasks", icon: ClipboardCheck, badge: "tasks" },
         { to: "/portal/staff/lab-review", label: "Lab Review", icon: FlaskConical },
-        { to: "/portal/staff/campaigns", label: "Campaigns", icon: Megaphone },
+        { to: "/portal/staff/content-strategist", label: "AI Content Strategist", icon: Brain },
         { to: "/portal/provider/messages", label: "Messages", icon: MessageSquare, badge: "messages" },
       ],
     },
@@ -131,12 +135,12 @@ const NAV = {
       ],
     },
     {
-      group: "Clients",
+      group: "Patients",
       items: [
-        { to: "/portal/staff/patients", label: "Clients", icon: Users },
+        { to: "/portal/staff/patients", label: "Patients", icon: Users },
         { to: "/portal/staff/tasks", label: "Tasks", icon: ClipboardCheck, badge: "tasks" },
         { to: "/portal/staff/lab-review", label: "Lab Review", icon: FlaskConical },
-        { to: "/portal/staff/campaigns", label: "Campaigns", icon: Megaphone },
+        { to: "/portal/staff/content-strategist", label: "AI Content Strategist", icon: Brain },
       ],
     },
     {
@@ -174,13 +178,13 @@ const NAV = {
       ],
     },
     {
-      group: "Clients",
+      group: "Patients",
       items: [
-        { to: "/portal/provider/patients", label: "Clients", icon: Users },
+        { to: "/portal/provider/patients", label: "Patients", icon: Users },
         { to: "/portal/staff/tasks", label: "Tasks", icon: ClipboardCheck, badge: "tasks" },
         { to: "/portal/staff/lab-review", label: "Lab Review", icon: FlaskConical },
-        { to: "/portal/staff/campaigns", label: "Campaigns", icon: Megaphone },
-        { to: "/portal/admin/import-clients", label: "Import Clients", icon: Upload },
+        { to: "/portal/staff/content-strategist", label: "AI Content Strategist", icon: Brain },
+        { to: "/portal/admin/import-clients", label: "Import Patients", icon: Upload },
       ],
     },
     {
@@ -386,11 +390,13 @@ export default function PortalLayout({ children }) {
               <LogOut size={18} />
             </button>
           </div>
-          <main className="p-6 md:p-10 max-w-6xl mx-auto page-fade pb-24 md:pb-10">{children}</main>
+          <main className="p-6 md:p-10 max-w-6xl mx-auto page-fade pb-24 md:pb-10"><PortalErrorBoundary locationKey={window.location.pathname}>
+            {children}
+          </PortalErrorBoundary></main>
         </div>
       </div>
 
-      {/* Mobile bottom nav (PWA-style) for clients only */}
+      {/* Mobile bottom nav (PWA-style) for patients only */}
       {user?.role === "client" && (
         <nav
           className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#fbf7ee] border-t border-[#e7dfc9] flex justify-around py-2 pb-[env(safe-area-inset-bottom)]"

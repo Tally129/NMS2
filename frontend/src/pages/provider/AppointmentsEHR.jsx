@@ -10,6 +10,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../../components/ui/dialog";
 import { useToast } from "../../hooks/use-toast";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
 import {
   ChevronLeft, ChevronRight, Plus, CalendarDays, Video, Building2,
   PhoneCall, CheckCircle2, XCircle, UserCheck, PlayCircle, ExternalLink,
@@ -36,6 +37,8 @@ const STATUS = {
 const HOURS = Array.from({ length: 12 }, (_, i) => 8 + i); // 8 AM – 7 PM
 
 // ----------- main page -----------
+
+
 export default function AppointmentsEHR() {
   const { toast } = useToast();
   const [view, setView] = React.useState("week"); // day | week
@@ -55,10 +58,10 @@ export default function AppointmentsEHR() {
         api.get("/clients"),
         api.get("/treatments?active_only=true").catch(() => ({ data: [] })),
       ]);
-      setAppts(a.data || []);
-      setPractitioners(p.data || []);
-      setClients(c.data || []);
-      setTreatments(t.data || []);
+      setAppts(normalizeArray(a.data));
+      setPractitioners(normalizeArray(p.data));
+      setClients(normalizeArray(c.data));
+      setTreatments(normalizeArray(t.data));
     } catch (e) {
       toast({ title: "Failed to load schedule", description: getErrorMessage(e) || "" });
     }
@@ -246,7 +249,7 @@ export default function AppointmentsEHR() {
                   )}
                   <Link to={`/portal/provider/patients/${selected.client_id}`}
                     className="block mt-2 text-sm text-[#2f4a3a] hover:underline">
-                    Open client chart →
+                    Open patient chart →
                   </Link>
 
                   <div className="mt-4 pt-4 border-t border-[#e7dfc9]">
@@ -332,13 +335,13 @@ function NewAppointmentDialog({ open, onOpenChange, prefill, practitioners, clie
 
   const submit = async () => {
     if (!form.client_id || !form.practitioner_id || !date || !time) {
-      toast({ title: "Client, provider, date and time are required" });
+      toast({ title: "Patient, provider, date and time are required" });
       return;
     }
     setSubmitting(true);
     try {
       const start = new Date(`${date}T${time}:00`);
-      const tx = treatments.find((t) => t.id === form.treatment_id);
+      const tx = normalizeArray(treatments).find((t) => t.id === form.treatment_id);
       const dur = tx?.duration_min || parseInt(form.duration) || 60;
       const end = new Date(start.getTime() + dur * 60000);
       await api.post("/appointments", {
@@ -369,11 +372,11 @@ function NewAppointmentDialog({ open, onOpenChange, prefill, practitioners, clie
         </DialogHeader>
         <div className="grid gap-4 max-h-[60vh] overflow-y-auto pr-1">
           <div>
-            <Label>Client</Label>
+            <Label>Patient</Label>
             <Select value={form.client_id} onValueChange={(v) => setForm({ ...form, client_id: v })}>
-              <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="newappt-client"><SelectValue placeholder="Select client…" /></SelectTrigger>
+              <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="newappt-client"><SelectValue placeholder="Select patient…" /></SelectTrigger>
               <SelectContent>
-                {clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email || c.id}</SelectItem>)}
+                {normalizeArray(clients).map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email || c.id}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
@@ -382,7 +385,7 @@ function NewAppointmentDialog({ open, onOpenChange, prefill, practitioners, clie
             <Select value={form.practitioner_id} onValueChange={(v) => setForm({ ...form, practitioner_id: v })}>
               <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="newappt-provider"><SelectValue placeholder="Select provider…" /></SelectTrigger>
               <SelectContent>
-                {practitioners.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name}</SelectItem>)}
+                {normalizeArray(practitioners).map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
@@ -392,7 +395,7 @@ function NewAppointmentDialog({ open, onOpenChange, prefill, practitioners, clie
               <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]"><SelectValue placeholder="Optional template…" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="__custom__">— Custom —</SelectItem>
-                {treatments.map((t) => <SelectItem key={t.id} value={t.id}>{t.name} ({t.duration_min}m)</SelectItem>)}
+                {normalizeArray(treatments).map((t) => <SelectItem key={t.id} value={t.id}>{t.name} ({t.duration_min}m)</SelectItem>)}
               </SelectContent>
             </Select>
           </div>

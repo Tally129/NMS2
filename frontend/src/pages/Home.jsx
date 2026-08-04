@@ -187,7 +187,7 @@ export default function Home() {
       {/* TESTIMONIALS */}
       <section className="max-w-6xl mx-auto px-6 mt-24">
         <div className="text-center">
-          <p className="eyebrow text-[#8a6a3c]">Our clients</p>
+          <p className="eyebrow text-[#8a6a3c]">Our patients</p>
           <h2 className="font-display text-[36px] md:text-[44px] text-[#1f2a22] mt-2">See What They Say</h2>
         </div>
         <div className="grid md:grid-cols-2 gap-6 mt-10">
