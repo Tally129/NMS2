@@ -844,3 +844,6 @@ async def marketing_director_brief(
     }
 
     return brief
+
+# Register secure first-party marketing event ingestion routes.
+from marketing_os.routers import ingestion as _marketing_ingestion_routes  # noqa: F401,E402
