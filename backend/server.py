@@ -83,6 +83,8 @@ from routers import tasks as _tasks_routes  # noqa: F401
 from routers import lab_review as _lab_review_routes  # noqa: F401
 from routers import campaign_extras as _campaign_extras_routes  # noqa: F401 — registered BEFORE campaigns so /templates isn't shadowed by /{id}
 from routers import campaigns as _campaigns_routes  # noqa: F401
+from routers import content_strategist as _content_strategist_routes  # noqa: F401
+from marketing_os.routers import core as _marketing_os_core_routes  # noqa: F401
 from routers import accounting as _accounting_routes  # noqa: F401
 from routers import portal_ops as _portal_ops_routes  # noqa: F401
 from routers import legal as _legal_routes  # noqa: F401
@@ -106,9 +108,96 @@ async def public_appointment_request(payload: AppointmentRequestIn, request: Req
     doc["id"] = new_id()
     doc["status"] = "new"
     doc["ip"] = get_client_ip(request)
+
     async with AsyncSessionLocal() as pg:
         async with pg.begin():
             doc = await sched_repo.create_appointment_request(pg, doc)
+
+    # ---------------------------------------------------------------
+    # First-party Marketing OS attribution bridge.
+    #
+    # Marketing metadata arrives separately from the appointment
+    # payload so contact/clinical fields never enter Marketing OS.
+    #
+    # Attribution is best-effort: a marketing measurement failure
+    # must never cause a successfully stored appointment request to
+    # fail.
+    # ---------------------------------------------------------------
+    marketing_header = request.headers.get(
+        "X-NMS-Marketing-Attribution"
+    )
+
+    if marketing_header:
+        try:
+            import json as _json
+
+            from marketing_os.services.persistence import (
+                persist_conversion_and_attribution,
+            )
+
+            raw_marketing = _json.loads(marketing_header)
+
+            if not isinstance(raw_marketing, dict):
+                raise ValueError(
+                    "marketing attribution must be an object"
+                )
+
+            allowed = {
+                "session_id",
+                "external_click_id",
+                "source",
+                "medium",
+                "campaign",
+                "content",
+                "term",
+                "click_id_type",
+            }
+
+            marketing = {
+                key: value
+                for key, value in raw_marketing.items()
+                if key in allowed
+            }
+
+            properties = {}
+
+            click_id_type = marketing.pop(
+                "click_id_type",
+                None,
+            )
+
+            if click_id_type:
+                properties["click_id_type"] = (
+                    str(click_id_type)[:32]
+                )
+
+            conversion_payload = {
+                "event_type": "lead_submit",
+                **marketing,
+                "properties": properties,
+            }
+
+            async with AsyncSessionLocal() as marketing_pg:
+                async with marketing_pg.begin():
+                    await persist_conversion_and_attribution(
+                        marketing_pg,
+                        payload=conversion_payload,
+                        idempotency_key=(
+                            "appointment-request:"
+                            + str(doc["id"])
+                        ),
+                        provider="first_party",
+                    )
+
+        except Exception as exc:
+            # Do not log appointment/contact payload values.
+            logger.warning(
+                "Marketing attribution capture failed for "
+                "appointment request %s: %s",
+                doc.get("id"),
+                type(exc).__name__,
+            )
+
     from notifiers import send_email as _send_email
     _delivery = await _send_email(
         db=db,
@@ -859,6 +948,110 @@ async def _start_campaign_scheduler():
     scheduler.start()
     _campaign_scheduler = scheduler
     logger.info("Campaign scheduler started (interval=5min, mode=internal)")
+
+
+
+# --------------------------------------------------------------------------- #
+# Publishing Queue Scheduler                                                  #
+# --------------------------------------------------------------------------- #
+
+_publishing_scheduler = None
+
+
+def _stop_publishing_scheduler() -> None:
+    global _publishing_scheduler
+
+    if _publishing_scheduler is not None:
+        try:
+            _publishing_scheduler.shutdown(
+                wait=False
+            )
+        except Exception:
+            pass
+
+        _publishing_scheduler = None
+
+
+@app.on_event("startup")
+async def _start_publishing_scheduler():
+    global _publishing_scheduler
+
+    mode = os.environ.get(
+        "PUBLISHING_SCHEDULER_MODE",
+        "internal",
+    ).lower()
+
+    if mode in {"external", "disabled"}:
+        logger.info(
+            "Publishing scheduler disabled "
+            "(PUBLISHING_SCHEDULER_MODE=%s)",
+            mode,
+        )
+        return
+
+    if _publishing_scheduler is not None:
+        return
+
+    try:
+        from apscheduler.schedulers.asyncio import (
+            AsyncIOScheduler,
+        )
+    except ImportError:
+        logger.warning(
+            "APScheduler not installed; scheduled "
+            "publishing will not auto-dispatch"
+        )
+        return
+
+    from routers.content_strategist import (
+        process_due_publishing_queue,
+    )
+
+    scheduler = AsyncIOScheduler(
+        timezone="UTC"
+    )
+
+    async def _publishing_tick():
+        try:
+            summary = (
+                await process_due_publishing_queue(
+                    worker_prefix="apscheduler"
+                )
+            )
+
+            if (
+                summary.get("published")
+                or summary.get("failed")
+            ):
+                logger.info(
+                    "Publishing scheduler tick: %s",
+                    summary,
+                )
+
+        except Exception as exc:
+            logger.exception(
+                "Publishing scheduler tick failed: %s",
+                exc,
+            )
+
+    scheduler.add_job(
+        _publishing_tick,
+        "interval",
+        minutes=5,
+        id="publishing_scheduler_tick",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+
+    scheduler.start()
+
+    _publishing_scheduler = scheduler
+
+    logger.info(
+        "Publishing scheduler started "
+        "(interval=5min, mode=internal)"
+    )
 
 
 app.include_router(api)

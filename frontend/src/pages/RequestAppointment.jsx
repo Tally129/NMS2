@@ -2,7 +2,7 @@ import React from "react";
 import { Link, useNavigate } from "react-router-dom";
 import Logo from "../components/Logo";
 import Footer from "../components/Footer";
-import { services, addOns, LS_KEYS } from "../mock";
+import { services, addOns } from "../mock";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
@@ -19,6 +19,11 @@ import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popove
 import { Sparkles, ArrowLeft, Check, CalendarIcon } from "lucide-react";
 import { useToast } from "../hooks/use-toast";
 import { format } from "date-fns";
+import { normalizeArray } from "../lib/collections";
+import {
+  captureMarketingAttribution,
+  getMarketingAttribution,
+} from "../lib/marketingAttribution";
 
 export default function RequestAppointment() {
   const { toast } = useToast();
@@ -50,34 +55,68 @@ export default function RequestAppointment() {
       return;
     }
     setSubmitting(true);
-    const record = { ...form, addOns: selectedAddOns, ts: Date.now() };
-    const existing = JSON.parse(localStorage.getItem(LS_KEYS.appointments) || "[]");
-    localStorage.setItem(LS_KEYS.appointments, JSON.stringify([...existing, record]));
+
     try {
-      await fetch(`${process.env.REACT_APP_BACKEND_URL}/api/public/appointment-request`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          fullName: form.fullName,
-          email: form.email,
-          phone: form.phone,
-          returning: form.returning,
-          service: form.service,
-          date: form.date ? form.date.toISOString() : null,
-          time: form.time,
-          notes: form.notes,
-          addOns: selectedAddOns,
-        }),
-      });
-    } catch {}
-    setTimeout(() => {
-      setSubmitting(false);
+      captureMarketingAttribution();
+
+      const attribution = getMarketingAttribution();
+
+      const headers = {
+        "Content-Type": "application/json",
+      };
+
+      if (
+        attribution &&
+        Object.values(attribution).some(Boolean)
+      ) {
+        headers["X-NMS-Marketing-Attribution"] =
+          JSON.stringify(attribution);
+      }
+
+      const response = await fetch(
+        `${process.env.REACT_APP_BACKEND_URL}/api/public/appointment-request`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            fullName: form.fullName,
+            email: form.email,
+            phone: form.phone,
+            returning: form.returning,
+            service: form.service,
+            date: form.date
+              ? form.date.toISOString()
+              : null,
+            time: form.time,
+            notes: form.notes,
+            addOns: selectedAddOns,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          `Appointment request failed (${response.status})`
+        );
+      }
+
       toast({
         title: "Request received",
-        description: "A care team member will personally confirm your appointment within 24 hours.",
+        description:
+          "A care team member will personally confirm your appointment within 24 hours.",
       });
+
       navigate("/");
-    }, 400);
+    } catch {
+      toast({
+        title: "Unable to submit request",
+        description:
+          "Please try again. Your appointment request was not confirmed.",
+        variant: "destructive",
+      });
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const timeSlots = ["9:00 AM", "10:30 AM", "12:00 PM", "2:00 PM", "3:30 PM", "5:00 PM"];
@@ -175,7 +214,7 @@ export default function RequestAppointment() {
             <p className="text-sm text-[#5a5a5a] mt-1.5">Tap to add. Pairs beautifully with any consultation.</p>
             <div className="grid sm:grid-cols-2 gap-3 mt-4">
               {addOns.map((a) => {
-                const active = selectedAddOns.includes(a.id);
+                const active = normalizeArray(selectedAddOns).includes(a.id);
                 return (
                   <button
                     type="button"
@@ -191,7 +230,6 @@ export default function RequestAppointment() {
                       {active && <Check size={14} />}
                       {a.name}
                     </span>
-                    <span className={active ? "text-[#d7b878]" : "text-[#8a6a3c]"}>+${a.price}</span>
                   </button>
                 );
               })}
