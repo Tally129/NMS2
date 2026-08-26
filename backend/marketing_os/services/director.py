@@ -24,7 +24,7 @@ class MarketingSignal:
     channel: str
     impressions: int = 0
     clicks: int = 0
-    conversions: Decimal = Decimal("0")
+    conversions: float = 0.0
     spend: float = 0.0
     revenue: float = 0.0
 
