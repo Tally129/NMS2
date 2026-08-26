@@ -125,6 +125,19 @@ class BudgetPatch(BaseModel):
     status: Optional[str] = Field(default=None, max_length=32)
 
 
+class GoogleAdsAccountRegister(BaseModel):
+    """Non-secret Google Ads account registration."""
+
+    customer_id: str = Field(
+        min_length=1,
+        max_length=32,
+    )
+    account_name: Optional[str] = Field(
+        default=None,
+        max_length=255,
+    )
+
+
 class RecommendationDecision(BaseModel):
     decision: str
     reason: Optional[str] = Field(default=None, max_length=4000)
@@ -569,6 +582,113 @@ async def delete_marketing_budget(
 # ---------------------------------------------------------------------------
 # Read-only account visibility
 # ---------------------------------------------------------------------------
+
+@api.post(
+    "/marketing-os/channel-accounts/google-ads",
+    status_code=201,
+)
+async def register_google_ads_account(
+    payload: GoogleAdsAccountRegister,
+    user=Depends(require_roles(*MARKETING_ROLES)),
+):
+    """Register a Google Ads customer without storing secrets.
+
+    This performs no Google API request and grants no write
+    capability. Credentials remain server-side environment secrets.
+    """
+
+    from marketing_os.integrations.google_ads import (
+        _clean_customer_id,
+    )
+
+    try:
+        customer_id = _clean_customer_id(
+            payload.customer_id
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    account_id = new_marketing_id()
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+
+            existing = await pg.execute(
+                text(
+                    """
+                    SELECT *
+                    FROM marketing_channel_accounts
+                    WHERE provider = 'google_ads'
+                      AND external_account_id = :customer_id
+                    """
+                ),
+                {
+                    "customer_id": customer_id,
+                },
+            )
+
+            existing_row = existing.mappings().first()
+
+            if existing_row:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Google Ads customer is "
+                        "already registered"
+                    ),
+                )
+
+            result = await pg.execute(
+                text(
+                    """
+                    INSERT INTO marketing_channel_accounts (
+                        id,
+                        provider,
+                        external_account_id,
+                        account_name,
+                        status,
+                        read_enabled,
+                        write_enabled,
+                        configuration,
+                        created_by
+                    )
+                    VALUES (
+                        :id,
+                        'google_ads',
+                        :customer_id,
+                        :account_name,
+                        'disconnected',
+                        FALSE,
+                        FALSE,
+                        CAST(:configuration AS jsonb),
+                        :created_by
+                    )
+                    RETURNING *
+                    """
+                ),
+                {
+                    "id": account_id,
+                    "customer_id": customer_id,
+                    "account_name": payload.account_name,
+                    "configuration":
+                        __import__("json").dumps(
+                            {
+                                "read_only": True,
+                                "credentials_source":
+                                    "server_environment",
+                            }
+                        ),
+                    "created_by": user_id(user),
+                },
+            )
+
+            row = result.mappings().one()
+
+    return serialize_row(row)
+
 
 @api.get("/marketing-os/channel-accounts")
 async def list_marketing_channel_accounts(
