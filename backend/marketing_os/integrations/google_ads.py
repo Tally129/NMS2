@@ -35,6 +35,38 @@ _REQUIRED_ENV = (
 )
 
 
+
+def credential_readiness() -> dict[str, Any]:
+    """Return Google Ads credential presence without exposing values."""
+
+    required = {
+        name: bool(
+            os.environ.get(name, "").strip()
+        )
+        for name in _REQUIRED_ENV
+    }
+
+    login_customer_id_present = bool(
+        os.environ.get(
+            "GOOGLE_ADS_LOGIN_CUSTOMER_ID",
+            "",
+        ).strip()
+    )
+
+    missing = [
+        name
+        for name, present in required.items()
+        if not present
+    ]
+
+    return {
+        "required_configured": not missing,
+        "missing_required": missing,
+        "login_customer_id_configured":
+            login_customer_id_present,
+    }
+
+
 def _clean_customer_id(value: Any) -> str:
     """Return digits-only Google Ads customer ID."""
 

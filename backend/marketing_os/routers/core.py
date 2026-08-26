@@ -583,6 +583,94 @@ async def delete_marketing_budget(
 # Read-only account visibility
 # ---------------------------------------------------------------------------
 
+@api.get(
+    "/marketing-os/channel-accounts/google-ads/readiness"
+)
+async def google_ads_connection_readiness(
+    user=Depends(require_roles(*MARKETING_ROLES)),
+):
+    """Report Google Ads connection readiness without contacting Google."""
+
+    from marketing_os.integrations.google_ads import (
+        credential_readiness,
+    )
+
+    credentials = credential_readiness()
+
+    async with AsyncSessionLocal() as pg:
+        result = await pg.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    external_account_id,
+                    account_name,
+                    status,
+                    read_enabled,
+                    write_enabled,
+                    last_sync_at
+                FROM marketing_channel_accounts
+                WHERE provider = 'google_ads'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            )
+        )
+
+        account = result.mappings().first()
+
+    if account is None:
+        state = "not_registered"
+
+    elif account["write_enabled"]:
+        state = "unsafe_configuration"
+
+    elif not credentials["required_configured"]:
+        state = "credentials_missing"
+
+    elif (
+        account["status"] != "connected"
+        or not account["read_enabled"]
+    ):
+        state = "registered_but_not_authenticated"
+
+    else:
+        state = "ready_for_read_sync"
+
+    account_payload = None
+
+    if account is not None:
+        account_payload = {
+            "id": account["id"],
+            "external_account_id":
+                account["external_account_id"],
+            "account_name":
+                account["account_name"],
+            "status": account["status"],
+            "read_enabled":
+                bool(account["read_enabled"]),
+            "write_enabled":
+                bool(account["write_enabled"]),
+            "last_sync_at":
+                (
+                    account["last_sync_at"].isoformat()
+                    if account["last_sync_at"]
+                    else None
+                ),
+        }
+
+    return {
+        "provider": "google_ads",
+        "state": state,
+        "registered": account is not None,
+        "credentials": credentials,
+        "account": account_payload,
+        "read_only": True,
+        "google_api_called": False,
+        "external_writes_enabled": False,
+    }
+
+
 @api.post(
     "/marketing-os/channel-accounts/google-ads",
     status_code=201,
