@@ -316,7 +316,7 @@ def derive_metric_rates(
     clicks: int,
     spend: Decimal,
     leads: int,
-    conversions: int,
+    conversions: Decimal,
     conversion_value: Decimal,
 ) -> dict[str, Decimal | None]:
 

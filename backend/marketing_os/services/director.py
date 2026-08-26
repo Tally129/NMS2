@@ -24,7 +24,7 @@ class MarketingSignal:
     channel: str
     impressions: int = 0
     clicks: int = 0
-    conversions: int = 0
+    conversions: Decimal = Decimal("0")
     spend: float = 0.0
     revenue: float = 0.0
 
@@ -90,8 +90,8 @@ def normalize_signal(
         clicks=int(
             _number(value.get("clicks"))
         ),
-        conversions=int(
-            _number(value.get("conversions"))
+        conversions=_number(
+            value.get("conversions")
         ),
         spend=_number(
             value.get("spend")

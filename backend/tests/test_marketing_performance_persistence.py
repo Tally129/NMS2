@@ -267,3 +267,28 @@ async def test_same_identity_produces_same_id():
         first["daily_metric_id"]
         == second["daily_metric_id"]
     )
+
+
+def test_normalize_fractional_conversions():
+    from decimal import Decimal
+
+    from marketing_os.services.performance import (
+        normalize_daily_performance,
+    )
+
+    metric = normalize_daily_performance(
+        {
+            "metric_date": "2026-08-25",
+            "provider": "google_ads",
+            "external_campaign_id": "fractional-test",
+            "impressions": 100,
+            "clicks": 10,
+            "spend": "25.00",
+            "leads": 2,
+            "conversions": "1.625",
+            "conversion_value": "150.00",
+            "raw_metrics": {},
+        }
+    )
+
+    assert metric.conversions == Decimal("1.625")

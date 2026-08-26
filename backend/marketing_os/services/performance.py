@@ -65,7 +65,7 @@ class NormalizedDailyPerformance:
     clicks: int
     spend: Decimal
     leads: int
-    conversions: int
+    conversions: Decimal
     conversion_value: Decimal
     raw_metrics: dict[str, Any]
 
@@ -262,7 +262,7 @@ def normalize_daily_performance(
             payload.get("leads"),
             field="leads",
         ),
-        conversions=_nonnegative_int(
+        conversions=_nonnegative_decimal(
             payload.get("conversions"),
             field="conversions",
         ),
