@@ -15,6 +15,9 @@ Every call also writes to `integration_log` so admins can audit outbound message
 """
 from __future__ import annotations
 
+import re
+from html import unescape
+
 import asyncio
 import logging
 import os
@@ -34,6 +37,46 @@ def email_status() -> str:
 # --------------------------------------------------------------------------- #
 # Email                                                                        #
 # --------------------------------------------------------------------------- #
+
+def _email_plain_text(html: str) -> str:
+    """Create a readable plain-text alternative from transactional HTML."""
+
+    value = html or ""
+
+    value = re.sub(
+        r"(?i)<\s*br\s*/?\s*>",
+        "\n",
+        value,
+    )
+
+    value = re.sub(
+        r"(?i)</\s*(p|div|h[1-6]|li|tr)\s*>",
+        "\n",
+        value,
+    )
+
+    value = re.sub(
+        r"(?is)<(style|script)\b[^>]*>.*?</\1>",
+        "",
+        value,
+    )
+
+    value = re.sub(
+        r"(?s)<[^>]+>",
+        "",
+        value,
+    )
+
+    value = unescape(value)
+    value = value.replace("\xa0", " ")
+
+    value = re.sub(r"[ \t]+", " ", value)
+    value = re.sub(r"\n[ \t]+", "\n", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+
+    return value.strip()
+
+
 async def send_email(
     db,
     to: str,
@@ -75,13 +118,46 @@ async def send_email(
 
     def _blocking_send() -> int:
         from sendgrid import SendGridAPIClient
-        from sendgrid.helpers.mail import Mail, ReplyTo
-        msg = Mail(
-            from_email=from_email, to_emails=to, subject=subject,
-            html_content=html, plain_text_content=plain_text or "",
+        from sendgrid.helpers.mail import (
+            Mail,
+            ReplyTo,
+            TrackingSettings,
+            ClickTracking,
+            OpenTracking,
         )
+
+        # Always provide a legitimate text/plain MIME alternative.
+        # Templates may supply their own plain-text body; otherwise
+        # derive one from the HTML content.
+        effective_plain_text = (
+            plain_text.strip()
+            if plain_text and plain_text.strip()
+            else _email_plain_text(html)
+        )
+
+        mail_kwargs = {
+            "from_email": from_email,
+            "to_emails": to,
+            "subject": subject,
+            "plain_text_content": effective_plain_text,
+            "html_content": html,
+        }
+
+        msg = Mail(**mail_kwargs)
+
         if reply_to:
             msg.reply_to = ReplyTo(reply_to)
+
+        # Transactional operational notifications do not need
+        # invisible open pixels or rewritten click-tracking URLs.
+        tracking = TrackingSettings()
+        tracking.open_tracking = OpenTracking(enable=False)
+        tracking.click_tracking = ClickTracking(
+            enable=False,
+            enable_text=False,
+        )
+        msg.tracking_settings = tracking
+
         sg = SendGridAPIClient(api_key)
         r = sg.send(msg)
         return r.status_code
