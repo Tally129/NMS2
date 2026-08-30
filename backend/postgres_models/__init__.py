@@ -43,3 +43,6 @@ from .structured_rest import (  # noqa: F401
     Membership, CampaignTemplate, CampaignUnsubscribe, LegacyForm, SymptomLog,
 )
 
+from .payment_methods import (  # noqa: F401
+    PaymentCustomer, SavedPaymentMethod,
+)

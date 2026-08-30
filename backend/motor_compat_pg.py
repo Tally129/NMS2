@@ -37,6 +37,9 @@ from postgres_models.crm_and_ops import (
     Campaign, FileMeta, FrontDeskVisit, IntegrationLog, InternalTask,
     ProtocolEnrollment, ProtocolTemplate,
 )
+from postgres_models.payment_methods import (
+    PaymentCustomer, SavedPaymentMethod,
+)
 from postgres_models.structured_rest import (
     ChartOfAccount, JournalEntry, TransactionRow, Expense, Invoice,
     VendorBill, Vendor, AccountingBackfillRun, AccountingEvent,
@@ -69,6 +72,9 @@ _MODEL_BY_NAME = {
     "protocol_enrollments": ProtocolEnrollment,
     "protocol_templates": ProtocolTemplate,
     "files": FileMeta,
+    # Tokenized online payment storage
+    "payment_customers": PaymentCustomer,
+    "saved_payment_methods": SavedPaymentMethod,
     # Phase 3.6 — accounting / banking / payroll / inventory / legal / ops
     "chart_of_accounts": ChartOfAccount,
     "journal_entries": JournalEntry,

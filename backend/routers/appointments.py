@@ -32,6 +32,14 @@ from pg_shims import find_client, find_user_by_id, list_users_by_role
 from postgres_db import AsyncSessionLocal
 from repositories import scheduling as sched_repo
 
+from services.payments import (
+    construct_webhook_event,
+    create_invoice_payment_intent,
+    object_value as stripe_object_value,
+    publishable_key as stripe_publishable_key,
+    stripe_enabled,
+)
+
 TIER_PRICES = {"essentials": 99.0, "core": 199.0, "vip": 299.0}
 
 
@@ -444,21 +452,609 @@ async def mark_paid(inv_id: str, payload: MarkPaidIn, request: Request,
     return await _hydrate_invoice(inv)
 
 
-@api.post("/invoices/{inv_id}/stripe-intent")
-async def stripe_intent(inv_id: str, user=Depends(get_current_user)):
-    inv = await db.invoices.find_one({"id": inv_id})
-    if not inv:
-        raise HTTPException(status_code=404, detail="Invoice not found")
-    # Stubbed - would create PaymentIntent in real integration
-    await db.integration_log.insert_one({
-        "id": new_id(), "service": "stripe", "action": "payment_intent.create",
-        "payload": {"invoice_id": inv_id, "amount_cents": int(inv["amount"] * 100)},
-        "_stubbed": True, "ts": datetime.now(timezone.utc),
-    })
+async def _patient_activity(
+    *,
+    client_id: str,
+    body: str,
+    event_type: str,
+    source_id: str,
+    portal_path: str,
+    sender_role: str = "system",
+    sender_name: str = "Natural Medical Solutions",
+):
+    """Best-effort patient account activity; never blocks clinical operations."""
+    try:
+        from services.patient_activity import add_patient_activity_message
+
+        return await add_patient_activity_message(
+            client_id=client_id,
+            body=body,
+            event_type=event_type,
+            source_id=source_id,
+            portal_path=portal_path,
+            sender_role=sender_role,
+            sender_name=sender_name,
+        )
+    except Exception:
+        # Patient activity is best-effort and must never block
+        # authoritative payment settlement.
+        return None
+
+
+async def _settle_stripe_invoice_from_webhook(
+    *,
+    invoice: dict,
+    payment_intent_id: str,
+    stripe_event_id: str,
+    amount_cents: int,
+    currency: str,
+):
+    """
+    Settle an NMS invoice only after a verified Stripe success event.
+
+    This helper receives an event only after Stripe signature
+    verification has succeeded.
+
+    It deliberately does not trust browser state.
+    """
+
+    inv_id = str(invoice.get("id") or "")
+
+    if not inv_id:
+        raise ValueError("Invoice ID missing")
+
+    expected_intent = str(
+        invoice.get("stripe_payment_intent_id") or ""
+    )
+
+    if not expected_intent:
+        raise ValueError(
+            "Invoice has no bound Stripe PaymentIntent"
+        )
+
+    if expected_intent != str(payment_intent_id):
+        raise ValueError(
+            "Stripe PaymentIntent does not match invoice"
+        )
+
+    try:
+        expected_cents = int(
+            round(float(invoice.get("amount") or 0) * 100)
+        )
+    except (TypeError, ValueError):
+        expected_cents = 0
+
+    if expected_cents <= 0:
+        raise ValueError("Invoice amount is invalid")
+
+    if int(amount_cents) != expected_cents:
+        raise ValueError(
+            "Stripe amount does not match invoice"
+        )
+
+    if str(currency or "").lower() != "usd":
+        raise ValueError(
+            "Stripe currency does not match invoice"
+        )
+
+    # Stripe may retry the same webhook. If this exact invoice
+    # is already paid by this exact PaymentIntent, return safely.
+    if invoice.get("status") == "paid":
+        if (
+            str(invoice.get("external_ref") or "")
+            == str(payment_intent_id)
+            and
+            str(invoice.get("payment_method") or "")
+            == "stripe"
+        ):
+            return {
+                "settled": False,
+                "duplicate": True,
+            }
+
+        # Never overwrite payment provenance on an invoice that
+        # was settled through another payment path.
+        raise ValueError(
+            "Invoice is already paid by another payment record"
+        )
+
+    if invoice.get("status") == "void":
+        raise ValueError(
+            "Void invoice cannot be settled"
+        )
+
+    paid_at = datetime.now(timezone.utc)
+
+    updates = {
+        "status": "paid",
+        "paid_at": paid_at,
+        "payment_method": "stripe",
+        "external_ref": str(payment_intent_id),
+        "stripe_payment_intent_id":
+            str(payment_intent_id),
+        "stripe_last_event_id":
+            str(stripe_event_id),
+    }
+
+    # Conditional update protects against another request changing
+    # the invoice between verification and settlement.
+    result = await db.invoices.update_one(
+        {
+            "id": inv_id,
+            "status": {"$ne": "paid"},
+            "stripe_payment_intent_id":
+                str(payment_intent_id),
+        },
+        {
+            "$set": updates,
+        },
+    )
+
+    modified = getattr(result, "modified_count", None)
+
+    if modified == 0:
+        latest = await db.invoices.find_one(
+            {"id": inv_id}
+        )
+
+        if (
+            latest
+            and latest.get("status") == "paid"
+            and str(latest.get("external_ref") or "")
+                == str(payment_intent_id)
+            and str(latest.get("payment_method") or "")
+                == "stripe"
+        ):
+            return {
+                "settled": False,
+                "duplicate": True,
+            }
+
+        raise ValueError(
+            "Invoice settlement state changed"
+        )
+
+    # Accounting uses the same invoice-level idempotency key as
+    # the existing manual settlement path/backfill.
+    try:
+        from accounting.events import AccountingEvent, emit
+
+        await emit(
+            AccountingEvent(
+                event_type="InvoicePaid",
+                occurred_at=paid_at,
+                source_module="invoices",
+                source_ref_type="invoice",
+                source_ref_id=inv_id,
+                idempotency_key=(
+                    f"invoice:{inv_id}:InvoicePaid"
+                ),
+                amount_cents=expected_cents,
+                currency="USD",
+                context={
+                    "payment_method": "stripe",
+                },
+                actor_id=None,
+                actor_role="system",
+            )
+        )
+    except Exception:
+        # Existing invoice settlement behavior treats accounting
+        # as downstream and idempotently recoverable/backfillable.
+        pass
+
+    await _patient_activity(
+        client_id=invoice["client_id"],
+        body="Your payment was received. Thank you.",
+        event_type="invoice_paid",
+        source_id=inv_id,
+        portal_path="/portal/patient/billing",
+        sender_role="staff",
+        sender_name="Billing Team",
+    )
+
     return {
-        "client_secret": f"pi_stub_{new_id()[:12]}_secret_stub",
-        "_stubbed": True,
-        "note": "Set STRIPE_SECRET_KEY to enable real payments.",
+        "settled": True,
+        "duplicate": False,
+    }
+
+
+@api.post("/invoices/{inv_id}/stripe-intent")
+async def stripe_intent(
+    inv_id: str,
+    user=Depends(get_current_user),
+):
+    """
+    Create a real Stripe PaymentIntent for the authenticated
+    patient's own unpaid invoice.
+
+    The amount always comes from the NMS invoice record.
+    """
+
+    inv, client = await _patient_owned_invoice(
+        inv_id,
+        user,
+    )
+
+    if inv.get("status") == "paid":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invoice_already_paid",
+                "message": "This invoice has already been paid.",
+            },
+        )
+
+    if inv.get("status") == "void":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invoice_void",
+                "message": "This invoice is void and cannot be paid.",
+            },
+        )
+
+    if not stripe_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "payments_not_configured",
+                "message": "Online card payments are not configured.",
+            },
+        )
+
+    try:
+        amount = float(inv.get("amount") or 0)
+    except (TypeError, ValueError):
+        amount = 0
+
+    amount_cents = int(round(amount * 100))
+
+    if amount_cents <= 0:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invalid_invoice_amount",
+                "message": "This invoice does not have a payable amount.",
+            },
+        )
+
+    intent = await create_invoice_payment_intent(
+        invoice_id=inv_id,
+        amount_cents=amount_cents,
+        currency="usd",
+    )
+
+    intent_id = getattr(intent, "id", None)
+    client_secret = getattr(intent, "client_secret", None)
+
+    if not intent_id or not client_secret:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "processor_response_invalid",
+                "message": "Stripe did not return a valid payment session.",
+            },
+        )
+
+    # Safe processor reference only. Never store the client secret.
+    await db.invoices.update_one(
+        {"id": inv_id},
+        {
+            "$set": {
+                "stripe_payment_intent_id": intent_id,
+            }
+        },
+    )
+
+    await db.integration_log.insert_one({
+        "id": new_id(),
+        "service": "stripe",
+        "action": "payment_intent.created",
+        "payload": {
+            "invoice_id": inv_id,
+            "payment_intent_id": intent_id,
+            "amount_cents": amount_cents,
+        },
+        "ts": datetime.now(timezone.utc),
+    })
+
+    return {
+        "client_secret": client_secret,
+        "payment_intent_id": intent_id,
+        "publishable_key": stripe_publishable_key(),
+    }
+
+@api.post("/payments/stripe/webhook")
+async def stripe_payment_webhook(request: Request):
+    """
+    Stripe is authoritative for online invoice settlement.
+
+    This endpoint:
+    1. reads the raw request body,
+    2. verifies Stripe-Signature,
+    3. accepts only payment_intent.succeeded for settlement,
+    4. verifies invoice reference, PaymentIntent binding,
+       amount and currency,
+    5. then marks the NMS invoice paid.
+
+    It does not require patient authentication because Stripe calls
+    this endpoint directly. Authenticity comes from Stripe's signed
+    webhook payload.
+    """
+
+    payload = await request.body()
+
+    signature = request.headers.get(
+        "stripe-signature",
+        "",
+    )
+
+    try:
+        event = construct_webhook_event(
+            payload=payload,
+            signature=signature,
+        )
+    except Exception:
+        # Do not expose signature-verification internals.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_stripe_webhook",
+                "message": "Invalid Stripe webhook.",
+            },
+        )
+
+    event_id = str(
+        stripe_object_value(event, "id", "") or ""
+    )
+
+    event_type = str(
+        stripe_object_value(event, "type", "") or ""
+    )
+
+    data = stripe_object_value(
+        event,
+        "data",
+        {},
+    ) or {}
+
+    payment_intent = stripe_object_value(
+        data,
+        "object",
+        {},
+    ) or {}
+
+    # Non-success events are acknowledged but cannot settle
+    # an invoice.
+    if event_type != "payment_intent.succeeded":
+        return {
+            "received": True,
+            "settled": False,
+        }
+
+    payment_intent_id = str(
+        stripe_object_value(
+            payment_intent,
+            "id",
+            "",
+        ) or ""
+    )
+
+    status = str(
+        stripe_object_value(
+            payment_intent,
+            "status",
+            "",
+        ) or ""
+    )
+
+    amount_received = stripe_object_value(
+        payment_intent,
+        "amount_received",
+        None,
+    )
+
+    currency = str(
+        stripe_object_value(
+            payment_intent,
+            "currency",
+            "",
+        ) or ""
+    ).lower()
+
+    metadata = stripe_object_value(
+        payment_intent,
+        "metadata",
+        {},
+    ) or {}
+
+    invoice_id = str(
+        stripe_object_value(
+            metadata,
+            "nms_invoice_ref",
+            "",
+        ) or ""
+    )
+
+    if status != "succeeded":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "stripe_status_mismatch",
+                "message":
+                    "Stripe payment is not succeeded.",
+            },
+        )
+
+    if not event_id or not payment_intent_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "stripe_reference_missing",
+                "message":
+                    "Stripe payment reference is missing.",
+            },
+        )
+
+    if not invoice_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invoice_reference_missing",
+                "message":
+                    "Invoice reference is missing.",
+            },
+        )
+
+    try:
+        amount_received = int(amount_received)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "stripe_amount_invalid",
+                "message":
+                    "Stripe payment amount is invalid.",
+            },
+        )
+
+    invoice = await db.invoices.find_one(
+        {"id": invoice_id}
+    )
+
+    if not invoice:
+        # Signature verification already succeeded. This is an
+        # unrecoverable NMS business-reference conflict, not a
+        # transport/authentication failure. Acknowledge it so
+        # Stripe does not retry the same valid event forever.
+        await db.integration_log.insert_one({
+            "id": new_id(),
+            "service": "stripe",
+            "action": "webhook.invoice_not_found",
+            "payload": {
+                "stripe_event_id": event_id,
+                "payment_intent_id": payment_intent_id,
+                "invoice_id": invoice_id,
+            },
+            "ts": datetime.now(timezone.utc),
+        })
+
+        return {
+            "received": True,
+            "settled": False,
+            "conflict": True,
+            "code": "invoice_not_found",
+        }
+
+    try:
+        result = (
+            await _settle_stripe_invoice_from_webhook(
+                invoice=invoice,
+                payment_intent_id=payment_intent_id,
+                stripe_event_id=event_id,
+                amount_cents=amount_received,
+                currency=currency,
+            )
+        )
+    except ValueError:
+        # Signature verification succeeded, but NMS settlement
+        # verification rejected the event. Never mark the invoice
+        # paid. Record only safe opaque references and acknowledge
+        # the event to avoid endless retries of an unrecoverable
+        # business-state conflict.
+        await db.integration_log.insert_one({
+            "id": new_id(),
+            "service": "stripe",
+            "action": "webhook.settlement_conflict",
+            "payload": {
+                "stripe_event_id": event_id,
+                "payment_intent_id": payment_intent_id,
+                "invoice_id": invoice_id,
+            },
+            "ts": datetime.now(timezone.utc),
+        })
+
+        return {
+            "received": True,
+            "settled": False,
+            "conflict": True,
+            "code": "payment_verification_failed",
+        }
+
+    return {
+        "received": True,
+        "settled": bool(
+            result.get("settled")
+        ),
+        "duplicate": bool(
+            result.get("duplicate")
+        ),
+    }
+
+async def _patient_owned_invoice(
+    inv_id: str,
+    user: dict,
+):
+    """
+    Resolve an invoice strictly through the authenticated
+    patient's own client identity.
+
+    Never trust a client_id supplied by the browser.
+    """
+    if user.get("role") != "client":
+        raise HTTPException(
+            status_code=403,
+            detail="Patient account required",
+        )
+
+    client = await _resolve_self_client(user)
+
+    if not client:
+        raise HTTPException(
+            status_code=404,
+            detail="Patient profile not found",
+        )
+
+    inv = await db.invoices.find_one(
+        {"id": inv_id}
+    )
+
+    if not inv:
+        raise HTTPException(
+            status_code=404,
+            detail="Invoice not found",
+        )
+
+    if str(inv.get("client_id")) != str(
+        client.get("id")
+    ):
+        # Return 404 rather than revealing whether another
+        # patient's invoice exists.
+        raise HTTPException(
+            status_code=404,
+            detail="Invoice not found",
+        )
+
+    return inv, client
+
+@api.get("/payments/apple-pay/status")
+async def patient_apple_pay_status(
+    user=Depends(get_current_user),
+):
+    if user.get("role") != "client":
+        raise HTTPException(
+            status_code=403,
+            detail="Patient account required",
+        )
+
+    enabled = stripe_enabled()
+
+    return {
+        "enabled": enabled,
+        "provider": "stripe",
+        "requires_merchant_activation":
+            not enabled,
     }
 
 
