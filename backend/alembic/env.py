@@ -58,6 +58,8 @@ if x_args.get("db_url"):
 
 config.set_main_option("sqlalchemy.url", db_url)
 
+import postgres_models.terminals  # noqa: F401
+
 target_metadata = Base.metadata
 
 

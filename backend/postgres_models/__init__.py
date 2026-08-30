@@ -46,3 +46,5 @@ from .structured_rest import (  # noqa: F401
 from .payment_methods import (  # noqa: F401
     PaymentCustomer, SavedPaymentMethod,
 )
+
+from postgres_models.terminals import PaymentTerminal, TerminalPaymentAttempt
