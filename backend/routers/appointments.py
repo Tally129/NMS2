@@ -7,6 +7,7 @@ Phase 3.2 (2026-07-31): appointments/availability/reminders/reminder_settings
 now live in PostgreSQL via `repositories.scheduling`.
 """
 from __future__ import annotations
+from decimal import Decimal, InvalidOperation
 
 import os
 from datetime import datetime, timedelta, timezone
@@ -38,6 +39,16 @@ from services.payments import (
     object_value as stripe_object_value,
     publishable_key as stripe_publishable_key,
     stripe_enabled,
+)
+from services.paypal_payments import (
+    capture_completed,
+    completed_capture_details,
+    capture_order,
+    capture_reference,
+    create_order,
+    order_reference,
+    paypal_enabled,
+    public_payment_config,
 )
 
 TIER_PRICES = {"essentials": 99.0, "core": 199.0, "vip": 299.0}
@@ -1037,6 +1048,427 @@ async def _patient_owned_invoice(
         )
 
     return inv, client
+
+@api.post(
+    "/invoices/{inv_id}/paypal/order"
+)
+async def create_paypal_invoice_order(
+    inv_id: str,
+    user=Depends(get_current_user),
+):
+    inv, client = await _patient_owned_invoice(
+        inv_id,
+        user,
+    )
+
+    if inv.get("status") == "paid":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invoice_already_paid",
+                "message": (
+                    "This invoice has already been paid."
+                ),
+            },
+        )
+
+    if not paypal_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "paypal_not_configured",
+                "message": (
+                    "PayPal payments are not available yet."
+                ),
+            },
+        )
+
+    try:
+        amount = Decimal(
+            str(inv.get("amount") or "")
+        )
+    except (InvalidOperation, ValueError):
+        amount = Decimal("0")
+
+    if (
+        not amount.is_finite()
+        or amount <= 0
+        or amount.as_tuple().exponent < -2
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invoice has no valid payable balance",
+        )
+
+    amount_cents = int(
+        amount * Decimal("100")
+    )
+
+    # Opaque internal reference only.
+    # Do not send patient name, treatment, diagnosis,
+    # email, phone, or other PHI to PayPal.
+    reference = f"invoice:{inv_id}"
+
+    order = await create_order(
+        amount_cents=amount_cents,
+        currency="USD",
+        internal_reference=reference,
+    )
+
+    await db.integration_log.insert_one({
+        "id": new_id(),
+        "service": "paypal",
+        "action": "order.create",
+        "payload": {
+            "invoice_id": inv_id,
+            "paypal_order_id": order.get("id"),
+        },
+        "ts": datetime.now(timezone.utc),
+    })
+
+    return {
+        "order_id": order.get("id"),
+        "status": order.get("status"),
+    }
+
+
+@api.post(
+    "/invoices/{inv_id}/paypal/capture/{order_id}"
+)
+async def capture_paypal_invoice_order(
+    inv_id: str,
+    order_id: str,
+    user=Depends(get_current_user),
+):
+    inv, client = await _patient_owned_invoice(
+        inv_id,
+        user,
+    )
+
+    if not paypal_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "paypal_not_configured",
+                "message": (
+                    "PayPal payments are not available yet."
+                ),
+            },
+        )
+
+    # PayPal remains authoritative for capture state.
+    result = await capture_order(order_id)
+
+    expected_reference = f"invoice:{inv_id}"
+    actual_reference = order_reference(result)
+
+    if actual_reference != expected_reference:
+        await db.integration_log.insert_one({
+            "id": new_id(),
+            "service": "paypal",
+            "action": "order.invoice_mismatch",
+            "payload": {
+                "invoice_id": inv_id,
+                "paypal_order_id": order_id,
+            },
+            "ts": datetime.now(timezone.utc),
+        })
+
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "payment_invoice_mismatch",
+                "message": (
+                    "This payment does not belong "
+                    "to this invoice."
+                ),
+            },
+        )
+
+    details = completed_capture_details(result)
+
+    if not details or not capture_completed(result):
+        await db.integration_log.insert_one({
+            "id": new_id(),
+            "service": "paypal",
+            "action": "order.capture_incomplete",
+            "payload": {
+                "invoice_id": inv_id,
+                "paypal_order_id": order_id,
+                "paypal_status": result.get("status"),
+            },
+            "ts": datetime.now(timezone.utc),
+        })
+
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "payment_not_completed",
+                "message": "Payment has not completed.",
+            },
+        )
+
+    capture_id = str(
+        details.get("capture_id")
+        or capture_reference(result)
+        or ""
+    )
+
+    if not capture_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "payment_capture_missing",
+                "message": (
+                    "PayPal did not return a valid "
+                    "capture reference."
+                ),
+            },
+        )
+
+    # NMS invoice amount is authoritative. Convert through
+    # Decimal using string form so binary float arithmetic is
+    # never used for processor settlement comparison.
+    try:
+        expected_amount = Decimal(
+            str(inv.get("amount") or "")
+        )
+    except (InvalidOperation, ValueError):
+        expected_amount = Decimal("0")
+
+    if (
+        not expected_amount.is_finite()
+        or expected_amount <= 0
+        or expected_amount.as_tuple().exponent < -2
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invoice_amount_invalid",
+                "message": "Invoice amount is invalid.",
+            },
+        )
+
+    expected_cents = int(
+        expected_amount * Decimal("100")
+    )
+
+    try:
+        captured_amount = Decimal(
+            str(details.get("value") or "")
+        )
+    except (InvalidOperation, ValueError):
+        captured_amount = Decimal("0")
+
+    if (
+        not captured_amount.is_finite()
+        or captured_amount <= 0
+        or captured_amount.as_tuple().exponent < -2
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "payment_amount_invalid",
+                "message": (
+                    "PayPal returned an invalid "
+                    "payment amount."
+                ),
+            },
+        )
+
+    captured_cents = int(
+        captured_amount * Decimal("100")
+    )
+
+    if captured_cents != expected_cents:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "payment_amount_mismatch",
+                "message": (
+                    "PayPal payment amount does not "
+                    "match this invoice."
+                ),
+            },
+        )
+
+    if str(
+        details.get("currency") or ""
+    ).upper() != "USD":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "payment_currency_mismatch",
+                "message": (
+                    "PayPal payment currency does not "
+                    "match this invoice."
+                ),
+            },
+        )
+
+    # An already-paid invoice is safe only when this is an
+    # exact replay of the PayPal capture already recorded.
+    if inv.get("status") == "paid":
+        if (
+            str(inv.get("external_ref") or "")
+            == capture_id
+            and str(inv.get("payment_method") or "")
+            == "paypal"
+        ):
+            return {
+                "ok": True,
+                "invoice_id": inv_id,
+                "status": "paid",
+                "duplicate": True,
+                "payment_method": "paypal",
+                "payment_reference": capture_id,
+            }
+
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invoice_already_paid",
+                "message": (
+                    "This invoice has already been paid "
+                    "by another payment record."
+                ),
+            },
+        )
+
+    if inv.get("status") == "void":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invoice_void",
+                "message": (
+                    "This invoice is void and cannot "
+                    "be paid."
+                ),
+            },
+        )
+
+    paid_at = datetime.now(timezone.utc)
+
+    updates = {
+        "status": "paid",
+        "paid_at": paid_at,
+        "payment_method": "paypal",
+        "external_ref": capture_id,
+        "payment_reference": capture_id,
+        "payment_processor": "paypal",
+    }
+
+    update_result = await db.invoices.update_one(
+        {
+            "id": inv_id,
+            "client_id": inv["client_id"],
+            "status": {"$ne": "paid"},
+        },
+        {
+            "$set": updates,
+        },
+    )
+
+    modified = getattr(
+        update_result,
+        "modified_count",
+        None,
+    )
+
+    if modified == 0:
+        latest = await db.invoices.find_one(
+            {"id": inv_id}
+        )
+
+        if (
+            latest
+            and latest.get("status") == "paid"
+            and str(latest.get("external_ref") or "")
+                == capture_id
+            and str(latest.get("payment_method") or "")
+                == "paypal"
+        ):
+            return {
+                "ok": True,
+                "invoice_id": inv_id,
+                "status": "paid",
+                "duplicate": True,
+                "payment_method": "paypal",
+                "payment_reference": capture_id,
+            }
+
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invoice_settlement_changed",
+                "message": (
+                    "Invoice settlement state changed."
+                ),
+            },
+        )
+
+    try:
+        from accounting.events import AccountingEvent, emit
+
+        await emit(
+            AccountingEvent(
+                event_type="InvoicePaid",
+                occurred_at=paid_at,
+                source_module="invoices",
+                source_ref_type="invoice",
+                source_ref_id=inv_id,
+                idempotency_key=(
+                    f"invoice:{inv_id}:InvoicePaid"
+                ),
+                amount_cents=expected_cents,
+                currency="USD",
+                context={
+                    "payment_method": "paypal",
+                },
+                actor_id=None,
+                actor_role="system",
+            )
+        )
+    except Exception:
+        # Accounting is downstream and recoverable through
+        # the existing idempotent invoice backfill.
+        pass
+
+    await db.integration_log.insert_one({
+        "id": new_id(),
+        "service": "paypal",
+        "action": "order.capture_completed",
+        "payload": {
+            "invoice_id": inv_id,
+            "paypal_order_id": order_id,
+            "capture_id": capture_id,
+        },
+        "ts": paid_at,
+    })
+
+    await _patient_activity(
+        client_id=inv["client_id"],
+        body=(
+            "Your payment was received. "
+            "Your paid invoice is available in Billing."
+        ),
+        event_type="invoice_paid",
+        source_id=inv_id,
+        portal_path="/portal/patient/billing",
+        sender_role="staff",
+        sender_name="Billing Team",
+    )
+
+    return {
+        "ok": True,
+        "invoice_id": inv_id,
+        "status": "paid",
+        "paid_at": paid_at,
+        "duplicate": False,
+        "payment_method": "paypal",
+        "payment_reference": capture_id,
+    }
+
 
 @api.get("/payments/apple-pay/status")
 async def patient_apple_pay_status(
