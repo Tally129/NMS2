@@ -362,6 +362,7 @@ def recommend_for_channel(
 def build_marketing_brief(
     *,
     goals: Iterable[Mapping[str, Any]] = (),
+    budgets: Iterable[Mapping[str, Any]] = (),
     performance: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Build an advisory cross-channel marketing brief."""
@@ -397,9 +398,182 @@ def build_marketing_brief(
         for goal in goals
     ]
 
+    normalized_budgets = [
+        dict(budget)
+        for budget in budgets
+    ]
+
+    goal_by_id = {
+        str(goal.get("id")): goal
+        for goal in normalized_goals
+        if goal.get("id")
+    }
+
+    budget_analysis = []
+
+    for budget in normalized_budgets:
+        goal_id = (
+            str(budget.get("goal_id"))
+            if budget.get("goal_id")
+            else None
+        )
+
+        linked_goal = (
+            goal_by_id.get(goal_id)
+            if goal_id
+            else None
+        )
+
+        approved_amount = _number(
+            budget.get("approved_amount")
+        )
+
+        spent_amount = _number(
+            budget.get("spent_amount")
+        )
+
+        remaining_amount = max(
+            approved_amount - spent_amount,
+            0.0,
+        )
+
+        daily_cap_raw = budget.get("daily_cap")
+        target_cpl_raw = budget.get("target_cpl")
+        target_cac_raw = budget.get("target_cac")
+        minimum_roas_raw = budget.get(
+            "minimum_roas"
+        )
+
+        configured_targets = {
+            "daily_cap": (
+                _number(daily_cap_raw)
+                if daily_cap_raw is not None
+                else None
+            ),
+            "target_cpl": (
+                _number(target_cpl_raw)
+                if target_cpl_raw is not None
+                else None
+            ),
+            "target_cac": (
+                _number(target_cac_raw)
+                if target_cac_raw is not None
+                else None
+            ),
+            "minimum_roas": (
+                _number(minimum_roas_raw)
+                if minimum_roas_raw is not None
+                else None
+            ),
+        }
+
+        performance_available = bool(signals)
+
+        budget_analysis.append(
+            {
+                "budget_id": budget.get("id"),
+                "budget_name": budget.get("name"),
+                "goal_id": goal_id,
+                "goal_name": (
+                    linked_goal.get("name")
+                    if linked_goal
+                    else None
+                ),
+                "status": budget.get("status"),
+                "period_start": budget.get(
+                    "period_start"
+                ),
+                "period_end": budget.get(
+                    "period_end"
+                ),
+                "approved_amount": round(
+                    approved_amount,
+                    2,
+                ),
+                "spent_amount": round(
+                    spent_amount,
+                    2,
+                ),
+                "remaining_amount": round(
+                    remaining_amount,
+                    2,
+                ),
+                "targets": configured_targets,
+                "performance_available":
+                    performance_available,
+                "performance_status": (
+                    "available"
+                    if performance_available
+                    else "awaiting_performance_data"
+                ),
+            }
+        )
+
+        missing_targets = [
+            label
+            for label, raw_value in (
+                ("CPL", target_cpl_raw),
+                ("CAC", target_cac_raw),
+                ("minimum ROAS", minimum_roas_raw),
+            )
+            if raw_value is None
+        ]
+
+        if missing_targets:
+            target_names = ", ".join(
+                missing_targets
+            )
+
+            recommendations.append(
+                {
+                    "type":
+                        "budget_configuration",
+                    "channel":
+                        "internal",
+                    "priority":
+                        55,
+                    "title": (
+                        "Complete performance targets for "
+                        f"{budget.get('name') or 'marketing budget'}"
+                    ),
+                    "reason": (
+                        "This budget does not yet define "
+                        f"{target_names}. The Marketing "
+                        "Director will not invent financial "
+                        "performance thresholds."
+                    ),
+                    "proposed_action": (
+                        "Review the budget and explicitly "
+                        "set only the CPL, CAC, and minimum "
+                        "ROAS targets that the business "
+                        "wants the Director to enforce."
+                    ),
+                    "goal_id":
+                        goal_id,
+                    "budget_id":
+                        budget.get("id"),
+                    "advisory_only":
+                        True,
+                    "requires_human_approval":
+                        True,
+                    "external_write":
+                        False,
+                }
+            )
+
+    recommendations.sort(
+        key=lambda item: (
+            -int(item["priority"]),
+            item["channel"],
+            item["type"],
+        )
+    )
+
     return {
         "status": "advisory",
         "goals": normalized_goals,
+        "budgets": normalized_budgets,
+        "budget_analysis": budget_analysis,
         "channel_analysis": analyses,
         "recommendations": recommendations,
         "safety": {

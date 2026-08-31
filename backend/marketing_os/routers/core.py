@@ -839,96 +839,55 @@ async def list_marketing_recommendations(
         return [serialize_row(row) for row in result]
 
 
-@api.post("/marketing-os/recommendations/{recommendation_id}/decision")
+@api.post(
+    "/marketing-os/recommendations/{recommendation_id}/decision"
+)
 async def decide_marketing_recommendation(
     recommendation_id: str,
     payload: RecommendationDecision,
     user=Depends(require_roles(*MARKETING_ROLES)),
 ):
+    from marketing_os.services.workflow import (
+        RecommendationNotFoundError,
+        RecommendationStateError,
+        decide_recommendation,
+    )
+
     decision = payload.decision.lower().strip()
 
-    if decision not in {"approved", "rejected"}:
+    if decision not in {
+        "approved",
+        "rejected",
+    }:
         raise HTTPException(
             status_code=400,
             detail="decision must be approved or rejected",
         )
 
-    approval_id = new_marketing_id()
-
-    async with AsyncSessionLocal() as pg:
-        async with pg.begin():
-
-            recommendation = await pg.execute(
-                text("""
-                    SELECT *
-                    FROM marketing_recommendations
-                    WHERE id = :id
-                    FOR UPDATE
-                """),
-                {"id": recommendation_id},
-            )
-
-            rec = recommendation.first()
-
-            if not rec:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Recommendation not found",
+    try:
+        async with AsyncSessionLocal() as pg:
+            async with pg.begin():
+                result = await decide_recommendation(
+                    pg,
+                    recommendation_id=recommendation_id,
+                    decision=decision,
+                    reason=payload.reason,
+                    decided_by=user_id(user),
                 )
 
-            snapshot = serialize_row(rec)
+    except RecommendationNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
 
-            import json
+    except RecommendationStateError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
 
-            await pg.execute(
-                text("""
-                    INSERT INTO marketing_approvals (
-                        id,
-                        recommendation_id,
-                        decision,
-                        decision_reason,
-                        decided_by,
-                        snapshot
-                    )
-                    VALUES (
-                        :id,
-                        :recommendation_id,
-                        :decision,
-                        :decision_reason,
-                        :decided_by,
-                        CAST(:snapshot AS jsonb)
-                    )
-                """),
-                {
-                    "id": approval_id,
-                    "recommendation_id": recommendation_id,
-                    "decision": decision,
-                    "decision_reason": payload.reason,
-                    "decided_by": user_id(user),
-                    "snapshot": json.dumps(snapshot),
-                },
-            )
-
-            await pg.execute(
-                text("""
-                    UPDATE marketing_recommendations
-                    SET
-                        status = :decision,
-                        updated_at = now()
-                    WHERE id = :id
-                """),
-                {
-                    "id": recommendation_id,
-                    "decision": decision,
-                },
-            )
-
-    return {
-        "recommendation_id": recommendation_id,
-        "approval_id": approval_id,
-        "decision": decision,
-        "external_action_executed": False,
-    }
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -950,7 +909,7 @@ async def marketing_director_brief(
     - performs no budget changes;
     - performs no campaign creation;
     - performs no publishing;
-    - does not persist recommendations.
+    - persists advisory recommendations for human review.
     """
 
     async with AsyncSessionLocal() as pg:
@@ -960,6 +919,16 @@ async def marketing_director_brief(
                 """
                 SELECT *
                 FROM marketing_goals
+                ORDER BY created_at DESC
+                """
+            )
+        )
+
+        budget_result = await pg.execute(
+            text(
+                """
+                SELECT *
+                FROM marketing_budgets
                 ORDER BY created_at DESC
                 """
             )
@@ -978,6 +947,11 @@ async def marketing_director_brief(
         goals = [
             dict(row._mapping)
             for row in goals_result
+        ]
+
+        budgets = [
+            dict(row._mapping)
+            for row in budget_result
         ]
 
         rows = [
@@ -1013,7 +987,6 @@ async def marketing_director_brief(
         for field in (
             "impressions",
             "clicks",
-            "conversions",
         ):
             try:
                 item[field] += int(
@@ -1021,6 +994,13 @@ async def marketing_director_brief(
                 )
             except (TypeError, ValueError):
                 pass
+
+        try:
+            item["conversions"] += float(
+                row.get("conversions") or 0
+            )
+        except (TypeError, ValueError):
+            pass
 
         try:
             item["spend"] += float(
@@ -1041,15 +1021,39 @@ async def marketing_director_brief(
 
     brief = build_marketing_brief(
         goals=goals,
+        budgets=budgets,
         performance=aggregated.values(),
     )
 
+    from marketing_os.services.recommendation_persistence import (
+        persist_director_recommendations,
+    )
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            persistence = await (
+                persist_director_recommendations(
+                    pg,
+                    recommendations=brief.get(
+                        "recommendations",
+                        [],
+                    ),
+                    created_by=user_id(
+                        current_user
+                    ),
+                )
+            )
+
     brief["source"] = {
         "goals": "marketing_goals",
+        "budgets": "marketing_budgets",
         "performance": "marketing_daily_metrics",
         "goal_rows": len(goals),
+        "budget_rows": len(budgets),
         "metric_rows": len(rows),
     }
+
+    brief["persistence"] = persistence
 
     return brief
 
