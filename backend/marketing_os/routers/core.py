@@ -1023,6 +1023,11 @@ async def marketing_director_brief(
         goals=goals,
         budgets=budgets,
         performance=aggregated.values(),
+
+        # Keep raw campaign/day rows available for
+        # exact budget allocation matching. Channel
+        # analysis continues to use aggregates above.
+        budget_performance=rows,
     )
 
     from marketing_os.services.recommendation_persistence import (
