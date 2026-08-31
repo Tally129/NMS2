@@ -580,6 +580,36 @@ async def delete_marketing_budget(
 
 
 # ---------------------------------------------------------------------------
+# Read-only campaign inventory
+# ---------------------------------------------------------------------------
+
+
+@api.get("/marketing-os/campaigns")
+async def list_marketing_campaigns(
+    user=Depends(
+        require_roles(*MARKETING_ROLES)
+    ),
+):
+    """List locally observed advertising campaigns.
+
+    This reads only aggregate Marketing OS performance
+    already stored in Postgres.
+
+    It does not contact Google, Meta, TikTok, Microsoft,
+    or any other advertising provider.
+    """
+
+    from marketing_os.services.campaign_inventory import (
+        list_campaign_inventory,
+    )
+
+    async with AsyncSessionLocal() as pg:
+        return await list_campaign_inventory(
+            pg
+        )
+
+
+# ---------------------------------------------------------------------------
 # Read-only account visibility
 # ---------------------------------------------------------------------------
 
