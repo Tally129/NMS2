@@ -1,15 +1,15 @@
 """
-Phase 2: Google Search Console (read-only) + Rank Tracking Backend Tests
+Phase 3: Competitor Intelligence + Keyword Gap + Backlink + Local SEO Backend Tests
 
-Tests all 8 scenarios for GSC integration:
-1. Auth gate (unauthenticated + admin access)
-2. Readiness endpoint (not_connected state, no credential leaks)
-3. Sync safe no-op when disconnected
-4. Honest empty reads (performance, queries, pages)
-5. Rank tracking (distinct gsc_average_position vs serp_rank)
-6. Overview honesty (connected=false for GSC metrics)
-7. Advisory recommendations (all flags correct)
-8. Safety policy (all flags correct)
+Tests all 8 scenarios for Phase 3 integration:
+1. AUTH: Unauthenticated rejected, admin allowed
+2. SITE: Ensure site exists (create if needed)
+3. COMPETITORS (first-party): POST, GET list, GET by id, PHI reject
+4. KEYWORD GAP: GET with connected=false, not_connected_reason, records=[]
+5. CONTENT OPPORTUNITIES: GET with advisory_only=true, requires_human_approval=true
+6. BACKLINKS: GET overview with connected=false and NULL counts (NOT 0), GET list
+7. LOCAL SEO: GET with connected=false, GET opportunities with advisory_only=true
+8. SAFETY: GET capabilities with correct policy flags
 """
 
 import requests
@@ -23,8 +23,6 @@ API_BASE = f"{BASE_URL}/api"
 # Test credentials from /app/memory/test_credentials.md
 ADMIN_EMAIL = "admin@natmedsol.local"
 ADMIN_PASSWORD = "Admin!2345"
-PRACTITIONER_EMAIL = "ravello@natmedsol.local"
-PRACTITIONER_PASSWORD = "Ravello!2345"
 
 
 class TestResult:
@@ -44,7 +42,8 @@ class TestResult:
     
     def print_summary(self):
         print("\n" + "="*80)
-        print("PHASE 2 GSC BACKEND TEST RESULTS")
+        print("PHASE 3 COMPETITOR INTELLIGENCE + KEYWORD GAP + BACKLINK + LOCAL SEO")
+        print("Backend Test Results")
         print("="*80)
         
         if self.failed:
@@ -81,7 +80,7 @@ def login(email: str, password: str) -> Optional[str]:
         if response.status_code == 200:
             data = response.json()
             if data.get("mfa_required"):
-                print(f"⚠️  MFA required for {email}. Cannot proceed with automated testing.")
+                print(f"⚠️  MFA required for {email}. Report this in test results.")
                 return None
             return data.get("access_token")
         else:
@@ -99,13 +98,13 @@ def test_scenario_1_auth(result: TestResult):
     # Test 1.1: Unauthenticated request should be rejected
     try:
         response = requests.get(
-            f"{API_BASE}/marketing-os/search/search-console/readiness",
+            f"{API_BASE}/marketing-os/search/competitors",
             timeout=10
         )
         if response.status_code in [401, 403]:
             result.add_pass(
                 "1.1 Unauthenticated rejected",
-                f"GET /readiness returned {response.status_code}"
+                f"GET /competitors returned {response.status_code}"
             )
         else:
             result.add_fail(
@@ -118,19 +117,19 @@ def test_scenario_1_auth(result: TestResult):
     # Test 1.2: Admin should be allowed
     admin_token = login(ADMIN_EMAIL, ADMIN_PASSWORD)
     if not admin_token:
-        result.add_fail("1.2 Admin access", "Failed to login as admin")
+        result.add_fail("1.2 Admin login", "Failed to login as admin (MFA may be required)")
         return None
     
     try:
         response = requests.get(
-            f"{API_BASE}/marketing-os/search/search-console/readiness",
+            f"{API_BASE}/marketing-os/search/competitors",
             headers={"Authorization": f"Bearer {admin_token}"},
             timeout=10
         )
         if response.status_code == 200:
             result.add_pass(
                 "1.2 Admin access",
-                "GET /readiness returned 200"
+                "GET /competitors returned 200"
             )
         else:
             result.add_fail(
@@ -143,561 +142,556 @@ def test_scenario_1_auth(result: TestResult):
     return admin_token
 
 
-def test_scenario_2_readiness(result: TestResult, token: str):
-    """Scenario 2: Readiness endpoint - not_connected state, no credential leaks"""
-    print("\n[Scenario 2] Testing Readiness Endpoint...")
+def test_scenario_2_site(result: TestResult, token: str):
+    """Scenario 2: Ensure site exists (create if needed)"""
+    print("\n[Scenario 2] Testing Site Registration...")
     
     try:
+        # Check if competitors endpoint returns connected=false (no site)
         response = requests.get(
-            f"{API_BASE}/marketing-os/search/search-console/readiness",
+            f"{API_BASE}/marketing-os/search/competitors",
             headers={"Authorization": f"Bearer {token}"},
             timeout=10
         )
         
         if response.status_code != 200:
             result.add_fail(
-                "2.1 Readiness status",
+                "2.1 Check site status",
                 f"Expected 200, got {response.status_code}: {response.text}"
             )
             return
         
         data = response.json()
-        
-        # Check status is not_connected or configuration_incomplete
-        status = data.get("status")
-        if status in ["not_connected", "configuration_incomplete"]:
-            result.add_pass(
-                "2.1 Readiness status",
-                f"status={status}"
-            )
-        else:
-            result.add_fail(
-                "2.1 Readiness status",
-                f"Expected 'not_connected' or 'configuration_incomplete', got '{status}'"
-            )
-        
-        # Check connected=false
         if data.get("connected") is False:
-            result.add_pass("2.2 Connected flag", "connected=false")
-        else:
-            result.add_fail(
-                "2.2 Connected flag",
-                f"Expected connected=false, got {data.get('connected')}"
-            )
-        
-        # Check read_only=true
-        if data.get("read_only") is True:
-            result.add_pass("2.3 Read-only flag", "read_only=true")
-        else:
-            result.add_fail(
-                "2.3 Read-only flag",
-                f"Expected read_only=true, got {data.get('read_only')}"
-            )
-        
-        # Check external_write=false
-        if data.get("external_write") is False:
-            result.add_pass("2.4 External write flag", "external_write=false")
-        else:
-            result.add_fail(
-                "2.4 External write flag",
-                f"Expected external_write=false, got {data.get('external_write')}"
-            )
-        
-        # Check NO credential values leaked
-        json_str = json.dumps(data).lower()
-        leaked_keys = []
-        if "private_key" in json_str:
-            leaked_keys.append("private_key")
-        if "client_email" in json_str and "@" in json_str:
-            # Check if actual email value is present (not just the key name)
-            if any(domain in json_str for domain in [".iam.gserviceaccount.com", "@developer.gserviceaccount.com"]):
-                leaked_keys.append("service_account_email")
-        
-        if not leaked_keys:
-            result.add_pass("2.5 No credential leaks", "No private_key or service account email in response")
-        else:
-            result.add_fail(
-                "2.5 No credential leaks",
-                f"Credential values leaked: {', '.join(leaked_keys)}"
-            )
-        
-    except Exception as e:
-        result.add_fail("2.x Readiness endpoint", f"Error: {str(e)}")
-
-
-def test_scenario_3_sync_safe_noop(result: TestResult, token: str):
-    """Scenario 3: Sync is safe no-op when disconnected"""
-    print("\n[Scenario 3] Testing Sync Safe No-Op...")
-    
-    try:
-        response = requests.post(
-            f"{API_BASE}/marketing-os/search/search-console/sync",
-            headers={"Authorization": f"Bearer {token}"},
-            json={},
-            timeout=10
-        )
-        
-        # Accept 200 or 201 (endpoint is decorated with status_code=201)
-        if response.status_code not in [200, 201]:
-            result.add_fail(
-                "3.1 Sync no-op status",
-                f"Expected 200/201, got {response.status_code}: {response.text}"
-            )
-            return
-        
-        result.add_pass(
-            "3.1 Sync no-op status",
-            f"POST /sync returned {response.status_code} (no 500 error)"
-        )
-        
-        data = response.json()
-        
-        # Check started=false
-        if data.get("started") is False:
-            result.add_pass("3.2 Sync not started", "started=false")
-        else:
-            result.add_fail(
-                "3.2 Sync not started",
-                f"Expected started=false, got {data.get('started')}"
-            )
-        
-        # Check reason matches readiness status
-        reason = data.get("reason")
-        if reason in ["not_connected", "configuration_incomplete"]:
+            # Need to create a site
             result.add_pass(
-                "3.3 Sync reason",
-                f"reason={reason}"
+                "2.1 Site not connected",
+                "connected=false (no site configured)"
             )
+            
+            # Create site
+            response = requests.post(
+                f"{API_BASE}/marketing-os/search/sites",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"site_url": "https://natmedsol.com", "label": "NMS"},
+                timeout=10
+            )
+            
+            if response.status_code == 201:
+                result.add_pass(
+                    "2.2 Site created",
+                    f"POST /sites returned 201"
+                )
+            else:
+                result.add_fail(
+                    "2.2 Site created",
+                    f"Expected 201, got {response.status_code}: {response.text}"
+                )
         else:
-            result.add_fail(
-                "3.3 Sync reason",
-                f"Expected 'not_connected' or 'configuration_incomplete', got '{reason}'"
+            result.add_pass(
+                "2.1 Site already exists",
+                "connected=true (site already configured)"
             )
-        
+    
     except Exception as e:
-        result.add_fail("3.x Sync safe no-op", f"Error: {str(e)}")
+        result.add_fail("2.x Site registration", f"Error: {str(e)}")
 
 
-def ensure_site_exists(token: str) -> Optional[str]:
-    """Ensure a marketing site exists, create if needed. Return site_id."""
+def test_scenario_3_competitors(result: TestResult, token: str):
+    """Scenario 3: Competitors (first-party) - POST, GET list, GET by id, PHI reject"""
+    print("\n[Scenario 3] Testing Competitors (First-Party)...")
+    
+    # Test 3.1: POST competitor with domain normalization
     try:
-        # Check if sites exist
-        response = requests.get(
-            f"{API_BASE}/marketing-os/search/sites",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            sites = response.json().get("sites", [])
-            if sites:
-                return sites[0]["id"]
-        
-        # Create a site
         response = requests.post(
-            f"{API_BASE}/marketing-os/search/sites",
+            f"{API_BASE}/marketing-os/search/competitors",
             headers={"Authorization": f"Bearer {token}"},
-            json={"site_url": "https://natmedsol.com", "label": "NMS"},
+            json={
+                "domain": "https://www.rival-clinic.com",
+                "display_name": "Rival Clinic"
+            },
             timeout=10
         )
         
         if response.status_code == 201:
-            return response.json().get("id")
-        
-        return None
-    except Exception as e:
-        print(f"⚠️  Error ensuring site exists: {str(e)}")
-        return None
-
-
-def test_scenario_4_honest_empty_reads(result: TestResult, token: str):
-    """Scenario 4: Honest empty reads (performance, queries, pages)"""
-    print("\n[Scenario 4] Testing Honest Empty Reads...")
-    
-    # Ensure site exists
-    site_id = ensure_site_exists(token)
-    if not site_id:
-        result.add_warning("4.x Honest empty reads", "Could not ensure site exists")
-        return
-    
-    # Test 4.1: Performance endpoint
-    try:
-        response = requests.get(
-            f"{API_BASE}/marketing-os/search/search-console/performance",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10
-        )
-        
-        if response.status_code != 200:
-            result.add_fail(
-                "4.1 Performance endpoint",
-                f"Expected 200, got {response.status_code}: {response.text}"
-            )
-        else:
             data = response.json()
-            
-            # Check has_data=false
-            if data.get("has_data") is False:
-                result.add_pass("4.1a Performance has_data", "has_data=false")
-            else:
-                result.add_fail(
-                    "4.1a Performance has_data",
-                    f"Expected has_data=false, got {data.get('has_data')}"
-                )
-            
-            # Check totals present with 0/null values
-            totals = data.get("totals", {})
-            if totals:
-                clicks = totals.get("clicks")
-                impressions = totals.get("impressions")
-                if clicks == 0 and impressions == 0:
-                    result.add_pass(
-                        "4.1b Performance totals",
-                        "totals present with clicks=0, impressions=0 (honest empty)"
-                    )
-                else:
-                    result.add_fail(
-                        "4.1b Performance totals",
-                        f"Expected 0 values, got clicks={clicks}, impressions={impressions}"
-                    )
-            else:
-                result.add_fail("4.1b Performance totals", "totals not present")
-    
-    except Exception as e:
-        result.add_fail("4.1 Performance endpoint", f"Error: {str(e)}")
-    
-    # Test 4.2: Queries endpoint
-    try:
-        response = requests.get(
-            f"{API_BASE}/marketing-os/search/search-console/queries",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10
-        )
-        
-        if response.status_code != 200:
-            result.add_fail(
-                "4.2 Queries endpoint",
-                f"Expected 200, got {response.status_code}: {response.text}"
-            )
-        else:
-            data = response.json()
-            
-            if data.get("has_data") is False and data.get("queries") == []:
+            normalized = data.get("normalized_domain")
+            if normalized == "rival-clinic.com":
                 result.add_pass(
-                    "4.2 Queries endpoint",
-                    "has_data=false, queries=[] (honest empty)"
+                    "3.1 POST competitor",
+                    f"201 created, normalized_domain='rival-clinic.com'"
                 )
+                competitor_id = data.get("id")
             else:
                 result.add_fail(
-                    "4.2 Queries endpoint",
-                    f"Expected has_data=false and queries=[], got has_data={data.get('has_data')}, queries={len(data.get('queries', []))} items"
+                    "3.1 POST competitor",
+                    f"Expected normalized_domain='rival-clinic.com', got '{normalized}'"
                 )
-    
-    except Exception as e:
-        result.add_fail("4.2 Queries endpoint", f"Error: {str(e)}")
-    
-    # Test 4.3: Pages endpoint
-    try:
-        response = requests.get(
-            f"{API_BASE}/marketing-os/search/search-console/pages",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10
-        )
-        
-        if response.status_code != 200:
-            result.add_fail(
-                "4.3 Pages endpoint",
-                f"Expected 200, got {response.status_code}: {response.text}"
-            )
+                competitor_id = data.get("id")
         else:
-            data = response.json()
-            
-            if data.get("has_data") is False and data.get("pages") == []:
-                result.add_pass(
-                    "4.3 Pages endpoint",
-                    "has_data=false, pages=[] (honest empty)"
-                )
-            else:
-                result.add_fail(
-                    "4.3 Pages endpoint",
-                    f"Expected has_data=false and pages=[], got has_data={data.get('has_data')}, pages={len(data.get('pages', []))} items"
-                )
-    
+            result.add_fail(
+                "3.1 POST competitor",
+                f"Expected 201, got {response.status_code}: {response.text}"
+            )
+            competitor_id = None
     except Exception as e:
-        result.add_fail("4.3 Pages endpoint", f"Error: {str(e)}")
-
-
-def ensure_tracked_keyword(token: str) -> bool:
-    """Ensure at least one tracked keyword exists."""
+        result.add_fail("3.1 POST competitor", f"Error: {str(e)}")
+        competitor_id = None
+    
+    # Test 3.2: GET list shows competitor
     try:
-        # Check if tracked keywords exist
         response = requests.get(
-            f"{API_BASE}/marketing-os/search/keywords/tracked",
+            f"{API_BASE}/marketing-os/search/competitors",
             headers={"Authorization": f"Bearer {token}"},
             timeout=10
         )
         
         if response.status_code == 200:
-            keywords = response.json().get("keywords", [])
-            if keywords:
-                return True
-        
-        # Create a tracked keyword
+            data = response.json()
+            competitors = data.get("competitors", [])
+            if len(competitors) > 0:
+                result.add_pass(
+                    "3.2 GET competitors list",
+                    f"200 OK, {len(competitors)} competitor(s) listed"
+                )
+            else:
+                result.add_fail(
+                    "3.2 GET competitors list",
+                    "Expected at least 1 competitor, got 0"
+                )
+        else:
+            result.add_fail(
+                "3.2 GET competitors list",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+    except Exception as e:
+        result.add_fail("3.2 GET competitors list", f"Error: {str(e)}")
+    
+    # Test 3.3: GET competitor by id
+    if competitor_id:
+        try:
+            response = requests.get(
+                f"{API_BASE}/marketing-os/search/competitors/{competitor_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                comparison = data.get("comparison", {})
+                data_available = comparison.get("data_available")
+                
+                if data_available is False:
+                    reason = comparison.get("reason")
+                    if reason == "no_competitor_data_provider":
+                        result.add_pass(
+                            "3.3 GET competitor by id",
+                            f"200 OK, comparison.data_available=false, reason='no_competitor_data_provider'"
+                        )
+                    else:
+                        result.add_fail(
+                            "3.3 GET competitor by id",
+                            f"Expected reason='no_competitor_data_provider', got '{reason}'"
+                        )
+                else:
+                    result.add_fail(
+                        "3.3 GET competitor by id",
+                        f"Expected data_available=false, got {data_available}"
+                    )
+            else:
+                result.add_fail(
+                    "3.3 GET competitor by id",
+                    f"Expected 200, got {response.status_code}: {response.text}"
+                )
+        except Exception as e:
+            result.add_fail("3.3 GET competitor by id", f"Error: {str(e)}")
+    else:
+        result.add_warning("3.3 GET competitor by id", "Skipped (no competitor_id)")
+    
+    # Test 3.4: PHI rejection - POST with email field
+    try:
         response = requests.post(
-            f"{API_BASE}/marketing-os/search/keywords",
+            f"{API_BASE}/marketing-os/search/competitors",
             headers={"Authorization": f"Bearer {token}"},
-            json={"keyword": "book appointment online", "current_rank": 3},
+            json={
+                "domain": "https://x.com",
+                "email": "a@b.com"
+            },
             timeout=10
         )
         
-        return response.status_code == 201
+        if response.status_code == 400 or response.status_code == 422:
+            result.add_pass(
+                "3.4 PHI rejection",
+                f"POST with email field rejected with {response.status_code}"
+            )
+        else:
+            result.add_fail(
+                "3.4 PHI rejection",
+                f"Expected 400/422, got {response.status_code}: {response.text}"
+            )
     except Exception as e:
-        print(f"⚠️  Error ensuring tracked keyword: {str(e)}")
-        return False
+        result.add_fail("3.4 PHI rejection", f"Error: {str(e)}")
 
 
-def test_scenario_5_rank_tracking(result: TestResult, token: str):
-    """Scenario 5: Rank tracking - distinct gsc_average_position vs serp_rank"""
-    print("\n[Scenario 5] Testing Rank Tracking...")
-    
-    # Ensure tracked keyword exists
-    if not ensure_tracked_keyword(token):
-        result.add_warning("5.x Rank tracking", "Could not ensure tracked keyword exists")
-        return
+def test_scenario_4_keyword_gap(result: TestResult, token: str):
+    """Scenario 4: Keyword gap - connected=false, not_connected_reason, records=[]"""
+    print("\n[Scenario 4] Testing Keyword Gap...")
     
     try:
         response = requests.get(
-            f"{API_BASE}/marketing-os/search/rank-tracking",
+            f"{API_BASE}/marketing-os/search/keyword-gap",
             headers={"Authorization": f"Bearer {token}"},
             timeout=10
         )
         
         if response.status_code != 200:
             result.add_fail(
-                "5.1 Rank tracking status",
+                "4.1 Keyword gap status",
                 f"Expected 200, got {response.status_code}: {response.text}"
             )
             return
         
         data = response.json()
-        keywords = data.get("keywords", [])
         
-        if not keywords:
-            result.add_warning(
-                "5.1 Rank tracking keywords",
-                "No tracked keywords returned (may be expected if none exist)"
-            )
-            return
-        
-        # Check first keyword has both gsc_average_position and serp_rank
-        kw = keywords[0]
-        
-        if "gsc_average_position" not in kw:
-            result.add_fail(
-                "5.1 GSC average position",
-                "gsc_average_position not present in keyword object"
+        # Check connected=false
+        if data.get("connected") is False:
+            result.add_pass(
+                "4.1 Keyword gap connected",
+                "connected=false"
             )
         else:
-            gsc = kw["gsc_average_position"]
-            if gsc.get("metric_type") == "gsc_average_position":
-                result.add_pass(
-                    "5.1 GSC average position",
-                    f"metric_type='gsc_average_position', source='{gsc.get('source')}'"
-                )
-            else:
-                result.add_fail(
-                    "5.1 GSC average position",
-                    f"Expected metric_type='gsc_average_position', got '{gsc.get('metric_type')}'"
-                )
-        
-        if "serp_rank" not in kw:
             result.add_fail(
-                "5.2 SERP rank",
-                "serp_rank not present in keyword object"
+                "4.1 Keyword gap connected",
+                f"Expected connected=false, got {data.get('connected')}"
+            )
+        
+        # Check not_connected_reason
+        reason = data.get("not_connected_reason")
+        if reason == "no_competitor_data_provider":
+            result.add_pass(
+                "4.2 Not connected reason",
+                "not_connected_reason='no_competitor_data_provider'"
             )
         else:
-            serp = kw["serp_rank"]
-            if serp.get("metric_type") == "serp_rank":
-                result.add_pass(
-                    "5.2 SERP rank",
-                    f"metric_type='serp_rank', source='{serp.get('source')}'"
-                )
-            else:
-                result.add_fail(
-                    "5.2 SERP rank",
-                    f"Expected metric_type='serp_rank', got '{serp.get('metric_type')}'"
-                )
+            result.add_fail(
+                "4.2 Not connected reason",
+                f"Expected 'no_competitor_data_provider', got '{reason}'"
+            )
         
-        # Check they are explicitly distinct
-        if "gsc_average_position" in kw and "serp_rank" in kw:
-            gsc_type = kw["gsc_average_position"].get("metric_type")
-            serp_type = kw["serp_rank"].get("metric_type")
-            if gsc_type != serp_type:
-                result.add_pass(
-                    "5.3 Distinct metrics",
-                    f"gsc_average_position and serp_rank have different metric_type"
-                )
-            else:
-                result.add_fail(
-                    "5.3 Distinct metrics",
-                    "gsc_average_position and serp_rank have same metric_type"
-                )
+        # Check records=[]
+        records = data.get("records", None)
+        if records == []:
+            result.add_pass(
+                "4.3 Records empty",
+                "records=[]"
+            )
+        else:
+            result.add_fail(
+                "4.3 Records empty",
+                f"Expected records=[], got {len(records) if records else 'null'} items"
+            )
         
-        # Check summary has gains/losses/unchanged
+        # Check summary present with numeric zero counts (acceptable for count of zero records)
         summary = data.get("summary", {})
-        required_keys = ["gains", "losses", "unchanged"]
-        missing = [k for k in required_keys if k not in summary]
-        if not missing:
+        if summary:
             result.add_pass(
-                "5.4 Summary keys",
-                f"gains={summary.get('gains')}, losses={summary.get('losses')}, unchanged={summary.get('unchanged')}"
+                "4.4 Summary present",
+                f"summary present with keys: {list(summary.keys())}"
             )
         else:
             result.add_fail(
-                "5.4 Summary keys",
-                f"Missing keys in summary: {', '.join(missing)}"
+                "4.4 Summary present",
+                "summary not present"
             )
     
     except Exception as e:
-        result.add_fail("5.x Rank tracking", f"Error: {str(e)}")
+        result.add_fail("4.x Keyword gap", f"Error: {str(e)}")
 
 
-def test_scenario_6_overview_honesty(result: TestResult, token: str):
-    """Scenario 6: Overview honesty - connected=false for GSC metrics"""
-    print("\n[Scenario 6] Testing Overview Honesty...")
+def test_scenario_5_content_opportunities(result: TestResult, token: str):
+    """Scenario 5: Content opportunities - advisory_only=true, requires_human_approval=true"""
+    print("\n[Scenario 5] Testing Content Opportunities...")
     
     try:
         response = requests.get(
-            f"{API_BASE}/marketing-os/search/overview",
+            f"{API_BASE}/marketing-os/search/content-opportunities",
             headers={"Authorization": f"Bearer {token}"},
             timeout=10
         )
         
         if response.status_code != 200:
             result.add_fail(
-                "6.1 Overview status",
+                "5.1 Content opportunities status",
                 f"Expected 200, got {response.status_code}: {response.text}"
             )
             return
         
         data = response.json()
-        metrics = data.get("metrics", {})
         
-        # Check GSC metrics have connected=false and value=null
-        gsc_metrics = [
-            "organic_keywords",
-            "estimated_organic_traffic",
-            "organic_clicks"
-        ]
+        # Check advisory_only=true
+        if data.get("advisory_only") is True:
+            result.add_pass(
+                "5.1 Advisory only",
+                "advisory_only=true"
+            )
+        else:
+            result.add_fail(
+                "5.1 Advisory only",
+                f"Expected advisory_only=true, got {data.get('advisory_only')}"
+            )
         
-        all_honest = True
-        for metric_name in gsc_metrics:
-            metric = metrics.get(metric_name, {})
-            connected = metric.get("connected")
-            value = metric.get("value")
+        # Check requires_human_approval=true
+        if data.get("requires_human_approval") is True:
+            result.add_pass(
+                "5.2 Requires human approval",
+                "requires_human_approval=true"
+            )
+        else:
+            result.add_fail(
+                "5.2 Requires human approval",
+                f"Expected requires_human_approval=true, got {data.get('requires_human_approval')}"
+            )
+        
+        # Check opportunities is a list
+        opportunities = data.get("opportunities")
+        if isinstance(opportunities, list):
+            result.add_pass(
+                "5.3 Opportunities list",
+                f"opportunities is a list with {len(opportunities)} items"
+            )
             
-            if connected is False and value is None:
+            # If any items exist, check external_write=false
+            if len(opportunities) > 0:
+                all_correct = True
+                for i, opp in enumerate(opportunities):
+                    if opp.get("external_write") is not False:
+                        result.add_fail(
+                            f"5.4 Opportunity {i+1} external_write",
+                            f"Expected external_write=false, got {opp.get('external_write')}"
+                        )
+                        all_correct = False
+                
+                if all_correct:
+                    result.add_pass(
+                        "5.4 All opportunities external_write",
+                        f"All {len(opportunities)} opportunities have external_write=false"
+                    )
+        else:
+            result.add_fail(
+                "5.3 Opportunities list",
+                f"Expected opportunities to be a list, got {type(opportunities)}"
+            )
+    
+    except Exception as e:
+        result.add_fail("5.x Content opportunities", f"Error: {str(e)}")
+
+
+def test_scenario_6_backlinks(result: TestResult, token: str):
+    """Scenario 6: Backlinks - overview with connected=false and NULL counts (NOT 0), list empty"""
+    print("\n[Scenario 6] Testing Backlinks...")
+    
+    # Test 6.1: Backlinks overview
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/backlinks/overview",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "6.1 Backlinks overview status",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+        else:
+            data = response.json()
+            
+            # Check connected=false
+            if data.get("connected") is False:
                 result.add_pass(
-                    f"6.{gsc_metrics.index(metric_name) + 1} {metric_name}",
-                    f"connected=false, value=null (honest)"
+                    "6.1a Backlinks connected",
+                    "connected=false"
                 )
             else:
                 result.add_fail(
-                    f"6.{gsc_metrics.index(metric_name) + 1} {metric_name}",
-                    f"Expected connected=false and value=null, got connected={connected}, value={value}"
+                    "6.1a Backlinks connected",
+                    f"Expected connected=false, got {data.get('connected')}"
                 )
-                all_honest = False
-        
-        # Check first-party metrics (tracked_keywords) may be populated
-        tracked = metrics.get("tracked_keywords", {})
-        if tracked.get("connected") is True:
-            result.add_pass(
-                "6.4 First-party metrics",
-                f"tracked_keywords connected=true (first-party data)"
-            )
-        else:
-            result.add_warning(
-                "6.4 First-party metrics",
-                "tracked_keywords not connected (may be expected if no keywords tracked)"
-            )
+            
+            # Check counts are NULL (not 0)
+            count_fields = ["backlink_count", "referring_domains", "new_backlinks", "lost_backlinks"]
+            all_null = True
+            for field in count_fields:
+                value = data.get(field)
+                if value is not None:
+                    result.add_fail(
+                        f"6.1b {field}",
+                        f"Expected null, got {value} (must be null, NOT 0)"
+                    )
+                    all_null = False
+            
+            if all_null:
+                result.add_pass(
+                    "6.1b Backlink counts NULL",
+                    "All counts (backlink_count, referring_domains, new_backlinks, lost_backlinks) are null (NOT 0)"
+                )
     
     except Exception as e:
-        result.add_fail("6.x Overview honesty", f"Error: {str(e)}")
-
-
-def test_scenario_7_advisory_recommendations(result: TestResult, token: str):
-    """Scenario 7: Advisory recommendations - all flags correct"""
-    print("\n[Scenario 7] Testing Advisory Recommendations...")
+        result.add_fail("6.1 Backlinks overview", f"Error: {str(e)}")
     
+    # Test 6.2: Backlinks list
     try:
         response = requests.get(
-            f"{API_BASE}/marketing-os/search/search-console/recommendations",
+            f"{API_BASE}/marketing-os/search/backlinks",
             headers={"Authorization": f"Bearer {token}"},
             timeout=10
         )
         
         if response.status_code != 200:
             result.add_fail(
-                "7.1 Recommendations status",
+                "6.2 Backlinks list status",
                 f"Expected 200, got {response.status_code}: {response.text}"
             )
-            return
-        
-        data = response.json()
-        recommendations = data.get("recommendations", [])
-        
-        if not recommendations:
-            result.add_warning(
-                "7.1 Recommendations",
-                "No recommendations returned (may be expected when disconnected)"
-            )
-            # Still check top-level flags
-            if data.get("advisory_only") is True:
-                result.add_pass("7.2 Top-level advisory_only", "advisory_only=true")
+        else:
+            data = response.json()
+            
+            # Check backlinks=[]
+            backlinks = data.get("backlinks", None)
+            if backlinks == []:
+                result.add_pass(
+                    "6.2a Backlinks empty",
+                    "backlinks=[]"
+                )
             else:
-                result.add_fail("7.2 Top-level advisory_only", f"Expected true, got {data.get('advisory_only')}")
+                result.add_fail(
+                    "6.2a Backlinks empty",
+                    f"Expected backlinks=[], got {len(backlinks) if backlinks else 'null'} items"
+                )
             
-            if data.get("requires_human_approval") is True:
-                result.add_pass("7.3 Top-level requires_human_approval", "requires_human_approval=true")
+            # Check not_connected_reason present
+            reason = data.get("not_connected_reason")
+            if reason:
+                result.add_pass(
+                    "6.2b Not connected reason",
+                    f"not_connected_reason='{reason}'"
+                )
             else:
-                result.add_fail("7.3 Top-level requires_human_approval", f"Expected true, got {data.get('requires_human_approval')}")
-            return
-        
-        # Check every recommendation has correct flags
-        all_correct = True
-        for i, rec in enumerate(recommendations):
-            if rec.get("advisory_only") is not True:
                 result.add_fail(
-                    f"7.{i+1}a Rec {i+1} advisory_only",
-                    f"Expected advisory_only=true, got {rec.get('advisory_only')}"
+                    "6.2b Not connected reason",
+                    "not_connected_reason not present"
                 )
-                all_correct = False
-            
-            if rec.get("requires_human_approval") is not True:
-                result.add_fail(
-                    f"7.{i+1}b Rec {i+1} requires_human_approval",
-                    f"Expected requires_human_approval=true, got {rec.get('requires_human_approval')}"
-                )
-                all_correct = False
-            
-            if rec.get("external_write") is not False:
-                result.add_fail(
-                    f"7.{i+1}c Rec {i+1} external_write",
-                    f"Expected external_write=false, got {rec.get('external_write')}"
-                )
-                all_correct = False
-        
-        if all_correct:
-            result.add_pass(
-                "7.1 All recommendations",
-                f"All {len(recommendations)} recommendations have correct flags (advisory_only=true, requires_human_approval=true, external_write=false)"
-            )
     
     except Exception as e:
-        result.add_fail("7.x Advisory recommendations", f"Error: {str(e)}")
+        result.add_fail("6.2 Backlinks list", f"Error: {str(e)}")
 
 
-def test_scenario_8_safety_policy(result: TestResult, token: str):
+def test_scenario_7_local_seo(result: TestResult, token: str):
+    """Scenario 7: Local SEO - connected=false, not_connected_reason, opportunities advisory_only=true"""
+    print("\n[Scenario 7] Testing Local SEO...")
+    
+    # Test 7.1: Local SEO endpoint
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/local",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "7.1 Local SEO status",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+        else:
+            data = response.json()
+            
+            # Check connected=false
+            if data.get("connected") is False:
+                result.add_pass(
+                    "7.1a Local connected",
+                    "connected=false"
+                )
+            else:
+                result.add_fail(
+                    "7.1a Local connected",
+                    f"Expected connected=false, got {data.get('connected')}"
+                )
+            
+            # Check not_connected_reason
+            reason = data.get("not_connected_reason")
+            if reason == "no_local_data_source":
+                result.add_pass(
+                    "7.1b Not connected reason",
+                    "not_connected_reason='no_local_data_source'"
+                )
+            else:
+                result.add_fail(
+                    "7.1b Not connected reason",
+                    f"Expected 'no_local_data_source', got '{reason}'"
+                )
+            
+            # Check locations=[]
+            locations = data.get("locations", None)
+            if locations == []:
+                result.add_pass(
+                    "7.1c Locations empty",
+                    "locations=[]"
+                )
+            else:
+                result.add_fail(
+                    "7.1c Locations empty",
+                    f"Expected locations=[], got {len(locations) if locations else 'null'} items"
+                )
+    
+    except Exception as e:
+        result.add_fail("7.1 Local SEO", f"Error: {str(e)}")
+    
+    # Test 7.2: Local opportunities
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/local/opportunities",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "7.2 Local opportunities status",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+        else:
+            data = response.json()
+            
+            # Check advisory_only=true
+            if data.get("advisory_only") is True:
+                result.add_pass(
+                    "7.2a Advisory only",
+                    "advisory_only=true"
+                )
+            else:
+                result.add_fail(
+                    "7.2a Advisory only",
+                    f"Expected advisory_only=true, got {data.get('advisory_only')}"
+                )
+            
+            # Check requires_human_approval=true
+            if data.get("requires_human_approval") is True:
+                result.add_pass(
+                    "7.2b Requires human approval",
+                    "requires_human_approval=true"
+                )
+            else:
+                result.add_fail(
+                    "7.2b Requires human approval",
+                    f"Expected requires_human_approval=true, got {data.get('requires_human_approval')}"
+                )
+    
+    except Exception as e:
+        result.add_fail("7.2 Local opportunities", f"Error: {str(e)}")
+
+
+def test_scenario_8_safety(result: TestResult, token: str):
     """Scenario 8: Safety policy - all flags correct"""
     print("\n[Scenario 8] Testing Safety Policy...")
     
@@ -717,7 +711,6 @@ def test_scenario_8_safety_policy(result: TestResult, token: str):
         
         data = response.json()
         policy = data.get("policy", {})
-        capabilities = data.get("capabilities", {})
         
         # Check policy flags
         policy_checks = [
@@ -728,6 +721,7 @@ def test_scenario_8_safety_policy(result: TestResult, token: str):
             ("human_approval_required", True),
         ]
         
+        all_correct = True
         for key, expected in policy_checks:
             actual = policy.get(key)
             if actual == expected:
@@ -740,28 +734,7 @@ def test_scenario_8_safety_policy(result: TestResult, token: str):
                     f"8.{policy_checks.index((key, expected)) + 1} policy.{key}",
                     f"Expected {key}={expected}, got {actual}"
                 )
-        
-        # Check google_search_console capability flags
-        gsc_cap = capabilities.get("google_search_console", {})
-        gsc_checks = [
-            ("write_enabled", False),
-            ("external_write_enabled", False),
-            ("phi_stored", False),
-            ("position_is_serp_rank", False),
-        ]
-        
-        for key, expected in gsc_checks:
-            actual = gsc_cap.get(key)
-            if actual == expected:
-                result.add_pass(
-                    f"8.{len(policy_checks) + gsc_checks.index((key, expected)) + 1} gsc.{key}",
-                    f"{key}={expected}"
-                )
-            else:
-                result.add_fail(
-                    f"8.{len(policy_checks) + gsc_checks.index((key, expected)) + 1} gsc.{key}",
-                    f"Expected {key}={expected}, got {actual}"
-                )
+                all_correct = False
     
     except Exception as e:
         result.add_fail("8.x Safety policy", f"Error: {str(e)}")
@@ -769,7 +742,7 @@ def test_scenario_8_safety_policy(result: TestResult, token: str):
 
 def main():
     print("="*80)
-    print("PHASE 2: GOOGLE SEARCH CONSOLE (READ-ONLY) + RANK TRACKING")
+    print("PHASE 3: COMPETITOR INTELLIGENCE + KEYWORD GAP + BACKLINK + LOCAL SEO")
     print("Backend Testing Suite")
     print("="*80)
     
@@ -782,26 +755,26 @@ def main():
         result.print_summary()
         return
     
-    # Scenario 2: Readiness
-    test_scenario_2_readiness(result, admin_token)
+    # Scenario 2: Site registration
+    test_scenario_2_site(result, admin_token)
     
-    # Scenario 3: Sync safe no-op
-    test_scenario_3_sync_safe_noop(result, admin_token)
+    # Scenario 3: Competitors (first-party)
+    test_scenario_3_competitors(result, admin_token)
     
-    # Scenario 4: Honest empty reads
-    test_scenario_4_honest_empty_reads(result, admin_token)
+    # Scenario 4: Keyword gap
+    test_scenario_4_keyword_gap(result, admin_token)
     
-    # Scenario 5: Rank tracking
-    test_scenario_5_rank_tracking(result, admin_token)
+    # Scenario 5: Content opportunities
+    test_scenario_5_content_opportunities(result, admin_token)
     
-    # Scenario 6: Overview honesty
-    test_scenario_6_overview_honesty(result, admin_token)
+    # Scenario 6: Backlinks
+    test_scenario_6_backlinks(result, admin_token)
     
-    # Scenario 7: Advisory recommendations
-    test_scenario_7_advisory_recommendations(result, admin_token)
+    # Scenario 7: Local SEO
+    test_scenario_7_local_seo(result, admin_token)
     
     # Scenario 8: Safety policy
-    test_scenario_8_safety_policy(result, admin_token)
+    test_scenario_8_safety(result, admin_token)
     
     # Print summary
     result.print_summary()

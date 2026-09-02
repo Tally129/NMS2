@@ -5,6 +5,7 @@ import api from "../../lib/api";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import SearchConsoleSection from "./SearchConsoleSection";
+import Phase3Section from "./Phase3Section";
 
 import {
   AlertTriangle,
@@ -571,6 +572,7 @@ export default function SearchIntelligencePanel() {
           ) : null}
 
           <SearchConsoleSection />
+          <Phase3Section />
         </>
       )}
     </SectionCard>

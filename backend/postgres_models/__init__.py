@@ -79,3 +79,11 @@ from .marketing_gsc import (  # noqa: F401
     MarketingGscQueryMetric,
     MarketingGscPageMetric,
 )
+
+# Marketing OS Phase 3 (competitors / keyword gap / backlinks / local).
+from .marketing_phase3 import (  # noqa: F401
+    MarketingSearchCompetitor,
+    MarketingKeywordGapSnapshot,
+    MarketingBacklinkSnapshot,
+    MarketingLocalRankSnapshot,
+)

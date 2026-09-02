@@ -1162,3 +1162,6 @@ from marketing_os.routers import search as _marketing_search_routes  # noqa: F40
 
 # Register read-only Google Search Console + rank-tracking routes (Phase 2).
 from marketing_os.routers import search_console as _marketing_gsc_routes  # noqa: F401,E402
+
+# Register Phase 3 competitor/keyword-gap/backlink/local routes.
+from marketing_os.routers import search_phase3 as _marketing_phase3_routes  # noqa: F401,E402
