@@ -828,7 +828,7 @@ agent_communication:
       RECOMMENDATION: Fix critical auditor access issue before production. Minor PHI validation issues are low priority (data is not stored).
     -agent: "main"
     message: |
-      Phase 1 Search Intelligence frontend ready for testing. URL: https://nms-campaign-command.preview.emergentagent.com/portal/marketing
+      Phase 1 Search Intelligence frontend ready for testing. URL: https://nms-nurture-phase8.preview.emergentagent.com/portal/marketing
       Login as admin@natmedsol.local / Admin!2345 (role: admin) via /staff-login.
       
       Verify:
@@ -904,7 +904,7 @@ agent_communication:
       PHASE 2 GSC BACKEND: PRODUCTION-READY.
     -agent: "main"
     message: |
-      Phase 2 GSC frontend ready for testing. URL: https://nms-campaign-command.preview.emergentagent.com/portal/marketing
+      Phase 2 GSC frontend ready for testing. URL: https://nms-nurture-phase8.preview.emergentagent.com/portal/marketing
       Login as admin@natmedsol.local / Admin!2345 via /staff-login.
       
       CRITICAL: GSC section is INSIDE the existing Search Intelligence panel (NOT a separate dashboard).
@@ -1100,7 +1100,7 @@ agent_communication:
       PHASE 3 BACKEND: PRODUCTION-READY.
     -agent: "main"
     message: |
-      Phase 3 frontend ready for testing. URL: https://nms-campaign-command.preview.emergentagent.com/portal/marketing
+      Phase 3 frontend ready for testing. URL: https://nms-nurture-phase8.preview.emergentagent.com/portal/marketing
       Login as admin@natmedsol.local / Admin!2345 via /staff-login.
       
       CRITICAL: Phase 3 section is INSIDE the existing Search Intelligence panel (NOT a separate dashboard).

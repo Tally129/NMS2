@@ -12,7 +12,7 @@ import requests
 import pytest
 from urllib.parse import urlparse
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://design-158.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://nms-nurture-phase8.preview.emergentagent.com").rstrip("/")
 API = f"{BASE_URL}/api"
 
 ADMIN = {"email": "admin@natmedsol.local", "password": "Admin!2345"}

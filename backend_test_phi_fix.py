@@ -9,7 +9,7 @@ import sys
 from typing import Dict, Any
 
 # Backend URL from frontend/.env
-BASE_URL = "https://nms-campaign-command.preview.emergentagent.com/api"
+BASE_URL = "https://nms-nurture-phase8.preview.emergentagent.com/api"
 
 # Test credentials
 ADMIN_EMAIL = "admin@natmedsol.local"

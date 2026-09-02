@@ -17,7 +17,7 @@ import json
 from typing import Optional
 
 # Base URL from frontend/.env
-BASE_URL = "https://nms-campaign-command.preview.emergentagent.com"
+BASE_URL = "https://nms-nurture-phase8.preview.emergentagent.com"
 API_BASE = f"{BASE_URL}/api"
 
 # Test credentials from /app/memory/test_credentials.md
