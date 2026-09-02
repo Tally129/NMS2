@@ -29,6 +29,11 @@ from marketing_os.capabilities import CAPABILITIES
 from marketing_os.services.director import build_marketing_brief
 from marketing_os.services.lead_opportunities import derive_lead_opportunities
 from marketing_os.services.paid_media import build_paid_media_overview
+from marketing_os.services.journey import (
+    compute_channel_economics,
+    compute_funnel,
+    compute_revenue,
+)
 from marketing_os.policy import DEFAULT_POLICY
 
 
@@ -1037,6 +1042,24 @@ async def marketing_director_brief(
             )
         )
 
+        conversion_result = await pg.execute(
+            text(
+                """
+                SELECT
+                    event_type,
+                    occurred_at,
+                    marketing_subject_id,
+                    source,
+                    medium,
+                    campaign,
+                    value,
+                    properties
+                FROM marketing_conversion_events
+                ORDER BY occurred_at ASC
+                """
+            )
+        )
+
         goals = [
             dict(row._mapping)
             for row in goals_result
@@ -1050,6 +1073,11 @@ async def marketing_director_brief(
         rows = [
             dict(row._mapping)
             for row in metric_result
+        ]
+
+        conversion_events = [
+            dict(row._mapping)
+            for row in conversion_result
         ]
 
     # Aggregate database rows by channel before
@@ -1126,6 +1154,14 @@ async def marketing_director_brief(
         # google_ads / meta_ads / microsoft_ads. Disconnected channels
         # surface honestly (null metrics) and never drive recommendations.
         paid_media=build_paid_media_overview(rows),
+
+        # First-party lead -> appointment -> revenue outcomes. Deterministic,
+        # PHI-free. Unavailable stages stay null and never fabricate zero.
+        funnel=compute_funnel(conversion_events),
+        channel_economics=compute_channel_economics(
+            conversion_events, rows
+        ),
+        revenue=compute_revenue(conversion_events),
     )
 
     from marketing_os.services.recommendation_persistence import (
@@ -1174,3 +1210,6 @@ from marketing_os.routers import search_phase3 as _marketing_phase3_routes  # no
 
 # Register Phase 4 read-only paid-media (Google/Meta/Microsoft) routes.
 from marketing_os.routers import paid_media as _marketing_paid_media_routes  # noqa: F401,E402
+
+# Register Phase 5 lead->appointment->revenue attribution routes.
+from marketing_os.routers import attribution as _marketing_attribution_routes  # noqa: F401,E402

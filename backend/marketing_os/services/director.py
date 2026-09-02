@@ -359,6 +359,165 @@ def recommend_for_channel(
     return recommendations
 
 
+def recommend_from_outcomes(
+    funnel: Optional[Mapping[str, Any]] = None,
+    channel_economics: Optional[Mapping[str, Any]] = None,
+) -> list[dict[str, Any]]:
+    """Advisory recommendations from first-party lead/appointment outcomes.
+
+    Recommendations are generated ONLY where real outcome data exists.
+    Unavailable (``None``) stages/metrics never trigger a recommendation,
+    so disconnected or untracked stages are never treated as zero.
+    """
+
+    recommendations: list[dict[str, Any]] = []
+
+    funnel = funnel or {}
+    stages = funnel.get("stages") or {}
+    rates = funnel.get("rates") or {}
+
+    leads = stages.get("lead")
+    booked = stages.get("appointment_booked")
+
+    lead_to_booking = rates.get("lead_to_booking_rate")
+    booking_to_show = rates.get("booking_to_show_rate")
+    request_to_booking = rates.get("request_to_booking_rate")
+
+    # Strong lead volume but weak lead -> booking conversion.
+    if (
+        isinstance(leads, int) and leads >= 10
+        and lead_to_booking is not None
+        and lead_to_booking < 0.15
+    ):
+        recommendations.append(_recommendation(
+            recommendation_type="conversion",
+            channel="funnel",
+            priority=88,
+            title="Improve lead-to-booking conversion",
+            reason=(
+                "Lead volume is healthy but a low share of leads become "
+                "booked appointments."
+            ),
+            proposed_action=(
+                "Review intake response time, booking friction, and "
+                "follow-up cadence. No spend change is proposed."
+            ),
+        ))
+
+    # Strong booked rate but poor show rate.
+    if booking_to_show is not None and booking_to_show < 0.6 and (
+        isinstance(booked, int) and booked >= 5
+    ):
+        recommendations.append(_recommendation(
+            recommendation_type="retention",
+            channel="funnel",
+            priority=84,
+            title="Reduce appointment no-shows",
+            reason=(
+                "Appointments are being booked but a low share are "
+                "completed (shown)."
+            ),
+            proposed_action=(
+                "Review reminders and confirmation flow. Advisory only."
+            ),
+        ))
+
+    # Weak landing/request -> booking conversion.
+    if request_to_booking is not None and request_to_booking < 0.3 and (
+        isinstance(stages.get("appointment_request"), int)
+        and stages["appointment_request"] >= 5
+    ):
+        recommendations.append(_recommendation(
+            recommendation_type="conversion",
+            channel="funnel",
+            priority=78,
+            title="Investigate weak request-to-booking conversion",
+            reason=(
+                "Many appointment requests are not converting into booked "
+                "appointments."
+            ),
+            proposed_action=(
+                "Review landing-page alignment, scheduling availability, "
+                "and request handling."
+            ),
+        ))
+
+    economics = channel_economics or {}
+    revenue_available = bool(economics.get("revenue_available"))
+
+    for row in economics.get("channels", []) or []:
+        channel = str(row.get("channel") or "unknown")
+        spend = row.get("spend")
+        booked_count = row.get("booked_appointments")
+        completed_count = row.get("completed_appointments")
+        attributed_revenue = row.get("attributed_revenue")
+        roas = row.get("roas")
+
+        # High spend but zero booked appointments (booking IS tracked).
+        if (
+            isinstance(spend, (int, float)) and spend > 0
+            and booked_count == 0
+        ):
+            recommendations.append(_recommendation(
+                recommendation_type="efficiency",
+                channel=channel,
+                priority=92,
+                title=f"Review {channel} spend with no booked appointments",
+                reason=(
+                    "This channel has recorded spend but no attributed "
+                    "booked appointments."
+                ),
+                proposed_action=(
+                    "Investigate tracking, targeting, and landing "
+                    "experience before any budget decision. Advisory only."
+                ),
+            ))
+
+        # Channel generating appointments but little/no real revenue.
+        if (
+            revenue_available
+            and isinstance(booked_count, int) and booked_count >= 3
+            and (attributed_revenue is not None and attributed_revenue <= 0)
+        ):
+            recommendations.append(_recommendation(
+                recommendation_type="revenue",
+                channel=channel,
+                priority=80,
+                title=f"{channel} books appointments but shows no revenue",
+                reason=(
+                    "Attributed booked appointments are not yet linked to "
+                    "real first-party revenue."
+                ),
+                proposed_action=(
+                    "Verify revenue attribution and downstream conversion. "
+                    "Advisory only."
+                ),
+            ))
+
+        # High-ROAS channel with real revenue and completed appointments.
+        if (
+            revenue_available and roas is not None and roas >= 3.0
+            and isinstance(completed_count, int) and completed_count >= 3
+        ):
+            recommendations.append(_recommendation(
+                recommendation_type="growth",
+                channel=channel,
+                priority=72,
+                title=f"Evaluate scaling {channel} (high attributed ROAS)",
+                reason=(
+                    "This channel shows strong attributed revenue from "
+                    "completed appointments."
+                ),
+                proposed_action=(
+                    "Prepare a conservative scaling proposal for human "
+                    "approval. Do not change budget automatically."
+                ),
+            ))
+
+    return recommendations
+
+
+
 def build_marketing_brief(
     *,
     goals: Iterable[Mapping[str, Any]] = (),
@@ -366,6 +525,9 @@ def build_marketing_brief(
     performance: Iterable[Mapping[str, Any]] = (),
     budget_performance: Iterable[Mapping[str, Any]] = (),
     paid_media: Optional[Mapping[str, Any]] = None,
+    funnel: Optional[Mapping[str, Any]] = None,
+    channel_economics: Optional[Mapping[str, Any]] = None,
+    revenue: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Build an advisory cross-channel marketing brief.
 
@@ -396,6 +558,11 @@ def build_marketing_brief(
             signal
         )
     ]
+
+    # First-party lead -> appointment -> revenue outcome recommendations.
+    recommendations.extend(
+        recommend_from_outcomes(funnel, channel_economics)
+    )
 
     recommendations.sort(
         key=lambda item: (
@@ -1031,6 +1198,14 @@ def build_marketing_brief(
         "paid_media": (
             dict(paid_media) if paid_media is not None else None
         ),
+        "journey_outcomes": {
+            "funnel": dict(funnel) if funnel is not None else None,
+            "channel_economics": (
+                dict(channel_economics)
+                if channel_economics is not None else None
+            ),
+            "revenue": dict(revenue) if revenue is not None else None,
+        },
         "safety": {
             "phi_required": False,
             "external_writes": False,

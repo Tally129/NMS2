@@ -1597,3 +1597,79 @@ required. No TikTok/LinkedIn/etc. No campaign/budget/bid/audience editing.
   lint-config-only change — it touches NO auth logic/behavior.
 
 _Last updated: Jun 2026 (Marketing OS Phase 4 · Meta + Microsoft read-only providers)_
+
+---
+
+## Marketing OS Phase 5 — Unified Lead → Appointment → Revenue Attribution (Jun 2026)
+
+Branch: `emergent/lead-appointment-revenue-attribution-phase5` (based on the
+approved Phase 4 branch). Deterministic, explainable, PHI-free first-party
+attribution built ONLY on marketing-safe stores (`marketing_conversion_events`,
+`marketing_daily_metrics`). No clinical/EMR reads, no external writes, no
+migrations.
+
+### Backend
+- **Journey engine** `services/journey.py` (pure/deterministic): `build_journeys`
+  (opaque-subject grouping, chronological touches, first/last touch),
+  `compute_funnel` (lead → intent → request → booked → completed → no_show;
+  UNAVAILABLE stages return `None`, never fabricated zero; rates null on
+  unavailable/zero denominator), `attribute_outcome` (first/last touch by
+  channel/source/campaign), `compute_revenue` (REAL `purchase` events with value
+  only — never appointment estimates/unpaid invoices), `compute_channel_economics`
+  (cost-per-booked, cost-per-completed, ROAS on real revenue only),
+  `build_attribution_overview` (+ safety block). `normalize_channel` maps
+  provider/source → canonical channel deterministically.
+- **Appointment normalization** `services/appointment_normalize.py`: marketing-safe
+  mapping of appointment lifecycle statuses → conversion event types; REQUIRES an
+  opaque `marketing_subject_id`; REJECTS PHI via `assert_non_phi_marketing_payload`;
+  does not read clinical scheduling tables or alter appointment workflow.
+- **Measurement** `services/measurement.py`: added `first_touch_attribution`;
+  extended `ALLOWED_EVENT_TYPES` with appointment lifecycle + `purchase`.
+- **Router** `routers/attribution.py` wired into `core.py`. Endpoints (GET,
+  `require_roles(admin, practitioner)`, optional `?model=first_touch|last_touch`,
+  invalid model falls back to last_touch):
+  `/api/marketing-os/attribution/{overview,funnel,channels,campaigns,revenue,journeys}`.
+  Spend query uses `SELECT provider, spend` (marketing_daily_metrics has no
+  `channel` column — critical fix from live testing).
+- **Director** `services/director.py`: `recommend_from_outcomes()` produces advisory
+  recs (high spend/no bookings, strong leads/weak conversion, poor show rate, weak
+  request→booking, appointments w/o revenue, high-ROAS scaling). `build_marketing_brief`
+  accepts `funnel`/`channel_economics`/`revenue` and returns `journey_outcomes`.
+  `core.py::/director/brief` loads conversion events and feeds them in. All recs
+  stay advisory_only + requires_human_approval + external_write=False.
+
+### Frontend
+- `pages/portal/AttributionFunnelPanel.jsx` — one unified "Attribution & Funnel"
+  section inside the existing Marketing Command Center (after Paid Media). Shows
+  funnel + rates, source/channel performance table (spend/booked/completed/CPBooked/
+  CPCompleted/revenue/ROAS), attributed revenue, booked-by-campaign, and a
+  first/last-touch model toggle. Null → "—" (never zero); honest empty states;
+  read-only safety banner. No separate dashboard.
+
+### Safety / privacy (verified)
+external writes disabled · auto budget/campaign/publish disabled · human approval
+required · PHI-free (opaque `marketing_subject_id` only; PHI rejected at
+normalization). Deterministic attribution only (no probabilistic/AI). No TikTok,
+no campaign/outreach/appointment mutation.
+
+### Tests / results
+- `tests/test_marketing_attribution_journey_phase5.py` — 25 unit tests (first/last
+  touch, appointment attribution + PHI rejection, funnel determinism + null stages,
+  opaque linkage, purchase-only revenue, cost-per-booked/completed, ROAS on real
+  revenue only, source/campaign/channel rollups, advisory Director, safety, no
+  external-write paths).
+- Live HTTP (testing agent): `test_marketing_attribution_phase5_http.py` (33) +
+  `test_marketing_attribution_phase5_http_seeded.py` (14) — all pass. Found+fixed
+  1 CRITICAL live 500 (non-existent `channel` column).
+- Full marketing pytest suite: **266 passed, 1 pre-existing unrelated failure**
+  (`test_marketing_ingestion_api.py::test_http_rejected`).
+
+### Known limitations
+- Funnel rates can exceed 100% if seed data is out of stage order (more booked than
+  requests) — math is honest; not clamped to avoid hiding data-quality issues.
+- `_load_events()` loads the full conversion table per request and rebuilds journeys
+  several times; fine at current scale, add date-range/limit params before large
+  volumes.
+- No migration added (event types are free-text; new stages ride existing schema).
+
+_Last updated: Jun 2026 (Marketing OS Phase 5 · Lead → Appointment → Revenue attribution)_

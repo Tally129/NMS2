@@ -154,6 +154,14 @@ ALLOWED_EVENT_TYPES = frozenset({
     "directions_click",
     "content_engagement",
     "conversion",
+    # Appointment lifecycle (marketing-safe, opaque subject only).
+    "appointment_request",
+    "appointment_booked",
+    "appointment_completed",
+    "appointment_no_show",
+    "appointment_cancelled",
+    # Real first-party paid revenue (never appointment value estimates).
+    "purchase",
 })
 
 
@@ -283,6 +291,36 @@ def last_touch_attribution(
         attributed_value=conversion.value,
         reason=(
             "Conversion credited to the most recent "
+            "captured marketing touch."
+        ),
+    )
+
+
+def first_touch_attribution(
+    conversion: NormalizedConversion,
+    *,
+    provider: str | None = None,
+    external_campaign_id: str | None = None,
+) -> AttributionResult:
+    """
+    Deterministic first-touch attribution.
+
+    Credits the conversion to the earliest captured marketing touch
+    represented by this normalized conversion. No network calls, no
+    external writes. Callers that track a full journey should supply the
+    first touch's source/medium via ``conversion``.
+    """
+
+    return AttributionResult(
+        model="first_touch",
+        provider=provider,
+        external_campaign_id=external_campaign_id,
+        source=conversion.source,
+        medium=conversion.medium,
+        credit=Decimal("1"),
+        attributed_value=conversion.value,
+        reason=(
+            "Conversion credited to the first "
             "captured marketing touch."
         ),
     )
