@@ -1376,6 +1376,82 @@ async def _start_publishing_scheduler():
     )
 
 
+# --------------------------------------------------------------------------- #
+# Marketing OS — Phase 8A Nurture Scheduler                                    #
+#                                                                              #
+# Defaults to DISABLED. This scheduler NEVER sends email or performs any       #
+# external outreach — it only materializes due nurture steps into             #
+# pending-approval actions for human review. Set NURTURE_SCHEDULER_MODE        #
+# =internal to enable in-process ticks, or use POST                            #
+# /api/marketing-os/nurture/scheduler/tick (external/manual). Duplicate ticks  #
+# are idempotent via unique action idempotency keys + FOR UPDATE SKIP LOCKED.  #
+# --------------------------------------------------------------------------- #
+
+_nurture_scheduler = None
+
+
+def _stop_nurture_scheduler() -> None:
+    global _nurture_scheduler
+    if _nurture_scheduler is not None:
+        try:
+            _nurture_scheduler.shutdown(wait=False)
+        except Exception:
+            pass
+        _nurture_scheduler = None
+
+
+@app.on_event("startup")
+async def _start_nurture_scheduler():
+    global _nurture_scheduler
+
+    mode = os.environ.get("NURTURE_SCHEDULER_MODE", "disabled").lower()
+    if mode in {"external", "disabled"}:
+        logger.info(
+            "Nurture scheduler disabled (NURTURE_SCHEDULER_MODE=%s)", mode
+        )
+        return
+
+    if _nurture_scheduler is not None:
+        return
+
+    try:
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    except ImportError:
+        logger.warning(
+            "APScheduler not installed; nurture actions will not auto-queue"
+        )
+        return
+
+    from marketing_os.services.nurture_scheduler import (
+        process_due_nurture_enrollments,
+    )
+
+    scheduler = AsyncIOScheduler(timezone="UTC")
+
+    async def _nurture_tick():
+        try:
+            summary = await process_due_nurture_enrollments()
+            if summary.get("actions_created") or summary.get(
+                "enrollments_stopped"
+            ):
+                logger.info("Nurture scheduler tick: %s", summary)
+        except Exception as exc:  # pragma: no cover
+            logger.exception("Nurture scheduler tick failed: %s", exc)
+
+    scheduler.add_job(
+        _nurture_tick,
+        "interval",
+        minutes=5,
+        id="nurture_scheduler_tick",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.start()
+    _nurture_scheduler = scheduler
+    logger.info("Nurture scheduler started (interval=5min, mode=internal)")
+
+
 app.include_router(api)
 
 # --- Sprint 2 CORS ------------------------------------------------------ #

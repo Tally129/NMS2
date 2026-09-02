@@ -1754,3 +1754,40 @@ no automatic booking/routing.
   synced from events start without contact timestamps (metrics stay null until acted).
 
 _Last updated: Jun 2026 (Marketing OS Phase 6 · Lead CRM + Appointment Setter)_
+
+---
+
+## Marketing OS Phase 8A — Nurture + Appointment Recovery (engine)
+
+Deterministic nurture engine for marketing leads. Privacy-minimized: no
+EMR/patient/client FKs, no PHI, no SMS/Twilio, no automatic outreach.
+
+Flow: Trigger → Deterministic Rules → Scheduled Action (queued pending_approval)
+→ Human Approval → (email HELD, task executed) → Audit log.
+
+Schema (migration `e7f8a9b0c1d2`, revises `d6e7f8a9b0c1`):
+- `marketing_nurture_sequences`, `marketing_nurture_steps`,
+  `marketing_nurture_enrollments`, `marketing_nurture_actions`.
+- FKs only to `auth_users`, `marketing_leads`, and `marketing_nurture_*`.
+
+Key rules:
+- Scheduler (`NURTURE_SCHEDULER_MODE`, default `disabled`) NEVER sends; it only
+  materializes due steps into `pending_approval` actions using
+  `FOR UPDATE SKIP LOCKED` + unique `idempotency_key` (enrollment:position).
+- `create_task` approval creates a `marketing_lead_tasks` row + updates
+  `next_action_*` (reuses Phase 6 Lead CRM).
+- `send_email` approval is ALWAYS held (`delivery_status=outreach_disabled`);
+  no send, no recipient stored. No config flag releases held actions.
+- Suppression stops enrollment when lead reaches
+  booked/confirmed/showed/won/lost (configurable per sequence).
+- All config validated fail-closed (422); subject/body/notes bounded + screened
+  by marketing data-policy + email/phone/SSN content guard.
+
+UI: `NurtureRecoveryPanel` in Marketing Command Center (queue + approve/skip +
+sequence builder + enroll + safety banner).
+
+Tests: 32 unit + 5 HTTP (Phase 8A) green; Phase 6/7 regressions green
+(90 passed, 1 skipped). Phase 8B (`/events` appointment-recovery adapter) not
+yet started.
+
+_Last updated: Jul 2025 (Marketing OS Phase 8A · Nurture engine)_

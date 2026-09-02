@@ -1238,3 +1238,6 @@ from marketing_os.routers import leads as _marketing_leads_routes  # noqa: F401,
 # Phase 7 — funnels / qualification forms / offer library.
 from marketing_os.routers import funnels as _marketing_funnels_routes  # noqa: F401,E402
 
+# Phase 8A — nurture sequences + appointment-recovery engine.
+from marketing_os.routers import nurture as _marketing_nurture_routes  # noqa: F401,E402
+

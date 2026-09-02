@@ -103,4 +103,10 @@ from .marketing_phase7 import (  # noqa: F401
     MarketingFunnelStep,
     MarketingQualificationSubmission,
 )
+from .marketing_phase8 import (  # noqa: F401
+    MarketingNurtureSequence,
+    MarketingNurtureStep,
+    MarketingNurtureEnrollment,
+    MarketingNurtureAction,
+)
 
