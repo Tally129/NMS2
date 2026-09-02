@@ -28,6 +28,8 @@ from fastapi import HTTPException
 JWT_ALGO = "HS256"
 ACCESS_TTL_MIN = 15
 REFRESH_TTL_DAYS = 7
+BOOTSTRAP_TTL_MIN = 10
+BOOTSTRAP_STAGES = frozenset({"password_change", "mfa_enrollment"})
 
 
 # --------------------------------------------------------------------------- #
@@ -174,6 +176,28 @@ def make_refresh_token(user_id: str, sid: str) -> str:
         "jti": uuid.uuid4().hex,
         "iat": int(_now().timestamp()),
         "exp": int((_now() + timedelta(days=REFRESH_TTL_DAYS)).timestamp()),
+    }
+    return jwt.encode(payload, assert_valid_secret(), algorithm=JWT_ALGO)
+
+
+def make_bootstrap_token(user_id: str, stage: str) -> str:
+    """Session 2c bootstrap JWT — short-lived, scoped, no refresh cookie.
+
+    Only usable at the two dedicated bootstrap endpoints (password change
+    and MFA setup/verify). `type` stays ``"bootstrap"`` so the normal
+    `decode_token(expected_type="access")` path rejects it, and vice versa.
+    """
+    if stage not in BOOTSTRAP_STAGES:
+        raise ValueError(f"unknown bootstrap stage: {stage!r}")
+    payload = {
+        **_base_claims(),
+        "sub": user_id,
+        "type": "bootstrap",
+        "scope": "bootstrap",
+        "bootstrap_stage": stage,
+        "jti": uuid.uuid4().hex,
+        "iat": int(_now().timestamp()),
+        "exp": int((_now() + timedelta(minutes=BOOTSTRAP_TTL_MIN)).timestamp()),
     }
     return jwt.encode(payload, assert_valid_secret(), algorithm=JWT_ALGO)
 

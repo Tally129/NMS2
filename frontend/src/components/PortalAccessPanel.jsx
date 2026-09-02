@@ -439,7 +439,7 @@ function CreatePortalAccountDialog({ open, onClose, clientId, defaultEmail, isEx
             />
             {isExisting && (
               <p className="text-[11px] text-slate-500 mt-1">
-                Email cannot be changed here — use the client profile to change it.
+                Email cannot be changed here — use the patient profile to change it.
               </p>
             )}
           </div>

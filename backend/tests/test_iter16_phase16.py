@@ -2,14 +2,13 @@
 Iteration 16 — Phase 16 refactor + SDK abstraction verification.
 
 Covers:
-  1. GET /api/health returns integrations dict with all 4 keys (llm/email/sms/google_oauth_direct)
+  1. GET /api/health returns integrations dict with llm/email/sms keys
      and correct fallback values when env vars unset.
-  2. Google OAuth direct endpoints return 503 (not 500 crash) when env vars missing.
-  3. Emergent Google session endpoint still works (missing header -> 400, not 500).
-  4. LLM abstraction: forms/protocols transcribe endpoints route through llm_client → 200.
-  5. Notifier abstraction: form send channel=email|sms returns delivery_status='sent_stub'
+  2. All Google OAuth endpoints have been REMOVED and now return 404.
+  3. LLM abstraction: forms/protocols transcribe endpoints route through llm_client → 200.
+  4. Notifier abstraction: form send channel=email|sms returns delivery_status='sent_stub'
      with integration_log doc having _stubbed=True.
-  6. Representative endpoint per extracted router responds ≥200.
+  5. Representative endpoint per extracted router responds ≥200.
 """
 import os
 import io
@@ -49,13 +48,15 @@ def practitioner_headers(practitioner_token):
 
 # ========== 1. HEALTH ENDPOINT INTEGRATIONS DICT ==========
 class TestHealthIntegrations:
-    def test_health_has_all_4_integration_keys(self):
+    def test_health_has_expected_integration_keys(self):
         r = requests.get(f"{BASE_URL}/api/health", timeout=15)
         assert r.status_code == 200
         data = r.json()
         assert data["ok"] is True
         integ = data["integrations"]
-        assert "llm" in integ and "email" in integ and "sms" in integ and "google_oauth_direct" in integ
+        assert "llm" in integ and "email" in integ and "sms" in integ
+        # Google OAuth has been removed — key must NOT be present anymore.
+        assert "google_oauth_direct" not in integ
 
     def test_health_llm_reports_bedrock_status(self):
         r = requests.get(f"{BASE_URL}/api/health", timeout=15)
@@ -72,28 +73,26 @@ class TestHealthIntegrations:
         r = requests.get(f"{BASE_URL}/api/health", timeout=15)
         assert r.json()["integrations"]["sms"] == "sent_stub"
 
-    def test_health_google_oauth_direct_false(self):
-        r = requests.get(f"{BASE_URL}/api/health", timeout=15)
-        assert r.json()["integrations"]["google_oauth_direct"] is False
 
-
-# ========== 2. GOOGLE OAUTH DIRECT — 503 FALLBACK ==========
-class TestGoogleOAuthDirect:
-    def test_authorize_returns_503_when_env_missing(self):
+# ========== 2. GOOGLE OAUTH REMOVED — ROUTES MUST 404 ==========
+class TestGoogleOAuthRemoved:
+    def test_authorize_route_is_gone(self):
         r = requests.get(f"{BASE_URL}/api/auth/google/oauth/authorize", timeout=15)
-        assert r.status_code == 503
-        assert "not configured" in r.json().get("detail", "").lower()
+        assert r.status_code == 404
 
-    def test_callback_returns_503_when_env_missing(self):
+    def test_callback_route_is_gone(self):
         r = requests.get(f"{BASE_URL}/api/auth/google/oauth/callback",
                          params={"code": "fakecode", "state": "fakestate"}, timeout=15)
-        assert r.status_code == 503
+        assert r.status_code == 404
 
-    def test_emergent_google_session_still_works_missing_header_returns_400(self):
-        # Existing Emergent flow should NOT crash — should return 400 for missing header
+    def test_exchange_route_is_gone(self):
+        r = requests.post(f"{BASE_URL}/api/auth/google/oauth/exchange",
+                          json={"handoff_id": "anything"}, timeout=15)
+        assert r.status_code == 404
+
+    def test_emergent_google_session_route_is_gone(self):
         r = requests.post(f"{BASE_URL}/api/auth/google/session", timeout=15)
-        assert r.status_code == 400
-        assert "session" in r.json().get("detail", "").lower()
+        assert r.status_code == 404
 
 
 # ========== 3. LLM ABSTRACTION (forms + protocols transcribe) ==========

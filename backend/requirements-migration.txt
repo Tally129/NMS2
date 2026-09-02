@@ -1,0 +1,23 @@
+# Migration-only dependencies (offline archive utilities).
+#
+# These packages are ONLY required for one-time historical migration and
+# backup/restore tools. They MUST NOT be installed in the production
+# runtime environment; the application itself no longer imports them.
+#
+# Tools that require this file:
+#   * scripts/backfill_gridfs_to_storage.py — GridFS → S3 one-time migration
+#   * scripts/sprint*_migration.py           — pre-Phase-3 legacy migrations
+#   * backup.py                              — mongodump/mongorestore wrappers
+#
+# Usage (developer workstation only):
+#     python -m venv .migration-venv
+#     source .migration-venv/bin/activate
+#     pip install -r requirements.txt
+#     pip install -r requirements-migration.txt
+#     python -m scripts.backfill_gridfs_to_storage --dry-run
+#
+# NEVER install this file in production. NEVER import from these modules
+# in application startup.
+
+motor==3.7.1
+pymongo==4.9.2

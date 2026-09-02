@@ -10,6 +10,10 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "../../components/ui/ta
 import { useToast } from "../../hooks/use-toast";
 import { Plus, Trash2, Receipt, Stethoscope, Boxes, Pencil, Search } from "lucide-react";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
+
+
+
 
 const PAY_METHODS = [
   { v: "chase_pos", label: "Chase POS" },
@@ -53,9 +57,13 @@ export default function PointOfSale() {
         api.get("/inventory"),
         api.get("/clients"),
       ]);
-      setTreatments(t.data || []);
-      setInventory((i.data || []).filter((x) => x.active !== false));
-      setClients(c.data || []);
+      setTreatments(normalizeArray(t.data));
+      setInventory(
+        normalizeArray(i.data).filter(
+          (item) => item.active !== false
+        )
+      );
+      setClients(normalizeArray(c.data));
     } catch (e) {
       toast({ title: "Failed to load catalog", description: getErrorMessage(e) || "" });
     }
@@ -201,7 +209,7 @@ export default function PointOfSale() {
               {(() => {
                 const s = treatmentQ.trim().toLowerCase();
                 const filteredTx = s
-                  ? treatments.filter((t) =>
+                  ? normalizeArray(treatments).filter((t) =>
                       (t.name || "").toLowerCase().includes(s) ||
                       (t.category || "").toLowerCase().includes(s) ||
                       (t.sku || "").toLowerCase().includes(s)
@@ -243,7 +251,7 @@ export default function PointOfSale() {
               {(() => {
                 const s = inventoryQ.trim().toLowerCase();
                 const filteredInv = s
-                  ? inventory.filter((i) =>
+                  ? normalizeArray(inventory).filter((i) =>
                       (i.name || "").toLowerCase().includes(s) ||
                       (i.sku || "").toLowerCase().includes(s) ||
                       (i.category || "").toLowerCase().includes(s)
@@ -307,12 +315,12 @@ export default function PointOfSale() {
         <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5 space-y-4" data-testid="pos-cart">
           <div className="eyebrow text-[#8a6a3c]">Cart</div>
           <div>
-            <Label>Client</Label>
+            <Label>Patient</Label>
             <Select value={clientId} onValueChange={setClientId}>
               <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="pos-client-select"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="walkin">Walk-in (no client)</SelectItem>
-                {clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email || c.id}</SelectItem>)}
+                <SelectItem value="walkin">Walk-in (no patient)</SelectItem>
+                {normalizeArray(clients).map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email || c.id}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>

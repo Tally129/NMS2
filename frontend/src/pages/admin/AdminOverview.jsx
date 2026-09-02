@@ -13,7 +13,7 @@ export default function AdminOverview() {
     <PortalLayout>
       <PortalHeader title="Admin Overview" subtitle="System-wide activity" />
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        <StatCard label="Clients" value={stats?.clients ?? 0} icon={Users} to="/portal/provider/patients" />
+        <StatCard label="Patients" value={stats?.clients ?? 0} icon={Users} to="/portal/provider/patients" />
         <StatCard label="Users" value={stats?.users ?? 0} icon={ShieldCheck} to="/portal/admin/users" />
         <StatCard label="Visit notes" value={stats?.notes ?? 0} icon={FileText} to="/portal/admin/notes" />
         <StatCard label="Files" value={stats?.files ?? 0} icon={FolderOpen} to="/portal/admin/files" />

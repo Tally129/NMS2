@@ -3,8 +3,11 @@ Phase 2: Appointments, Availability, Practitioners directory, Memberships,
 Invoices, Treatment Plans, Reminder settings.
 
 Extracted from server.py during Phase 16 refactor.
+Phase 3.2 (2026-07-31): appointments/availability/reminders/reminder_settings
+now live in PostgreSQL via `repositories.scheduling`.
 """
 from __future__ import annotations
+from decimal import Decimal, InvalidOperation
 
 import os
 from datetime import datetime, timedelta, timezone
@@ -26,6 +29,27 @@ from models import (
     PlanIn, PlanOut,
     ReminderSettings, new_id,
 )
+from pg_shims import find_client, find_user_by_id, list_users_by_role
+from postgres_db import AsyncSessionLocal
+from repositories import scheduling as sched_repo
+
+from services.payments import (
+    construct_webhook_event,
+    create_invoice_payment_intent,
+    object_value as stripe_object_value,
+    publishable_key as stripe_publishable_key,
+    stripe_enabled,
+)
+from services.paypal_payments import (
+    capture_completed,
+    completed_capture_details,
+    capture_order,
+    capture_reference,
+    create_order,
+    order_reference,
+    paypal_enabled,
+    public_payment_config,
+)
 
 TIER_PRICES = {"essentials": 99.0, "core": 199.0, "vip": 299.0}
 
@@ -40,11 +64,11 @@ async def _hydrate_appt(a):
     if not a:
         return None
     if a.get("client_id"):
-        c = await db.clients.find_one({"id": a["client_id"]})
+        c = await find_client(client_id=a["client_id"])
         if c:
             a["client_name"] = c.get("full_name")
     if a.get("practitioner_id"):
-        u = await db.users.find_one({"id": a["practitioner_id"]})
+        u = await find_user_by_id(a["practitioner_id"])
         if u:
             a["practitioner_name"] = u.get("full_name")
     return a
@@ -59,22 +83,16 @@ async def list_appointments(
     client_id: Optional[str] = None,
     user=Depends(get_current_user),
 ):
-    q = {}
     if user["role"] == "client":
         self_client = await _resolve_self_client(user)
         if not self_client:
             return []
-        q["client_id"] = self_client["id"]
-    else:
-        if client_id:
-            q["client_id"] = client_id
-        if practitioner_id:
-            q["practitioner_id"] = practitioner_id
-    if start:
-        q.setdefault("start", {})["$gte"] = start
-    if end:
-        q.setdefault("start", {})["$lte"] = end
-    items = await db.appointments.find(q).sort("start", 1).to_list(1000)
+        client_id = self_client["id"]
+    async with AsyncSessionLocal() as pg:
+        items = await sched_repo.list_appointments(
+            pg, client_id=client_id, practitioner_id=practitioner_id,
+            start_gte=start, start_lte=end, limit=1000,
+        )
     return [await _hydrate_appt(i) for i in items]
 
 
@@ -90,7 +108,7 @@ async def create_appointment(payload: AppointmentIn, request: Request, user=Depe
         status_val = "requested"
     else:
         status_val = payload.status
-    c = await db.clients.find_one({"id": payload.client_id})
+    c = await find_client(client_id=payload.client_id)
     if not c:
         raise HTTPException(status_code=404, detail="Client not found")
     doc = payload.dict()
@@ -98,25 +116,29 @@ async def create_appointment(payload: AppointmentIn, request: Request, user=Depe
     doc["status"] = status_val
     doc["created_at"] = datetime.now(timezone.utc)
     doc["created_by"] = user["id"]
-    await db.appointments.insert_one(doc)
-
-    # Auto-schedule reminder (stubbed)
-    settings = await db.reminder_settings.find_one({"id": "singleton"}) or {}
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            doc = await sched_repo.create_appointment(pg, doc)
+    # Auto-schedule reminder (stubbed) — fresh session so the read/write
+    # cycle above's transaction is fully committed first.
+    async with AsyncSessionLocal() as pg:
+        settings = await sched_repo.get_reminder_settings(pg) or {}
     hours_before = settings.get("appointment_reminder_hours_before", 24)
-    channels = settings.get("appointment_reminder_channels", ["email"])
+    channels = settings.get("appointment_reminder_channels") or ["email"]
     if settings.get("enabled", True):
         scheduled_at = doc["start"] - timedelta(hours=hours_before)
-        for ch in channels:
-            await db.reminders.insert_one({
-                "id": new_id(),
-                "appointment_id": doc["id"],
-                "client_id": doc["client_id"],
-                "channel": ch,
-                "scheduled_at": scheduled_at,
-                "sent_at": None,
-                "status": "scheduled",
-                "created_at": datetime.now(timezone.utc),
-            })
+        async with AsyncSessionLocal() as pg:
+            async with pg.begin():
+                for ch in channels:
+                    await sched_repo.create_reminder(pg, {
+                        "id": new_id(),
+                        "appointment_id": doc["id"],
+                        "client_id": doc["client_id"],
+                        "channel": ch,
+                        "scheduled_at": scheduled_at,
+                        "sent_at": None,
+                        "status": "scheduled",
+                    })
 
     await log_audit(db, user["id"], user["email"], "appointment.create",
                     resource_type="appointment", resource_id=doc["id"],
@@ -128,7 +150,8 @@ async def create_appointment(payload: AppointmentIn, request: Request, user=Depe
 @api.put("/appointments/{appt_id}", response_model=AppointmentOut)
 async def update_appointment(appt_id: str, payload: AppointmentUpdate, request: Request,
                              user=Depends(get_current_user)):
-    a = await db.appointments.find_one({"id": appt_id})
+    async with AsyncSessionLocal() as pg:
+        a = await sched_repo.get_appointment(pg, appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     if user["role"] == "client":
@@ -141,10 +164,14 @@ async def update_appointment(appt_id: str, payload: AppointmentUpdate, request: 
         updates = {"status": "canceled"}
     else:
         updates = {k: v for k, v in payload.dict().items() if v is not None}
-    await db.appointments.update_one({"id": appt_id}, {"$set": updates})
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.update_appointment(pg, appt_id, updates)
+    async with AsyncSessionLocal() as pg:
+        a = await sched_repo.get_appointment(pg, appt_id)
     # Visit-started push: when telehealth appointment moves to in_session, ping the client
     if updates.get("status") == "in_session" and a.get("visit_mode") == "telehealth":
-        client_doc = await db.clients.find_one({"id": a.get("client_id")})
+        client_doc = await find_client(client_id=a.get("client_id"))
         if client_doc and client_doc.get("user_id"):
             await push_to_user(
                 client_doc["user_id"],
@@ -157,20 +184,17 @@ async def update_appointment(appt_id: str, payload: AppointmentUpdate, request: 
                     resource_type="appointment", resource_id=appt_id,
                     metadata={"fields": list(updates.keys())},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    a = await db.appointments.find_one({"id": appt_id})
     return await _hydrate_appt(a)
 
 
 # ---------- Availability ----------
 @api.get("/availability", response_model=List[AvailabilityOut])
 async def list_availability(practitioner_id: Optional[str] = None, user=Depends(get_current_user)):
-    q = {}
-    if practitioner_id:
-        q["practitioner_id"] = practitioner_id
-    elif user["role"] == "practitioner":
-        q["practitioner_id"] = user["id"]
-    items = await db.availability.find(q).sort("weekday", 1).to_list(200)
-    return [_strip_id(i) for i in items]
+    if not practitioner_id and user["role"] == "practitioner":
+        practitioner_id = user["id"]
+    async with AsyncSessionLocal() as pg:
+        items = await sched_repo.list_availability(pg, practitioner_id=practitioner_id, limit=200)
+    return items
 
 
 @api.post("/availability", response_model=AvailabilityOut)
@@ -180,17 +204,21 @@ async def create_availability(payload: AvailabilityIn, request: Request,
     doc = payload.dict()
     doc["practitioner_id"] = pid
     doc["id"] = new_id()
-    await db.availability.insert_one(doc)
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            doc = await sched_repo.create_availability(pg, doc)
     await log_audit(db, user["id"], user["email"], "availability.create",
                     resource_type="availability", resource_id=doc["id"],
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    return _strip_id(doc)
+    return doc
 
 
 @api.delete("/availability/{avail_id}")
 async def delete_availability(avail_id: str, request: Request,
                               user=Depends(require_roles("practitioner", "admin"))):
-    await db.availability.delete_one({"id": avail_id})
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.delete_availability(pg, avail_id)
     await log_audit(db, user["id"], user["email"], "availability.delete",
                     resource_type="availability", resource_id=avail_id,
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
@@ -209,16 +237,19 @@ async def availability_slots(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid date")
     weekday = d.weekday()
-    rules = await db.availability.find({"practitioner_id": practitioner_id, "weekday": weekday, "active": True}).to_list(50)
-    if not rules:
-        return {"date": date, "slots": []}
-    day_start = d.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end = day_start + timedelta(days=1)
-    taken = await db.appointments.find({
-        "practitioner_id": practitioner_id,
-        "start": {"$gte": day_start, "$lt": day_end},
-        "status": {"$in": ["requested", "confirmed"]},
-    }).to_list(200)
+    async with AsyncSessionLocal() as pg:
+        rules = await sched_repo.list_availability(
+            pg, practitioner_id=practitioner_id, weekday=weekday,
+            active_only=True, limit=50,
+        )
+        if not rules:
+            return {"date": date, "slots": []}
+        day_start = d.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        taken = await sched_repo.find_overlapping_appointments(
+            pg, practitioner_id=practitioner_id,
+            start=day_start, end=day_end,
+        )
     slots = []
     for r in rules:
         sh, sm = map(int, r["start_time"].split(":"))
@@ -239,7 +270,7 @@ async def availability_slots(
 # ---------- Practitioners directory (for patient booking) ----------
 @api.get("/practitioners")
 async def list_practitioners(user=Depends(get_current_user)):
-    items = await db.users.find({"role": "practitioner", "is_active": True}).to_list(100)
+    items = await list_users_by_role("practitioner", active_only=True, limit=100)
     return [{"id": u["id"], "full_name": u.get("full_name"), "email": u["email"]} for u in items]
 
 
@@ -248,7 +279,7 @@ async def _hydrate_mem(m):
     m = _strip_id(m)
     if not m:
         return None
-    c = await db.clients.find_one({"id": m["client_id"]})
+    c = await find_client(client_id=m["client_id"])
     if c:
         m["client_name"] = c.get("full_name")
     return m
@@ -360,7 +391,7 @@ async def _hydrate_invoice(i):
     i = _strip_id(i)
     if not i:
         return None
-    c = await db.clients.find_one({"id": i["client_id"]})
+    c = await find_client(client_id=i["client_id"])
     if c:
         i["client_name"] = c.get("full_name")
     return i
@@ -432,21 +463,1030 @@ async def mark_paid(inv_id: str, payload: MarkPaidIn, request: Request,
     return await _hydrate_invoice(inv)
 
 
-@api.post("/invoices/{inv_id}/stripe-intent")
-async def stripe_intent(inv_id: str, user=Depends(get_current_user)):
-    inv = await db.invoices.find_one({"id": inv_id})
-    if not inv:
-        raise HTTPException(status_code=404, detail="Invoice not found")
-    # Stubbed - would create PaymentIntent in real integration
-    await db.integration_log.insert_one({
-        "id": new_id(), "service": "stripe", "action": "payment_intent.create",
-        "payload": {"invoice_id": inv_id, "amount_cents": int(inv["amount"] * 100)},
-        "_stubbed": True, "ts": datetime.now(timezone.utc),
-    })
+async def _patient_activity(
+    *,
+    client_id: str,
+    body: str,
+    event_type: str,
+    source_id: str,
+    portal_path: str,
+    sender_role: str = "system",
+    sender_name: str = "Natural Medical Solutions",
+):
+    """Best-effort patient account activity; never blocks clinical operations."""
+    try:
+        from services.patient_activity import add_patient_activity_message
+
+        return await add_patient_activity_message(
+            client_id=client_id,
+            body=body,
+            event_type=event_type,
+            source_id=source_id,
+            portal_path=portal_path,
+            sender_role=sender_role,
+            sender_name=sender_name,
+        )
+    except Exception:
+        # Patient activity is best-effort and must never block
+        # authoritative payment settlement.
+        return None
+
+
+async def _settle_stripe_invoice_from_webhook(
+    *,
+    invoice: dict,
+    payment_intent_id: str,
+    stripe_event_id: str,
+    amount_cents: int,
+    currency: str,
+):
+    """
+    Settle an NMS invoice only after a verified Stripe success event.
+
+    This helper receives an event only after Stripe signature
+    verification has succeeded.
+
+    It deliberately does not trust browser state.
+    """
+
+    inv_id = str(invoice.get("id") or "")
+
+    if not inv_id:
+        raise ValueError("Invoice ID missing")
+
+    expected_intent = str(
+        invoice.get("stripe_payment_intent_id") or ""
+    )
+
+    if not expected_intent:
+        raise ValueError(
+            "Invoice has no bound Stripe PaymentIntent"
+        )
+
+    if expected_intent != str(payment_intent_id):
+        raise ValueError(
+            "Stripe PaymentIntent does not match invoice"
+        )
+
+    try:
+        expected_cents = int(
+            round(float(invoice.get("amount") or 0) * 100)
+        )
+    except (TypeError, ValueError):
+        expected_cents = 0
+
+    if expected_cents <= 0:
+        raise ValueError("Invoice amount is invalid")
+
+    if int(amount_cents) != expected_cents:
+        raise ValueError(
+            "Stripe amount does not match invoice"
+        )
+
+    if str(currency or "").lower() != "usd":
+        raise ValueError(
+            "Stripe currency does not match invoice"
+        )
+
+    # Stripe may retry the same webhook. If this exact invoice
+    # is already paid by this exact PaymentIntent, return safely.
+    if invoice.get("status") == "paid":
+        if (
+            str(invoice.get("external_ref") or "")
+            == str(payment_intent_id)
+            and
+            str(invoice.get("payment_method") or "")
+            == "stripe"
+        ):
+            return {
+                "settled": False,
+                "duplicate": True,
+            }
+
+        # Never overwrite payment provenance on an invoice that
+        # was settled through another payment path.
+        raise ValueError(
+            "Invoice is already paid by another payment record"
+        )
+
+    if invoice.get("status") == "void":
+        raise ValueError(
+            "Void invoice cannot be settled"
+        )
+
+    paid_at = datetime.now(timezone.utc)
+
+    updates = {
+        "status": "paid",
+        "paid_at": paid_at,
+        "payment_method": "stripe",
+        "external_ref": str(payment_intent_id),
+        "stripe_payment_intent_id":
+            str(payment_intent_id),
+        "stripe_last_event_id":
+            str(stripe_event_id),
+    }
+
+    # Conditional update protects against another request changing
+    # the invoice between verification and settlement.
+    result = await db.invoices.update_one(
+        {
+            "id": inv_id,
+            "status": {"$ne": "paid"},
+            "stripe_payment_intent_id":
+                str(payment_intent_id),
+        },
+        {
+            "$set": updates,
+        },
+    )
+
+    modified = getattr(result, "modified_count", None)
+
+    if modified == 0:
+        latest = await db.invoices.find_one(
+            {"id": inv_id}
+        )
+
+        if (
+            latest
+            and latest.get("status") == "paid"
+            and str(latest.get("external_ref") or "")
+                == str(payment_intent_id)
+            and str(latest.get("payment_method") or "")
+                == "stripe"
+        ):
+            return {
+                "settled": False,
+                "duplicate": True,
+            }
+
+        raise ValueError(
+            "Invoice settlement state changed"
+        )
+
+    # Accounting uses the same invoice-level idempotency key as
+    # the existing manual settlement path/backfill.
+    try:
+        from accounting.events import AccountingEvent, emit
+
+        await emit(
+            AccountingEvent(
+                event_type="InvoicePaid",
+                occurred_at=paid_at,
+                source_module="invoices",
+                source_ref_type="invoice",
+                source_ref_id=inv_id,
+                idempotency_key=(
+                    f"invoice:{inv_id}:InvoicePaid"
+                ),
+                amount_cents=expected_cents,
+                currency="USD",
+                context={
+                    "payment_method": "stripe",
+                },
+                actor_id=None,
+                actor_role="system",
+            )
+        )
+    except Exception:
+        # Existing invoice settlement behavior treats accounting
+        # as downstream and idempotently recoverable/backfillable.
+        pass
+
+    await _patient_activity(
+        client_id=invoice["client_id"],
+        body="Your payment was received. Thank you.",
+        event_type="invoice_paid",
+        source_id=inv_id,
+        portal_path="/portal/patient/billing",
+        sender_role="staff",
+        sender_name="Billing Team",
+    )
+
     return {
-        "client_secret": f"pi_stub_{new_id()[:12]}_secret_stub",
-        "_stubbed": True,
-        "note": "Set STRIPE_SECRET_KEY to enable real payments.",
+        "settled": True,
+        "duplicate": False,
+    }
+
+
+@api.post("/invoices/{inv_id}/stripe-intent")
+async def stripe_intent(
+    inv_id: str,
+    user=Depends(get_current_user),
+):
+    """
+    Create a real Stripe PaymentIntent for the authenticated
+    patient's own unpaid invoice.
+
+    The amount always comes from the NMS invoice record.
+    """
+
+    inv, client = await _patient_owned_invoice(
+        inv_id,
+        user,
+    )
+
+    if inv.get("status") == "paid":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invoice_already_paid",
+                "message": "This invoice has already been paid.",
+            },
+        )
+
+    if inv.get("status") == "void":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invoice_void",
+                "message": "This invoice is void and cannot be paid.",
+            },
+        )
+
+    if not stripe_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "payments_not_configured",
+                "message": "Online card payments are not configured.",
+            },
+        )
+
+    try:
+        amount = float(inv.get("amount") or 0)
+    except (TypeError, ValueError):
+        amount = 0
+
+    amount_cents = int(round(amount * 100))
+
+    if amount_cents <= 0:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invalid_invoice_amount",
+                "message": "This invoice does not have a payable amount.",
+            },
+        )
+
+    intent = await create_invoice_payment_intent(
+        invoice_id=inv_id,
+        amount_cents=amount_cents,
+        currency="usd",
+    )
+
+    intent_id = getattr(intent, "id", None)
+    client_secret = getattr(intent, "client_secret", None)
+
+    if not intent_id or not client_secret:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "processor_response_invalid",
+                "message": "Stripe did not return a valid payment session.",
+            },
+        )
+
+    # Safe processor reference only. Never store the client secret.
+    await db.invoices.update_one(
+        {"id": inv_id},
+        {
+            "$set": {
+                "stripe_payment_intent_id": intent_id,
+            }
+        },
+    )
+
+    await db.integration_log.insert_one({
+        "id": new_id(),
+        "service": "stripe",
+        "action": "payment_intent.created",
+        "payload": {
+            "invoice_id": inv_id,
+            "payment_intent_id": intent_id,
+            "amount_cents": amount_cents,
+        },
+        "ts": datetime.now(timezone.utc),
+    })
+
+    return {
+        "client_secret": client_secret,
+        "payment_intent_id": intent_id,
+        "publishable_key": stripe_publishable_key(),
+    }
+
+@api.post("/payments/stripe/webhook")
+async def stripe_payment_webhook(request: Request):
+    """
+    Stripe is authoritative for online invoice settlement.
+
+    This endpoint:
+    1. reads the raw request body,
+    2. verifies Stripe-Signature,
+    3. accepts only payment_intent.succeeded for settlement,
+    4. verifies invoice reference, PaymentIntent binding,
+       amount and currency,
+    5. then marks the NMS invoice paid.
+
+    It does not require patient authentication because Stripe calls
+    this endpoint directly. Authenticity comes from Stripe's signed
+    webhook payload.
+    """
+
+    payload = await request.body()
+
+    signature = request.headers.get(
+        "stripe-signature",
+        "",
+    )
+
+    try:
+        event = construct_webhook_event(
+            payload=payload,
+            signature=signature,
+        )
+    except Exception:
+        # Do not expose signature-verification internals.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_stripe_webhook",
+                "message": "Invalid Stripe webhook.",
+            },
+        )
+
+    event_id = str(
+        stripe_object_value(event, "id", "") or ""
+    )
+
+    event_type = str(
+        stripe_object_value(event, "type", "") or ""
+    )
+
+    data = stripe_object_value(
+        event,
+        "data",
+        {},
+    ) or {}
+
+    payment_intent = stripe_object_value(
+        data,
+        "object",
+        {},
+    ) or {}
+
+    # Non-success events are acknowledged but cannot settle
+    # an invoice.
+    if event_type != "payment_intent.succeeded":
+        return {
+            "received": True,
+            "settled": False,
+        }
+
+    payment_intent_id = str(
+        stripe_object_value(
+            payment_intent,
+            "id",
+            "",
+        ) or ""
+    )
+
+    status = str(
+        stripe_object_value(
+            payment_intent,
+            "status",
+            "",
+        ) or ""
+    )
+
+    amount_received = stripe_object_value(
+        payment_intent,
+        "amount_received",
+        None,
+    )
+
+    currency = str(
+        stripe_object_value(
+            payment_intent,
+            "currency",
+            "",
+        ) or ""
+    ).lower()
+
+    metadata = stripe_object_value(
+        payment_intent,
+        "metadata",
+        {},
+    ) or {}
+
+    invoice_id = str(
+        stripe_object_value(
+            metadata,
+            "nms_invoice_ref",
+            "",
+        ) or ""
+    )
+
+    if status != "succeeded":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "stripe_status_mismatch",
+                "message":
+                    "Stripe payment is not succeeded.",
+            },
+        )
+
+    if not event_id or not payment_intent_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "stripe_reference_missing",
+                "message":
+                    "Stripe payment reference is missing.",
+            },
+        )
+
+    if not invoice_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invoice_reference_missing",
+                "message":
+                    "Invoice reference is missing.",
+            },
+        )
+
+    try:
+        amount_received = int(amount_received)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "stripe_amount_invalid",
+                "message":
+                    "Stripe payment amount is invalid.",
+            },
+        )
+
+    invoice = await db.invoices.find_one(
+        {"id": invoice_id}
+    )
+
+    if not invoice:
+        # Signature verification already succeeded. This is an
+        # unrecoverable NMS business-reference conflict, not a
+        # transport/authentication failure. Acknowledge it so
+        # Stripe does not retry the same valid event forever.
+        await db.integration_log.insert_one({
+            "id": new_id(),
+            "service": "stripe",
+            "action": "webhook.invoice_not_found",
+            "payload": {
+                "stripe_event_id": event_id,
+                "payment_intent_id": payment_intent_id,
+                "invoice_id": invoice_id,
+            },
+            "ts": datetime.now(timezone.utc),
+        })
+
+        return {
+            "received": True,
+            "settled": False,
+            "conflict": True,
+            "code": "invoice_not_found",
+        }
+
+    try:
+        result = (
+            await _settle_stripe_invoice_from_webhook(
+                invoice=invoice,
+                payment_intent_id=payment_intent_id,
+                stripe_event_id=event_id,
+                amount_cents=amount_received,
+                currency=currency,
+            )
+        )
+    except ValueError:
+        # Signature verification succeeded, but NMS settlement
+        # verification rejected the event. Never mark the invoice
+        # paid. Record only safe opaque references and acknowledge
+        # the event to avoid endless retries of an unrecoverable
+        # business-state conflict.
+        await db.integration_log.insert_one({
+            "id": new_id(),
+            "service": "stripe",
+            "action": "webhook.settlement_conflict",
+            "payload": {
+                "stripe_event_id": event_id,
+                "payment_intent_id": payment_intent_id,
+                "invoice_id": invoice_id,
+            },
+            "ts": datetime.now(timezone.utc),
+        })
+
+        return {
+            "received": True,
+            "settled": False,
+            "conflict": True,
+            "code": "payment_verification_failed",
+        }
+
+    return {
+        "received": True,
+        "settled": bool(
+            result.get("settled")
+        ),
+        "duplicate": bool(
+            result.get("duplicate")
+        ),
+    }
+
+async def _patient_owned_invoice(
+    inv_id: str,
+    user: dict,
+):
+    """
+    Resolve an invoice strictly through the authenticated
+    patient's own client identity.
+
+    Never trust a client_id supplied by the browser.
+    """
+    if user.get("role") != "client":
+        raise HTTPException(
+            status_code=403,
+            detail="Patient account required",
+        )
+
+    client = await _resolve_self_client(user)
+
+    if not client:
+        raise HTTPException(
+            status_code=404,
+            detail="Patient profile not found",
+        )
+
+    inv = await db.invoices.find_one(
+        {"id": inv_id}
+    )
+
+    if not inv:
+        raise HTTPException(
+            status_code=404,
+            detail="Invoice not found",
+        )
+
+    if str(inv.get("client_id")) != str(
+        client.get("id")
+    ):
+        # Return 404 rather than revealing whether another
+        # patient's invoice exists.
+        raise HTTPException(
+            status_code=404,
+            detail="Invoice not found",
+        )
+
+    return inv, client
+
+@api.post(
+    "/invoices/{inv_id}/paypal/order"
+)
+async def create_paypal_invoice_order(
+    inv_id: str,
+    user=Depends(get_current_user),
+):
+    inv, client = await _patient_owned_invoice(
+        inv_id,
+        user,
+    )
+
+    if inv.get("status") == "paid":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invoice_already_paid",
+                "message": (
+                    "This invoice has already been paid."
+                ),
+            },
+        )
+
+    if not paypal_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "paypal_not_configured",
+                "message": (
+                    "PayPal payments are not available yet."
+                ),
+            },
+        )
+
+    try:
+        amount = Decimal(
+            str(inv.get("amount") or "")
+        )
+    except (InvalidOperation, ValueError):
+        amount = Decimal("0")
+
+    if (
+        not amount.is_finite()
+        or amount <= 0
+        or amount.as_tuple().exponent < -2
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invoice has no valid payable balance",
+        )
+
+    amount_cents = int(
+        amount * Decimal("100")
+    )
+
+    # Opaque internal reference only.
+    # Do not send patient name, treatment, diagnosis,
+    # email, phone, or other PHI to PayPal.
+    reference = f"invoice:{inv_id}"
+
+    order = await create_order(
+        amount_cents=amount_cents,
+        currency="USD",
+        internal_reference=reference,
+    )
+
+    await db.integration_log.insert_one({
+        "id": new_id(),
+        "service": "paypal",
+        "action": "order.create",
+        "payload": {
+            "invoice_id": inv_id,
+            "paypal_order_id": order.get("id"),
+        },
+        "ts": datetime.now(timezone.utc),
+    })
+
+    return {
+        "order_id": order.get("id"),
+        "status": order.get("status"),
+    }
+
+
+@api.post(
+    "/invoices/{inv_id}/paypal/capture/{order_id}"
+)
+async def capture_paypal_invoice_order(
+    inv_id: str,
+    order_id: str,
+    user=Depends(get_current_user),
+):
+    inv, client = await _patient_owned_invoice(
+        inv_id,
+        user,
+    )
+
+    if not paypal_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "paypal_not_configured",
+                "message": (
+                    "PayPal payments are not available yet."
+                ),
+            },
+        )
+
+    # PayPal remains authoritative for capture state.
+    result = await capture_order(order_id)
+
+    expected_reference = f"invoice:{inv_id}"
+    actual_reference = order_reference(result)
+
+    if actual_reference != expected_reference:
+        await db.integration_log.insert_one({
+            "id": new_id(),
+            "service": "paypal",
+            "action": "order.invoice_mismatch",
+            "payload": {
+                "invoice_id": inv_id,
+                "paypal_order_id": order_id,
+            },
+            "ts": datetime.now(timezone.utc),
+        })
+
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "payment_invoice_mismatch",
+                "message": (
+                    "This payment does not belong "
+                    "to this invoice."
+                ),
+            },
+        )
+
+    details = completed_capture_details(result)
+
+    if not details or not capture_completed(result):
+        await db.integration_log.insert_one({
+            "id": new_id(),
+            "service": "paypal",
+            "action": "order.capture_incomplete",
+            "payload": {
+                "invoice_id": inv_id,
+                "paypal_order_id": order_id,
+                "paypal_status": result.get("status"),
+            },
+            "ts": datetime.now(timezone.utc),
+        })
+
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "payment_not_completed",
+                "message": "Payment has not completed.",
+            },
+        )
+
+    capture_id = str(
+        details.get("capture_id")
+        or capture_reference(result)
+        or ""
+    )
+
+    if not capture_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "payment_capture_missing",
+                "message": (
+                    "PayPal did not return a valid "
+                    "capture reference."
+                ),
+            },
+        )
+
+    # NMS invoice amount is authoritative. Convert through
+    # Decimal using string form so binary float arithmetic is
+    # never used for processor settlement comparison.
+    try:
+        expected_amount = Decimal(
+            str(inv.get("amount") or "")
+        )
+    except (InvalidOperation, ValueError):
+        expected_amount = Decimal("0")
+
+    if (
+        not expected_amount.is_finite()
+        or expected_amount <= 0
+        or expected_amount.as_tuple().exponent < -2
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invoice_amount_invalid",
+                "message": "Invoice amount is invalid.",
+            },
+        )
+
+    expected_cents = int(
+        expected_amount * Decimal("100")
+    )
+
+    try:
+        captured_amount = Decimal(
+            str(details.get("value") or "")
+        )
+    except (InvalidOperation, ValueError):
+        captured_amount = Decimal("0")
+
+    if (
+        not captured_amount.is_finite()
+        or captured_amount <= 0
+        or captured_amount.as_tuple().exponent < -2
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "payment_amount_invalid",
+                "message": (
+                    "PayPal returned an invalid "
+                    "payment amount."
+                ),
+            },
+        )
+
+    captured_cents = int(
+        captured_amount * Decimal("100")
+    )
+
+    if captured_cents != expected_cents:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "payment_amount_mismatch",
+                "message": (
+                    "PayPal payment amount does not "
+                    "match this invoice."
+                ),
+            },
+        )
+
+    if str(
+        details.get("currency") or ""
+    ).upper() != "USD":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "payment_currency_mismatch",
+                "message": (
+                    "PayPal payment currency does not "
+                    "match this invoice."
+                ),
+            },
+        )
+
+    # An already-paid invoice is safe only when this is an
+    # exact replay of the PayPal capture already recorded.
+    if inv.get("status") == "paid":
+        if (
+            str(inv.get("external_ref") or "")
+            == capture_id
+            and str(inv.get("payment_method") or "")
+            == "paypal"
+        ):
+            return {
+                "ok": True,
+                "invoice_id": inv_id,
+                "status": "paid",
+                "duplicate": True,
+                "payment_method": "paypal",
+                "payment_reference": capture_id,
+            }
+
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invoice_already_paid",
+                "message": (
+                    "This invoice has already been paid "
+                    "by another payment record."
+                ),
+            },
+        )
+
+    if inv.get("status") == "void":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invoice_void",
+                "message": (
+                    "This invoice is void and cannot "
+                    "be paid."
+                ),
+            },
+        )
+
+    paid_at = datetime.now(timezone.utc)
+
+    updates = {
+        "status": "paid",
+        "paid_at": paid_at,
+        "payment_method": "paypal",
+        "external_ref": capture_id,
+        "payment_reference": capture_id,
+        "payment_processor": "paypal",
+    }
+
+    update_result = await db.invoices.update_one(
+        {
+            "id": inv_id,
+            "client_id": inv["client_id"],
+            "status": {"$ne": "paid"},
+        },
+        {
+            "$set": updates,
+        },
+    )
+
+    modified = getattr(
+        update_result,
+        "modified_count",
+        None,
+    )
+
+    if modified == 0:
+        latest = await db.invoices.find_one(
+            {"id": inv_id}
+        )
+
+        if (
+            latest
+            and latest.get("status") == "paid"
+            and str(latest.get("external_ref") or "")
+                == capture_id
+            and str(latest.get("payment_method") or "")
+                == "paypal"
+        ):
+            return {
+                "ok": True,
+                "invoice_id": inv_id,
+                "status": "paid",
+                "duplicate": True,
+                "payment_method": "paypal",
+                "payment_reference": capture_id,
+            }
+
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "invoice_settlement_changed",
+                "message": (
+                    "Invoice settlement state changed."
+                ),
+            },
+        )
+
+    try:
+        from accounting.events import AccountingEvent, emit
+
+        await emit(
+            AccountingEvent(
+                event_type="InvoicePaid",
+                occurred_at=paid_at,
+                source_module="invoices",
+                source_ref_type="invoice",
+                source_ref_id=inv_id,
+                idempotency_key=(
+                    f"invoice:{inv_id}:InvoicePaid"
+                ),
+                amount_cents=expected_cents,
+                currency="USD",
+                context={
+                    "payment_method": "paypal",
+                },
+                actor_id=None,
+                actor_role="system",
+            )
+        )
+    except Exception:
+        # Accounting is downstream and recoverable through
+        # the existing idempotent invoice backfill.
+        pass
+
+    await db.integration_log.insert_one({
+        "id": new_id(),
+        "service": "paypal",
+        "action": "order.capture_completed",
+        "payload": {
+            "invoice_id": inv_id,
+            "paypal_order_id": order_id,
+            "capture_id": capture_id,
+        },
+        "ts": paid_at,
+    })
+
+    await _patient_activity(
+        client_id=inv["client_id"],
+        body=(
+            "Your payment was received. "
+            "Your paid invoice is available in Billing."
+        ),
+        event_type="invoice_paid",
+        source_id=inv_id,
+        portal_path="/portal/patient/billing",
+        sender_role="staff",
+        sender_name="Billing Team",
+    )
+
+    return {
+        "ok": True,
+        "invoice_id": inv_id,
+        "status": "paid",
+        "paid_at": paid_at,
+        "duplicate": False,
+        "payment_method": "paypal",
+        "payment_reference": capture_id,
+    }
+
+
+@api.get("/payments/apple-pay/status")
+async def patient_apple_pay_status(
+    user=Depends(get_current_user),
+):
+    if user.get("role") != "client":
+        raise HTTPException(
+            status_code=403,
+            detail="Patient account required",
+        )
+
+    enabled = stripe_enabled()
+
+    return {
+        "enabled": enabled,
+        "provider": "stripe",
+        "requires_merchant_activation":
+            not enabled,
     }
 
 
@@ -456,7 +1496,7 @@ async def _hydrate_plan(p, user=None):
     if not p:
         return None
     if p.get("practitioner_id"):
-        u = await db.users.find_one({"id": p["practitioner_id"]})
+        u = await find_user_by_id(p["practitioner_id"])
         if u:
             p["practitioner_name"] = u.get("full_name")
     # Clients only see patient_visible items
@@ -482,7 +1522,7 @@ async def list_plans(client_id: Optional[str] = None, user=Depends(get_current_u
 @api.post("/treatment-plans", response_model=PlanOut)
 async def create_plan(payload: PlanIn, request: Request,
                       user=Depends(require_roles("practitioner", "admin", "medical_assistant"))):
-    c = await db.clients.find_one({"id": payload.client_id})
+    c = await find_client(client_id=payload.client_id)
     if not c:
         raise HTTPException(status_code=404, detail="Client not found")
     authorizing_provider_id = None
@@ -584,7 +1624,8 @@ async def amend_plan(plan_id: str, payload: dict, request: Request,
 # ---------- Reminder settings ----------
 @api.get("/reminders/settings", response_model=ReminderSettings)
 async def get_reminder_settings(user=Depends(require_roles("admin"))):
-    s = await db.reminder_settings.find_one({"id": "singleton"})
+    async with AsyncSessionLocal() as pg:
+        s = await sched_repo.get_reminder_settings(pg)
     if not s:
         return ReminderSettings()
     return ReminderSettings(**{k: v for k, v in s.items() if k in ReminderSettings.model_fields})
@@ -592,8 +1633,9 @@ async def get_reminder_settings(user=Depends(require_roles("admin"))):
 
 @api.put("/reminders/settings", response_model=ReminderSettings)
 async def set_reminder_settings(payload: ReminderSettings, request: Request, user=Depends(require_roles("admin"))):
-    doc = {"id": "singleton", **payload.dict()}
-    await db.reminder_settings.update_one({"id": "singleton"}, {"$set": doc}, upsert=True)
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.upsert_reminder_settings(pg, payload.dict())
     await log_audit(db, user["id"], user["email"], "reminders.settings_update",
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return payload
@@ -603,18 +1645,34 @@ async def set_reminder_settings(payload: ReminderSettings, request: Request, use
 async def run_reminders(user=Depends(require_roles("admin"))):
     """Manually tick the reminder scheduler: send due reminders (stubbed)."""
     now = datetime.now(timezone.utc)
-    due = await db.reminders.find({"status": "scheduled", "scheduled_at": {"$lte": now}}).to_list(200)
+    async with AsyncSessionLocal() as pg:
+        due = await sched_repo.list_due_reminders(pg, now=now, limit=200)
     sent = 0
     for r in due:
-        # Stubbed send via SendGrid/Twilio
-        await db.integration_log.insert_one({
-            "id": new_id(),
-            "service": "sendgrid" if r["channel"] == "email" else "twilio",
-            "action": f"reminder.{r['channel']}",
-            "payload": {"appointment_id": r["appointment_id"], "client_id": r["client_id"]},
-            "_stubbed": True, "ts": now,
-        })
-        await db.reminders.update_one({"id": r["id"]}, {"$set": {"status": "sent", "sent_at": now}})
+        # Email-only reminders (SMS retired 2026-08).
+        if r["channel"] != "email":
+            # Legacy scheduling rows that still say channel=sms are converted
+            # to a no-op that is marked "sent" so we don't retry forever.
+            await db.integration_log.insert_one({
+                "id": new_id(),
+                "service": "sendgrid",
+                "action": f"reminder.{r['channel']}.skipped_sms_retired",
+                "payload": {"appointment_id": r["appointment_id"],
+                              "client_id": r["client_id"]},
+                "_stubbed": True, "ts": now,
+            })
+        else:
+            await db.integration_log.insert_one({
+                "id": new_id(),
+                "service": "sendgrid",
+                "action": f"reminder.{r['channel']}",
+                "payload": {"appointment_id": r["appointment_id"],
+                              "client_id": r["client_id"]},
+                "_stubbed": True, "ts": now,
+            })
+        async with AsyncSessionLocal() as pg:
+            async with pg.begin():
+                await sched_repo.mark_reminder_sent(pg, r["id"], now)
         sent += 1
     return {"processed": sent}
 

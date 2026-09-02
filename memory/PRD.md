@@ -3,8 +3,52 @@
 ## Original Problem Statement
 HIPAA-aligned wellness EMR for `natmedsol.com` (Natural Medical Solutions Wellness Center). Wellness office, **not** a medical practice. Single-tenant private app, not SaaS. Aesthetic adapted from medspa-concierge to NatMedSol's deep-green / parchment / gold palette.
 
+## Phase 3.3 / 3.4 — Clinical + Messaging Runtime Cutover (2026-07-31) ⭐ NEW
+- **Foundation shipped in commit `0965f23`** (see below); this iteration completes the highest-impact runtime cutovers.
+- **Hash chain preserved**: `emr_visit_notes.prev_hash` + `note_hash` now populated on every `POST /notes/{id}/finalize`. `repositories/clinical_and_messaging.py::finalize_note()` computes SHA-256 over canonical JSON, references the previous finalized note's hash for the same practitioner (or `GENESIS` for first-ever). Verified end-to-end by `test_session3_3_clinical.py::test_note_hash_chain_lands_in_pg` (14/14 smoke tests pass overall).
+- **Routers cut over in this pass**: `delegations.py` (helper) + `routers/delegations.py` (grant/list/revoke) + `routers/clients.py` (visit_notes list/create/update/finalize/amend) + `routers/telehealth.py` (visit_chat, live_soap_drafts, auto-draft) + `routers/admin.py` (visit_note counts) + `routers/compliance.py` (patient export) + `routers/ops.py` (day-of-service note counts) + `notifiers.py` + `server.py` (push_subscriptions endpoints).
+- **Mongo silence verified** for `visit_notes`, `visit_chat`, `live_soap_drafts`, `clinical_delegations`, `push_subscriptions`.
+- **Deferred sub-phase (3.3b / 3.4b)**: `db.messages` / `db.message_threads` / `db.form_templates` / `db.form_submissions` / `db.soap_templates` / `db.treatment_plans` / `db.treatments` / `db.lab_values` router edits, and `emr_files.*` (GridFS → S3/MinIO). Schema and repositories are ready — remaining work is router mechanical replacement.
+
+## Phase 3.3 / 3.4 Foundation — Clinical + Messaging Data Layer (2026-07-31)
+- **New Alembic revision `8ae0b2901822`** (head) creates 13 tables covering both domains:
+  - Clinical: `emr_visit_notes` (hash-chained: `prev_hash` + `note_hash`), `emr_treatment_plans`, `emr_treatments`, `emr_lab_values`, `emr_live_soap_drafts`, `emr_visit_chat`, `emr_clinical_delegations`
+  - Messaging & Files: `emr_message_threads`, `emr_messages`, `emr_form_templates`, `emr_form_submissions`, `emr_soap_templates`, `emr_push_subscriptions`
+  - All FKs to `auth_users` / `emr_clients` nullable + paired with `legacy_*` breadcrumbs.
+- **`postgres_models/clinical_and_messaging.py`** — SQLAlchemy models for all 13 tables.
+- **`repositories/clinical_and_messaging.py`** — full async CRUD surface plus the hash chain helpers: `compute_note_hash()`, `prev_note_hash_for_practitioner()`, `finalize_note()` (idempotent, computes SHA-256 chain over canonical JSON).
+- **GridFS `emr_files.*`** is intentionally deferred — a proper S3/MinIO cutover is scheduled for a follow-up phase (per handoff notes on S3 scaffolding).
+- **Runtime cutover of the 14 affected routers is scoped-not-yet-executed** in this session and is the immediate next task; the empty-database state + `DEMO_SEED_DISABLE=1` guard mean no Mongo re-creation of these collections occurs at rest, so shipping the foundation is safe.
+
+## Phase 3.2b — Test Data Reset (2026-07-31)
+- **All application data wiped.** New `scripts/reset_test_data.py` truncates every PG table (except `alembic_version`) and deletes every doc across all Mongo collections including GridFS chunks/files — without dropping tables, collections, indexes, or migrations.
+- **`DEMO_SEED_DISABLE=1`** env flag added to `backend/.env` + honoured by `server.py::seed_demo`. Restarting the backend after a reset no longer recreates demo users, clients, appointments, or any other test records.
+- **Smoke-test bootstrap** helper `tests/smoketest_bootstrap.py` materialises two workforce fixtures (`smoketest-admin@natmedsol.local` + `smoketest-prac@natmedsol.local`, both MFA-enrolled with the conftest fixture secret) directly against PG so Phase 3.1b/3.2 smoke tests keep running against a clean environment.
+- **Verification**: post-reset backend restart cold-boots successfully with 0 rows in every migrated PG table and 0 docs across all Mongo collections. Alembic remains at `c8f4a2e7b3d1`. Both smoke-test suites still pass (12/12) using their bootstrap helper.
+
+## Phase 3.2 — MongoDB → PostgreSQL Migration for Scheduling (2026-07-31)
+- **Full runtime cutover** of the Scheduling domain: `appointments`, `appointment_requests`, `availability`, `reminders`, `reminder_settings`. All eight routers that read/wrote these collections now route through `repositories.scheduling` on async SQLAlchemy: `routers/appointments.py`, `routers/telehealth.py`, `routers/campaigns.py`, `routers/campaign_extras.py`, `routers/portal_ops.py`, `routers/compliance.py`, `routers/ops.py`, `routers/admin.py`, and `server.py` (public appointment-request + staff review + recurrence + reminder loop).
+- **New Alembic head**: `c8f4a2e7b3d1` creates `emr_appointments`, `emr_appointment_requests`, `emr_availability`, `emr_reminders`, `emr_reminder_settings` with nullable FKs to `auth_users` / `emr_clients` (preserves legacy Mongo refs via `legacy_*` columns).
+- **New repository**: `repositories/scheduling.py` (Router → Repository → SQLAlchemy → PostgreSQL). Includes `list_appointments_with_waiting_state` for the telehealth waiting-room JSONB query and `push_appointment_recording` for the recordings JSONB array.
+- **New models**: `postgres_models/scheduling.py` exports `Appointment`, `AppointmentRequest`, `Availability`, `Reminder`, `ReminderSettings`.
+- **Backfill**: `scripts/phase3_2_backfill.py` (idempotent, dry-run, resumable, batched). Backfilled 515 appointments, 7 appointment_requests, 401 reminders. Orphan FKs surfaced via `legacy_client_id` / `legacy_practitioner_id` / `legacy_appointment_id`.
+- **Reconciliation report**: `scripts/phase3_2_reconcile.py` scans all remaining Mongo collections referencing `users` / `clients`; report saved to `/tmp/phase3_2_reconciliation.json`.
+- **5 Mongo collections dropped and verified non-regenerative**: `appointments` (515 docs), `appointment_requests` (7 docs), `reminders` (401 docs), `availability` (0), `reminder_settings` (0).
+- **Tests**: `tests/test_session3_2_scheduling.py` (6/6 pass) covers public request → PG, appointment CRUD + auto-reminder, singleton reminder settings, availability CRUD, dashboard stats, and reminder scheduler tick.
+- API contract preserved end-to-end.
+
+## Phase 3.1b — MongoDB → PostgreSQL Migration for Identity & Patients (2026-07-31) ⭐ NEW
+- **Runtime cutover complete.** Every Mongo read/write for `users`, `clients`, `intake_forms`, `supplement_sheets`, `client_supplement_assignments`, and `password_reset_tokens` was replaced with PostgreSQL calls via a new `pg_shims.py` shim layer + repository methods.
+- **15 routers rewritten**: `server.py`, `permissions.py`, `routers/clients.py`, `routers/portal_ops.py`, `routers/telehealth.py`, `routers/appointments.py`, `routers/campaigns.py`, `routers/campaign_extras.py`, `routers/lab_review.py`, `routers/ops.py`, `routers/tasks.py`, `routers/health_track.py`, `routers/delegations.py`, `routers/compliance.py`, `routers/forms_protocols.py`, `routers/admin.py`.
+- **Alembic**: new revision `b7e2c4d9a1f8` adds `emr_clients.tags` JSONB column so portal-ops test-patient tagger + campaign segmentation stay on PG.
+- **Seed rewritten**: `server.py::seed_demo` now writes admin / practitioner / staff / auditor / MA fixtures directly to `auth_users`. Mongo `users`/`clients` seed inserts + Mongo `create_index` calls for the retired collections are gone.
+- **Dead code removed**: `pg_bootstrap.py` (Mongo → PG user sync helper) deleted.
+- **6 Mongo collections dropped and verified** they do not regenerate on boot: `users` (1221 docs), `clients` (1587 docs), `intake_forms` (2 docs), `supplement_sheets` (76 docs), `client_supplement_assignments` (97 docs), `password_reset_tokens` (0 docs).
+- **Tests**: new `tests/test_session3_1_clients.py` (6/6 pass) verifies practitioners list, dashboard client count, client CRUD, intake save, and admin/users all round-trip through PostgreSQL. `tests/pg_test_helpers.py` module added for legacy tests still using pymongo user lookups.
+- **API contract unchanged.** Every HTTP request/response shape preserved.
+
 ## Personas
-- **Client:** PWA-installable; schedule, intake, chart/labs/plan, secure messaging, billing. Sign in with **email or Google**.
+- **Client:** PWA-installable; schedule, intake, chart/labs/plan, secure messaging, billing. Sign in with **email + password + MFA** (Google SSO was removed 2026-07-30, Session 2a).
 - **Practitioner:** schedule (full EHR view), charts, telehealth (live SOAP sidebar + AI draft), messaging, treatments, time clock, analytics.
 - **Staff:** front desk, POS, transactions, inventory (lots/expiry), time clock.
 - **Admin:** all of the above + user mgmt, audit, CSV import, EOD reports, manual time-clock edits.
@@ -1068,3 +1112,645 @@ details. Message content stays inside the portal.
   without failing the message insert.
 
 _Last updated: Feb 28, 2026 (Sprint 11.1 · Privacy-Safe Secure-Message Alerts)_
+
+---
+
+## Sprint 12 · PostgreSQL Auth Foundation (Feb 28, 2026)
+
+### Scope (Phases 1–4 + 9–10 of the migration charter)
+Built the parallel PostgreSQL infrastructure the auth-stack cutover will
+run on top of, without touching the still-Mongo runtime. Local PostgreSQL
+is verified end-to-end; all foundation tests pass; no app behaviour has
+changed yet.
+
+### Delivered
+- **12 SQLAlchemy models** across `backend/postgres_models/` (User, Client,
+  UserSession, RefreshToken, LoginHistory, LoginContinuation,
+  PasswordResetAttempt, PasswordResetToken, OAuthState, OAuthHandoff,
+  AuditLog with autoincrementing `seq` + retained UUID `id`, SecurityEvent).
+  All datetimes are `DateTime(timezone=True)`. `AuditLog.audit_metadata`
+  uses `JSONB`. Foreign keys wired with correct `ondelete` behaviour.
+- **Alembic** — new `alembic.ini`, rewritten `alembic/env.py` to load
+  `Base.metadata` from `postgres_models` and resolve `DATABASE_URL` from
+  process env. Initial revision `557f2e586456` applied to local dev.
+- **Repositories layer** — `backend/repositories/*` covering users, clients,
+  user_sessions, refresh_tokens (with `SELECT ... FOR UPDATE SKIP LOCKED`
+  atomic claim), audit (with PostgreSQL transaction-scoped
+  `pg_advisory_xact_lock`), login history + continuations, password reset
+  (rate-limit windows + single-use tokens), OAuth state + one-shot handoff.
+  Every function accepts an explicit `AsyncSession` and returns dicts
+  matching the pre-migration Mongo shape.
+- **Staff migration script** —
+  `backend/scripts/migrate_staff_users_to_postgres.py`. Dry-run + real
+  modes, idempotent (upserts by email), migrated 55 workforce users
+  (33 admin, 16 staff, 4 practitioners, 1 MA, 1 auditor) locally. Never
+  copies sessions, refresh tokens, reset tokens, OAuth material — cutover
+  forces re-login.
+- **Foundation tests** — 12 hermetic tests covering repo layer,
+  atomic refresh rotation, single-use consume patterns, and audit chain
+  seq-ordering. All pass in 0.65s.
+- **Local dev Postgres** — installed PostgreSQL 15 apt package, created
+  `nms_auth` DB owned by `nms_dev`. `DATABASE_URL` lives in
+  `backend/.env` (gitignored); `.env.example` gained a placeholder entry.
+- **Packages added to requirements.txt** — `sqlalchemy==2.0.51`,
+  `alembic==1.18.5`, `psycopg==3.3.4`, `psycopg-binary==3.3.4`,
+  `asyncpg==0.31.0`.
+
+### Deferred to a follow-up PR (Phases 5–8 of the migration charter)
+Converting `deps.py`, `sessions.py`, `audit.py`, and `routers/auth.py`
+was scoped as this session's work but deliberately postponed to avoid
+leaving the app in a broken hybrid state (a session pointing at a
+Mongo-only user cannot satisfy the PostgreSQL FK). `routers/auth.py` is
+975 lines with 15+ endpoints, each requiring careful atomic-transaction
+conversion. See `PG_MIGRATION_STATUS.md` for the exact hand-off checklist.
+
+### Test results
+- 53/53 tests pass (12 new PG foundation + 41 pre-existing Bedrock /
+  features / staff handoffs).
+- App boots cleanly, `/api/health` returns 200.
+
+_Last updated: Feb 28, 2026 (Sprint 12 · PostgreSQL Auth Foundation)_
+
+---
+
+## Sprint 12.5 · Auth Router Refactor (Feb 28, 2026)
+
+### Scope (Session 1 of the atomic PG runtime cutover)
+Split the 975-line `backend/routers/auth.py` into topical submodules so
+the Session 2 PostgreSQL cutover can be reviewed one file at a time.
+Behaviour is 100% preserved — MongoDB remains the persistence backend,
+every route path / schema / cookie / MFA behaviour is unchanged, and
+`routers.auth` continues to be the public entry point.
+
+### Files added
+- `backend/routers/auth_impl/_common.py` — shared imports, helpers,
+  `json_dumps_body`, `_create_session`, `_email_hash`, etc. Uses `__all__`
+  so `from ._common import *` re-exports underscored helpers.
+- `backend/routers/auth_impl/registration.py` — register, login, login/continue.
+- `backend/routers/auth_impl/refresh.py` — POST /auth/refresh with rotation.
+- `backend/routers/auth_impl/sessions.py` — logout, logout-all, sessions list, revoke.
+- `backend/routers/auth_impl/mfa.py` — setup, verify, disable.
+- `backend/routers/auth_impl/profile.py` — me, profile update, change-password.
+- `backend/routers/auth_impl/password_reset.py` — forgot, reset, dev/reset-token.
+- `backend/routers/auth_impl/oauth.py` — Emergent Google + direct OAuth.
+- `backend/routers/auth_impl/__init__.py` — imports every submodule so
+  decorators register at import time.
+- `backend/tests/test_auth_refactor_characterization.py` — 9 tests
+  covering route registration, public helper exports, login + MFA,
+  refresh cookie rotation, `/auth/me`, invalid password → 401, sessions
+  list `is_current` flag, and generic forgot-password contract.
+
+### Files modified
+- `backend/routers/auth.py` — reduced from 975 lines to a thin shim
+  that imports `auth_impl` (triggers route registration) and re-exports
+  the helpers other backend modules import directly (`_create_session`,
+  `_email_hash`, `_hash_token`, `_set_refresh_cookie`,
+  `_clear_refresh_cookie`, `_revoke_all_sessions`, `_revoke_session`).
+
+### Verification
+- Full test suite: **62/62 passing** (9 new characterization + 12 PG
+  foundation + 5 staff handoffs + 18 Bedrock features + 18 Bedrock AI).
+- Backend imports cleanly and boots (`/api/health` OK).
+- All 21 auth routes still registered on the shared FastAPI router.
+- Live smoke: two-step MFA login returns 200 with access token +
+  HttpOnly refresh cookie; refresh rotates the cookie.
+
+_Last updated: Feb 28, 2026 (Sprint 12.5 · Auth Router Refactor)_
+
+
+---
+
+## Sprint 12.6 · Session 2a — Google OAuth Removal (2026-07-30) ✅
+
+**Branch**: `auth-remove-google` (forked from `auth-refactor-session-1-1785441186`)
+
+**Scope**: Remove Google SSO (Emergent-managed session exchange + direct
+Google OAuth authorize/callback/exchange) end-to-end. MongoDB-backed
+password/MFA runtime is preserved. The PostgreSQL runtime cutover is
+NOT part of this session.
+
+### Deleted
+- `backend/routers/auth_impl/oauth.py`
+- `backend/postgres_models/oauth.py`
+- `backend/repositories/oauth.py`
+- `frontend/src/pages/OAuthComplete.jsx`
+- `backend/tests/test_sprint2_oauth_exchange.py`
+- `auth_testing.md` (repo-root Google-flow doc)
+
+### Modified — Backend
+- `routers/auth_impl/__init__.py` — dropped `from . import oauth`
+- `postgres_models/__init__.py` — dropped `OAuthState` / `OAuthHandoff` exports
+- `alembic/env.py` — dropped OAuth model imports
+- `server.py` — `/api/health` integrations dict no longer reports
+  `google_oauth_direct`. Removed the empty "Emergent-managed Google SSO"
+  section marker.
+- `routers/compliance.py` — BAA checklist defaults now 7 rows
+  (`google_workspace` entry removed).
+- `routers/auth_impl/registration.py` — comment about Google-satisfies-MFA
+  reworded; `mfa_bypass` field kept on user docs but no code path sets
+  it now.
+- `backend/.env` and `backend/.env.example` — removed
+  `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` / `_REDIRECT_URI` variables.
+
+### Modified — Frontend
+- `components/AuthCard.jsx` — removed the "Continue with Google" button,
+  the `googleDirectOn` / `googleSignInEmergent` / `googleSignInDirect`
+  callbacks, the `#session_id=` hash callback handler, and the
+  `redirectPath` prop.
+- `lib/auth.jsx` — dropped `loginWithGoogleSession`,
+  `beginGoogleOAuthDirect`, and `completeOAuthFromTokens` from the auth
+  context.
+- `App.js` — removed `OAuthComplete` import + the `/oauth-complete` route.
+- `pages/Home.jsx` — removed the Google SSO button from the footer sign-in
+  strip; replaced with a "Staff Sign In" link.
+- `pages/Login.jsx` + `pages/StaffLogin.jsx` — removed the unused
+  `redirectPath` prop.
+
+### New Alembic migration (forward-only)
+- `backend/alembic/versions/2026_07_30_2131-af896f736c94_drop_oauth_tables.py`
+  drops `auth_oauth_handoffs` and `auth_oauth_states` (plus their indexes).
+  Downgrade recreates them. The initial revision was NOT rewritten.
+  Applied against the dev PostgreSQL instance (`alembic current` reports
+  `af896f736c94 (head)`).
+
+### Tests updated to expect 404
+- `test_auth_refactor_characterization.py` — added `TestGoogleOAuthRemoved`;
+  the "≥20 auth routes" assertion is now "≥16" AND explicitly asserts
+  `google_routes == set()`.
+- `test_iter16_phase16.py` — health check no longer asserts
+  `google_oauth_direct`; the 503 tests are replaced by 404 assertions.
+- `test_p0_login_fix.py` — item 5 flipped from 503 → 404.
+- `test_uat_final_pass.py` — replaced `TestOAuthExchange` with
+  `TestOAuthRoutesRemoved`.
+- `test_phase8.py` — replaced `TestGoogleSession` with `TestGoogleSsoRemoved`.
+- `test_sprint4_rbac_inventory.py` — dropped the Google routes from
+  `PUBLIC_ROUTES` (they no longer exist to gate).
+- `test_phase15_hipaa.py` — BAA row count 8 → 7; removed `google_workspace`
+  from expected keys; replaced `anthropic` with `aws_bedrock` to match the
+  Bedrock migration.
+- `test_pg_auth_foundation.py` — dropped OAuth model/repo imports and the
+  `TestOAuth` class.
+
+### Verification
+- Testing agent report `/app/test_reports/iteration_25.json`:
+  **11/11 pass** for the new `test_session2a_google_removal.py` suite;
+  **13/13 pass** for the updated characterization suite.
+- Frontend Playwright: Home, `/staff-login`, `/login`, `/oauth-complete`
+  all render as expected (no Google button, `/oauth-complete` falls
+  through to the router's default handling).
+- End-to-end MFA login smoke (admin + TOTP) → `/portal/admin` succeeds.
+- BAA checklist returns 7 rows with the expected key set after purging
+  the two legacy Mongo rows (`google_workspace`, `anthropic`).
+
+### Non-goals confirmed
+- No PostgreSQL runtime cutover.
+- No rewrite of the initial Alembic revision.
+- No admin bootstrap changes.
+
+_Last updated: 2026-07-30 (Session 2a · Google OAuth Removal)_
+
+
+---
+
+## Sprint 12.7 · Session 2b — PostgreSQL Auth Runtime Cutover (2026-07-30) ✅
+
+**Branch**: `auth-remove-google` (on top of Session 2a).
+
+**Scope**: Convert all authentication persistence from MongoDB/Motor to
+PostgreSQL/SQLAlchemy. API contract, JWT shape, refresh cookie behaviour,
+MFA flow, and password-reset semantics unchanged. Admin bootstrap is a
+separate follow-up (Session 2c).
+
+### New files
+- `backend/mongo_db.py` — Motor client + GridFS bucket now live here.
+  Everything outside the auth stack imports `db` / `fs_bucket` via
+  `deps.py`'s re-export.
+- `backend/pg_bootstrap.py` — `sync_mongo_users_to_pg()` runs at startup
+  to mirror pre-existing MongoDB users into PostgreSQL so the PG-backed
+  auth stack can authenticate them. Idempotent (only inserts missing
+  rows, refreshes transient password/MFA fields).
+
+### Rewritten (auth surface — Motor-free)
+- `backend/audit.py` — audit chain now lives in PostgreSQL, hash chain
+  guarded by a per-transaction advisory lock. Signature preserved
+  (`log_audit(db, ...)`) so every existing caller keeps compiling; the
+  `db` argument is now ignored.
+- `backend/sessions.py` — `issue_first_refresh`, `rotate_refresh`,
+  `revoke_all_user_sessions`, `enforce_active_session_limit`,
+  `check_and_touch_session`, `list_active_sessions_sanitized` all use
+  `AsyncSessionLocal()` + `repositories/*`.
+- `backend/deps.py` — `get_authenticated_user` reads user + session from
+  PG. Re-exports `db` / `fs_bucket` from `mongo_db.py`.
+- `backend/routers/auth_impl/*` — every submodule (registration, refresh,
+  mfa, sessions, profile, password_reset, _common) rewritten to hit PG
+  via repositories. `db` is still re-exported for the single Mongo
+  `clients` write in `register()` (client business row).
+- `backend/routers/admin.py` — user directory, session explorer, audit
+  viewer, revoke endpoints all target PostgreSQL.
+
+### Repository additions
+- `repositories/users.py::list_recent`
+- `repositories/user_sessions.py::list_active_for_admin`
+- `repositories/audit.py::list_recent`
+
+### Startup + tests
+- `server.py` startup now invokes `sync_mongo_users_to_pg()` after
+  seed_demo so existing Mongo users are visible to the PG auth stack.
+- `postgres_db.py` loads `.env` defensively at module import so the
+  connection URL is available even when postgres_db is imported before
+  other modules call `load_dotenv`.
+- `tests/conftest.py` now mirrors MFA enrollment + workforce session
+  cleanup + audit-chain wipe into PostgreSQL (session-autouse). Also
+  loads `.env` early so `test_pg_auth_foundation` no longer skips.
+- `tests/test_pg_auth_foundation.py::TestAuditChain` isolates its
+  primitive fake-hash inserts via a wipe fixture so the UAT
+  `verify_audit_chain` test isn't contaminated.
+
+### Verification
+- Full auth regression: **114 pass**, 2 pre-existing SendGrid-live
+  failures unrelated to this migration.
+- Live curl smoke: MFA login → PG `auth_user_sessions` row created and
+  `mfa_satisfied_at` set → refresh rotates (generation++, previous row
+  replaced) → `/auth/sessions` returns the active set → `logout-all`
+  revokes every row → password reset via dev token consumes the token,
+  revokes all sessions, allows re-login.
+- Grep hygiene (all zero):
+  - `grep -rn 'from motor\|import motor\|AsyncIOMotor' backend/deps.py backend/audit.py backend/sessions.py backend/routers/auth_impl/ backend/repositories/`
+  - `grep -rn 'db\.users\|db\.user_sessions\|db\.refresh_tokens\|db\.login_history\|db\.login_continuations\|db\.password_reset\|db\.audit_logs\|db\.security_events' backend/audit.py backend/sessions.py backend/routers/auth_impl/`
+- Alembic head still `af896f736c94` (Session 2a's oauth-drop revision).
+
+### Non-goals confirmed
+- No admin bootstrap changes (Session 2c).
+- No new alembic migrations.
+- Mongo `clients`, `appointments`, `notes`, `files`, `visit_notes`, etc.
+  remain on MongoDB — non-auth business collections are out of scope.
+- Password hashing (bcrypt) unchanged — Argon2id migration is Session 2d.
+
+_Last updated: 2026-07-30 (Session 2b · PostgreSQL Auth Runtime Cutover)_
+
+---
+
+## Sprint 12.8 · Session 2c — Admin Bootstrap Onboarding (2026-07-30) ✅
+
+**Branch**: `auth-remove-google` (Sessions 2a + 2b already committed).
+
+**Scope**: Forced onboarding for every workforce account — temporary
+password → forced password change → forced MFA enrollment → single-use
+recovery codes → normal MFA-gated session. Existing MFA-enabled workforce
+users and every client account are unaffected.
+
+### Data model
+- `auth_users.onboarding_status` VARCHAR(32) — `'password_change_required'`,
+  `'mfa_enrollment_required'`, or NULL (complete).
+- `auth_users.temporary_password_expires_at` TIMESTAMP WITH TIME ZONE.
+- `auth_recovery_codes(id, user_id, code_hash, used_at, created_at)` — 8
+  single-use MFA fallback codes per user, sha256-hashed at rest, atomic
+  redemption via `UPDATE ... RETURNING`.
+
+### Alembic
+- New revision `62cd2e365fc9_add_admin_bootstrap_columns_and_recovery_codes.py`.
+  Forward-only; head is now `62cd2e365fc9`.
+
+### JWT surface
+- `make_bootstrap_token(user_id, stage)` — 10-minute token with claims
+  `{type:"bootstrap", scope:"bootstrap", bootstrap_stage:<stage>}`.
+- Bootstrap stages: `"password_change"` and `"mfa_enrollment"`.
+- `decode_token(expected_type="access")` and `expected_type="bootstrap"`
+  provide strict mutual rejection — access tokens can't hit bootstrap
+  endpoints and vice versa.
+
+### New endpoints
+- `POST /api/auth/bootstrap/first-admin` — one-shot; gated by
+  `X-Bootstrap-Secret` header matching `$BOOTSTRAP_SECRET`. Returns
+  temporary password once, 409 on subsequent calls, 503 when the server
+  secret is unset. Never logs the temp password or the secret.
+- `POST /api/auth/bootstrap/password-change` — requires a
+  `bootstrap_stage=password_change` JWT.
+- `POST /api/auth/bootstrap/mfa/setup` — requires
+  `bootstrap_stage=mfa_enrollment`.
+- `POST /api/auth/bootstrap/mfa/verify` — requires the same stage;
+  successful verify mints 8 recovery codes.
+
+### Login flow changes (`/api/auth/login`)
+- On successful password check, if the user's `onboarding_status` is
+  `password_change_required` (or `must_change_password=True`), respond
+  with `{bootstrap_token, bootstrap_stage:"password_change", user,
+  next_step}` and no access token / no refresh cookie.
+- If the user is workforce and MFA is not yet configured, respond with
+  `{bootstrap_token, bootstrap_stage:"mfa_enrollment", ...}`.
+- Recovery-code fallback added to the standard login body — pass the
+  10-char code where `mfa_token` would normally go. Non-digit + length
+  ≥8 triggers the recovery path; atomic PG UPDATE guarantees single-use.
+- Temporary-password expiry emits `temporary_password_expired` audit and
+  returns HTTP 403 with `{code:"temporary_password_expired"}`.
+
+### Admin surface
+- `POST /api/admin/users` — for workforce roles, ignores the caller's
+  password, generates a 24-char random temp password, sets
+  `must_change_password=True` +
+  `onboarding_status="password_change_required"` +
+  `temporary_password_expires_at=now()+24h`, and returns
+  `{temporary_password, temporary_password_expires_at,
+  onboarding_status, ...}` ONCE. Client-role creation flow unchanged.
+- Audit event `temporary_password_issued` recorded (no password in
+  metadata).
+
+### Dev-only startup helper
+- If `BOOTSTRAP_ADMIN_EMAIL` is set and no admin exists (and HIPAA_MODE
+  is off), server startup creates the first admin with a random temp
+  password and prints it once to the console. Silently skipped in
+  HIPAA_MODE.
+
+### New env vars (documented in `.env.example`)
+- `BOOTSTRAP_SECRET` — high-entropy secret gating the first-admin
+  endpoint. Blank = endpoint returns 503.
+- `BOOTSTRAP_ADMIN_EMAIL` — dev-only seed email.
+- `BOOTSTRAP_TEMP_PASSWORD_TTL_HOURS=24` — expiry window.
+
+### State diagram
+```
+                 admin creates user (workforce)
+                          │
+                          ▼
+       ┌── temporary_password_expires_at set ──┐
+       │  onboarding_status = "password_change_required"
+       │  must_change_password = TRUE
+       └───────────────┬───────────────────────┘
+                       │  login(temp pw)
+                       ▼
+        bootstrap_token stage="password_change"  ─── (no session, no refresh)
+                       │  bootstrap/password-change
+                       ▼
+         onboarding_status = "mfa_enrollment_required"
+         must_change_password = FALSE
+         temp password expiry cleared
+                       │  login(new pw)
+                       ▼
+        bootstrap_token stage="mfa_enrollment"   ─── (no session, no refresh)
+                       │  bootstrap/mfa/setup → bootstrap/mfa/verify(TOTP)
+                       ▼
+          mfa_enabled = TRUE
+          onboarding_status = NULL
+          8 recovery codes returned once
+                       │  login(pw + TOTP)  OR  login(pw + recovery_code)
+                       ▼
+                   NORMAL SESSION
+```
+
+### Audit events emitted
+`first_admin_bootstrap_attempt`, `first_admin_created`,
+`temporary_password_issued`, `temporary_password_expired`,
+`bootstrap_login_started`, `bootstrap_password_changed`,
+`mfa_enrollment_started`, `mfa_enrollment_failed`,
+`mfa_enrollment_completed`, `recovery_code_used`, `recovery_code_failed`,
+`onboarding_completed`.
+
+Never logged in audit metadata: passwords, TOTP secrets, plaintext
+recovery codes, bootstrap secret, refresh tokens, access tokens.
+
+### Verification
+- New test file `backend/tests/test_session2c_admin_bootstrap.py` —
+  **20/20 pass**. Covers full lifecycle, concurrent recovery-code race,
+  bootstrap-vs-access token mutual rejection, temp-password expiry,
+  client signup NOT forced through workforce onboarding, seeded MFA
+  admins unaffected.
+- Full auth regression across Sessions 2a/2b/2c: **134 pass**, 6 pre-
+  existing failures unrelated to Session 2c (SendGrid live status,
+  RBAC catalog gaps, clamscan not installed in container).
+- Live smoke: Google OAuth still 404, `/api/health` still exposes only
+  `{llm, email, sms}`, first-admin endpoint refuses without secret (401)
+  and refuses correct secret when an admin exists (409).
+
+### Non-goals
+- Argon2id migration → Session 2d (Security Hardening).
+- Risk-based login detection → Session 2d.
+- Recovery-code regeneration UX → Session 2d.
+- Passkeys / WebAuthn → later, after 2d.
+
+_Last updated: 2026-07-30 (Session 2c · Admin Bootstrap)_
+
+
+---
+
+## Marketing OS Phase 4 — Meta Ads + Microsoft Advertising READ-ONLY Providers (Jun 2026)
+
+Branch: `emergent/meta-microsoft-ads-phase4`. Extends the provider-neutral
+Marketing OS with read-only Meta + Microsoft ad adapters alongside Google Ads,
+a unified paid-media overview, and advisory Director integration.
+
+### Backend
+- **Adapters** (read-only, lazy SDK import, env-only creds, no network at
+  construction): `integrations/meta_ads.py`, `integrations/microsoft_ads.py`.
+  `execute_action()` inherits the base contract that raises (writes disabled).
+- **Normalizer**: `integrations/paid_normalize.py` — provider-neutral canonical
+  campaign row; unavailable metrics stay `None` (never fabricated as zero);
+  derived rates (ctr/cpc/cpl/cpa/roas) computed only when inputs exist.
+- **Bootstrap**: `integrations/bootstrap.py` — idempotent, local-only
+  registration of google_ads/meta_ads/microsoft_ads. Registration now happens
+  on demand inside the `/paid/providers` endpoint (NOT at module import) so
+  importing the router never mutates the global registry.
+- **Service**: `services/paid_media.py` — `provider_readiness()` (normalized,
+  no network), `build_paid_media_overview(rows)` (per-provider readiness +
+  aggregated metrics with honest null empty states), `paid_performance_signals()`
+  (emits Director signals ONLY for channels that actually have data).
+- **Router**: `routers/paid_media.py` wired into `routers/core.py`. Endpoints
+  (GET, `require_roles(admin, practitioner)`):
+  - `/api/marketing-os/paid/providers`
+  - `/api/marketing-os/paid/{provider}/readiness`
+  - `/api/marketing-os/paid/performance` (unified cross-channel overview)
+- **Director**: `services/director.py::build_marketing_brief()` gained an
+  optional `paid_media` block echoed under `brief.paid_media`. Disconnected
+  providers surface honestly as informational entries and generate NO
+  performance/budget recommendations. `core.py::/director/brief` now passes
+  `build_paid_media_overview(rows)`.
+
+### Frontend
+- `pages/portal/PaidMediaPanel.jsx` — self-contained read-only "Paid Media
+  Channels" section rendered inside the existing Marketing Command Center
+  (after Search Intelligence). Google/Meta/Microsoft cards show readiness +
+  spend/impressions/clicks/CTR/conversions/CPA/ROAS. Null metrics render as
+  "—" (unknown, never zero); disconnected channels show an honest empty state.
+  Includes a read-only safety banner. No separate dashboard.
+
+### Safety (unchanged)
+external writes disabled · automatic budget changes disabled · automatic
+campaign creation disabled · automatic publishing disabled · human approval
+required. No TikTok/LinkedIn/etc. No campaign/budget/bid/audience editing.
+
+### Tests
+- `tests/test_marketing_paid_media_phase4.py` — 15 unit tests (normalization,
+  bootstrap idempotency, no-network registration, readiness states, honest
+  null metrics, unified overview, Director with real vs disconnected data,
+  read-only enforcement, safety flags). Autouse fixture restores the global
+  registry so exact-equality assertions in other modules stay green.
+- `tests/test_marketing_paid_media_phase4_http.py` — 10 live HTTP tests
+  (MFA-authenticated admin/practitioner/staff) validating all endpoints + the
+  Director brief paid_media block + RBAC. 10/10 pass.
+- Full marketing pytest suite: **194 passed, 1 pre-existing unrelated failure**
+  (`test_marketing_ingestion_api.py::test_http_rejected` — insecure-scheme
+  rejection on the ingestion endpoint; fails in isolation, NOT Phase 4).
+
+### Infra note (non-code)
+- Added `backend/ruff.toml` per-file-ignore for the intentional
+  `from ._common import *` re-export pattern in `routers/auth_impl/*` to clear
+  pre-existing F405 lint errors that were blocking job completion. This is a
+  lint-config-only change — it touches NO auth logic/behavior.
+
+_Last updated: Jun 2026 (Marketing OS Phase 4 · Meta + Microsoft read-only providers)_
+
+---
+
+## Marketing OS Phase 5 — Unified Lead → Appointment → Revenue Attribution (Jun 2026)
+
+Branch: `emergent/lead-appointment-revenue-attribution-phase5` (based on the
+approved Phase 4 branch). Deterministic, explainable, PHI-free first-party
+attribution built ONLY on marketing-safe stores (`marketing_conversion_events`,
+`marketing_daily_metrics`). No clinical/EMR reads, no external writes, no
+migrations.
+
+### Backend
+- **Journey engine** `services/journey.py` (pure/deterministic): `build_journeys`
+  (opaque-subject grouping, chronological touches, first/last touch),
+  `compute_funnel` (lead → intent → request → booked → completed → no_show;
+  UNAVAILABLE stages return `None`, never fabricated zero; rates null on
+  unavailable/zero denominator), `attribute_outcome` (first/last touch by
+  channel/source/campaign), `compute_revenue` (REAL `purchase` events with value
+  only — never appointment estimates/unpaid invoices), `compute_channel_economics`
+  (cost-per-booked, cost-per-completed, ROAS on real revenue only),
+  `build_attribution_overview` (+ safety block). `normalize_channel` maps
+  provider/source → canonical channel deterministically.
+- **Appointment normalization** `services/appointment_normalize.py`: marketing-safe
+  mapping of appointment lifecycle statuses → conversion event types; REQUIRES an
+  opaque `marketing_subject_id`; REJECTS PHI via `assert_non_phi_marketing_payload`;
+  does not read clinical scheduling tables or alter appointment workflow.
+- **Measurement** `services/measurement.py`: added `first_touch_attribution`;
+  extended `ALLOWED_EVENT_TYPES` with appointment lifecycle + `purchase`.
+- **Router** `routers/attribution.py` wired into `core.py`. Endpoints (GET,
+  `require_roles(admin, practitioner)`, optional `?model=first_touch|last_touch`,
+  invalid model falls back to last_touch):
+  `/api/marketing-os/attribution/{overview,funnel,channels,campaigns,revenue,journeys}`.
+  Spend query uses `SELECT provider, spend` (marketing_daily_metrics has no
+  `channel` column — critical fix from live testing).
+- **Director** `services/director.py`: `recommend_from_outcomes()` produces advisory
+  recs (high spend/no bookings, strong leads/weak conversion, poor show rate, weak
+  request→booking, appointments w/o revenue, high-ROAS scaling). `build_marketing_brief`
+  accepts `funnel`/`channel_economics`/`revenue` and returns `journey_outcomes`.
+  `core.py::/director/brief` loads conversion events and feeds them in. All recs
+  stay advisory_only + requires_human_approval + external_write=False.
+
+### Frontend
+- `pages/portal/AttributionFunnelPanel.jsx` — one unified "Attribution & Funnel"
+  section inside the existing Marketing Command Center (after Paid Media). Shows
+  funnel + rates, source/channel performance table (spend/booked/completed/CPBooked/
+  CPCompleted/revenue/ROAS), attributed revenue, booked-by-campaign, and a
+  first/last-touch model toggle. Null → "—" (never zero); honest empty states;
+  read-only safety banner. No separate dashboard.
+
+### Safety / privacy (verified)
+external writes disabled · auto budget/campaign/publish disabled · human approval
+required · PHI-free (opaque `marketing_subject_id` only; PHI rejected at
+normalization). Deterministic attribution only (no probabilistic/AI). No TikTok,
+no campaign/outreach/appointment mutation.
+
+### Tests / results
+- `tests/test_marketing_attribution_journey_phase5.py` — 25 unit tests (first/last
+  touch, appointment attribution + PHI rejection, funnel determinism + null stages,
+  opaque linkage, purchase-only revenue, cost-per-booked/completed, ROAS on real
+  revenue only, source/campaign/channel rollups, advisory Director, safety, no
+  external-write paths).
+- Live HTTP (testing agent): `test_marketing_attribution_phase5_http.py` (33) +
+  `test_marketing_attribution_phase5_http_seeded.py` (14) — all pass. Found+fixed
+  1 CRITICAL live 500 (non-existent `channel` column).
+- Full marketing pytest suite: **266 passed, 1 pre-existing unrelated failure**
+  (`test_marketing_ingestion_api.py::test_http_rejected`).
+
+### Known limitations
+- Funnel rates can exceed 100% if seed data is out of stage order (more booked than
+  requests) — math is honest; not clamped to avoid hiding data-quality issues.
+- `_load_events()` loads the full conversion table per request and rebuilds journeys
+  several times; fine at current scale, add date-range/limit params before large
+  volumes.
+- No migration added (event types are free-text; new stages ride existing schema).
+
+_Last updated: Jun 2026 (Marketing OS Phase 5 · Lead → Appointment → Revenue attribution)_
+
+---
+
+## Marketing OS Phase 6 — Lead CRM + Appointment Setter Workspace (Jun 2026)
+
+Branch: `emergent/lead-crm-setter-workspace-phase6` (based on approved Phase 5).
+Operational lead-management layer to move a marketing lead toward an appointment.
+Privacy-minimized: opaque `marketing_subject_id` only, NO PHI, NO automatic
+outreach, NO external provider writes. Deterministic pipeline (never AI-inferred).
+
+### Database (migration b4c5d6e7f8a9, applied)
+- `marketing_leads` (lead record: attribution, pipeline stage, opportunity/priority,
+  non-clinical qualification, owner, next action, appointment_status, speed-to-lead
+  timestamps, metadata) — unique on `marketing_subject_id`.
+- `marketing_lead_tasks` (follow-up tasks: type/owner/due/status/notes).
+- `marketing_lead_assignments` (owner assignment history).
+- `marketing_lead_activity` (marketing-safe timeline). Models in
+  `postgres_models/marketing_leads.py`; registered in `postgres_models/__init__.py`.
+
+### Backend
+- **Pipeline service** `services/lead_pipeline.py` (pure/deterministic):
+  `LEAD_STAGES` (new→…→won/lost), `ALLOWED_TRANSITIONS` + `validate_transition`
+  (explicit rules, terminal-stage lock), `priority_from_score`,
+  `lead_fields_from_opportunity` (PHI rejection), `speed_to_lead_metrics`
+  (avg/median + %within 5/15/60min, null when no timestamps),
+  `setter_metrics` (contact/qualification/booking/show/won rates + by-owner rollups;
+  distinguishes unavailable null from real zero; overdue via open past-due tasks /
+  next_action_at).
+- **Router** `routers/leads.py` (wired in `core.py`; require_roles admin/practitioner):
+  GET `/leads` (filters: status/view/owner/source/campaign/priority; 9 views;
+  overdue_task_count), POST `/leads` (PHI-forbidden via `extra="forbid"` → 422;
+  duplicate subject → 409), GET `/leads/{id}`, PATCH `/leads/{id}` (qualification),
+  PATCH `/leads/{id}/status` (deterministic transition, 409 on invalid; sets
+  first_contact_at/first_response_seconds/appointment_status/timestamps),
+  PATCH `/leads/{id}/owner` (validates owner in auth_users → 400; assignment history +
+  activity), GET `/leads/{id}/timeline`, GET/POST/PATCH `/leads/tasks`,
+  POST `/leads/sync` (deterministic lead creation from conversion opportunities,
+  idempotent by subject), GET `/leads/metrics`.
+- **Director** `services/director.py`: `recommend_lead_operations()` (advisory:
+  uncontacted backlog, overdue backlog, slow speed-to-lead, low booking rate,
+  high no-show). `build_marketing_brief()` accepts `lead_operations` and returns it.
+  `core.py::/director/brief` feeds `setter_metrics(...)`. All recs advisory-only,
+  human-approval-required, no execution.
+
+### Frontend
+- `pages/portal/LeadOperationsPanel.jsx` — one "Lead Operations" section inside the
+  existing Marketing Command Center (after Attribution). Setter metric tiles, 10
+  view tabs (New/Needs Attention/Follow Up Today/Appt Requested/Booked/No Show/
+  Nurture/Won/Lost/All), prioritized lead queue (label/source/campaign/age/score/
+  priority dot/status/appt/owner/overdue indicator), and a lead detail drawer
+  (Sheet) with attribution, stage transition, owner reassign, qualification, tasks
+  (create/complete), and activity timeline. Null → "—"; honest empty states;
+  read-only safety banner. No separate app.
+
+### Safety / privacy (verified)
+external provider writes disabled · auto budget/campaign/publish disabled · human
+approval required · PHI-free (opaque subject only; PHI rejected at API + service).
+Internal staff mutations only (stage/owner/tasks) — never clinical data, never
+external provider writes, no automatic outreach. No TikTok, no email/SMS/AI-calling,
+no automatic booking/routing.
+
+### Tests / results
+- `tests/test_marketing_lead_crm_phase6.py` — 23 unit tests (transitions/validation,
+  lead-from-opportunity + PHI rejection, speed-to-lead math, setter metrics null-vs-
+  zero, overdue calc, Director advisory, safety).
+- `tests/test_marketing_lead_crm_phase6_http.py` — 49 live MFA-authenticated HTTP
+  tests (CRUD, deterministic transitions, PHI 422, duplicate 409, owner history,
+  tasks, metrics, RBAC). Testing agent found & fixed 3 defects: CRITICAL `/leads/sync`
+  transaction error, HIGH PHI-not-422 (added `extra="forbid"`), MINOR owner FK 500
+  (owner existence check). All pass after fix.
+- Full marketing suite: **338 passed, 1 skipped, 1 pre-existing unrelated failure**
+  (`test_marketing_ingestion_api.py::test_http_rejected`).
+
+### Known limitations
+- Owner reassignment UI uses a staff-user-id input (no staff directory picker yet).
+- `/director/brief` and `/leads/metrics` load full lead/task tables per request;
+  fine at current scale, add pagination/date filters before high volume.
+- Speed-to-lead/appointment timestamps are populated by staff stage changes; leads
+  synced from events start without contact timestamps (metrics stay null until acted).
+
+_Last updated: Jun 2026 (Marketing OS Phase 6 · Lead CRM + Appointment Setter)_

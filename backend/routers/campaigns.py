@@ -22,15 +22,22 @@ from typing import List, Optional
 
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from pymongo import ReturnDocument
+# Phase 3.7: no pymongo — the adapter interprets any truthy
+# return_document as ReturnDocument.AFTER for round-trip compatibility.
+class ReturnDocument:  # noqa: N801 (mirror pymongo's public constant name)
+    AFTER = True
+    BEFORE = False
 
 from audit import get_client_ip, log_audit
 from deps import _strip_id, api, db, require_roles
 from models import new_id
-from notifiers import email_status, send_email, send_sms, sms_status
+from notifiers import email_status, send_campaign_email, send_email
+from pg_shims import list_clients_filtered_by_ids
+from postgres_db import AsyncSessionLocal
+from repositories import scheduling as sched_repo
 
 
-CHANNELS = ("email", "sms")
+CHANNELS = ("email",)
 FILTER_TYPES = (
     "all_marketing", "inactive", "upcoming_appointments",
     "due_for_followup", "membership", "treatment_group",
@@ -86,40 +93,40 @@ async def _resolve_recipients(filter_type: str, filter_params: dict) -> List[dic
             "allowed": list(FILTER_TYPES),
         })
     now = datetime.now(timezone.utc)
-    q: dict = {}
+    include_ids: Optional[List[str]] = None
+    exclude_ids: Optional[List[str]] = None
     if filter_type == "all_marketing":
         # Everyone (still bound by opt-in exclusion below).
-        q = {}
+        pass
     elif filter_type == "inactive":
         cutoff_days = int(filter_params.get("inactive_days", 90))
         cutoff = now - timedelta(days=cutoff_days)
-        active_client_ids = set()
-        async for a in db.appointments.find({"start": {"$gte": cutoff}},
-                                             {"client_id": 1}):
-            if a.get("client_id"):
-                active_client_ids.add(a["client_id"])
+        async with AsyncSessionLocal() as pg:
+            recent = await sched_repo.list_appointments(pg, start_gte=cutoff, limit=5000)
+        active_client_ids = {a["client_id"] for a in recent if a.get("client_id")}
         if active_client_ids:
-            q["id"] = {"$nin": list(active_client_ids)}
+            exclude_ids = list(active_client_ids)
     elif filter_type == "upcoming_appointments":
         horizon_days = int(filter_params.get("days_ahead", 14))
         window_end = now + timedelta(days=horizon_days)
-        client_ids = set()
-        async for a in db.appointments.find(
-            {"start": {"$gte": now, "$lte": window_end}}, {"client_id": 1}
-        ):
-            if a.get("client_id"):
-                client_ids.add(a["client_id"])
+        async with AsyncSessionLocal() as pg:
+            upcoming = await sched_repo.list_appointments(
+                pg, start_gte=now, start_lte=window_end, limit=5000,
+            )
+        client_ids = {a["client_id"] for a in upcoming if a.get("client_id")}
         if not client_ids:
             return []
-        q["id"] = {"$in": list(client_ids)}
+        include_ids = list(client_ids)
     elif filter_type == "due_for_followup":
         # Clients whose last appointment ended before `since_days` and have no
         # future appointment scheduled.
         since_days = int(filter_params.get("since_days", 60))
         cutoff = now - timedelta(days=since_days)
+        async with AsyncSessionLocal() as pg:
+            all_appts = await sched_repo.list_appointments(pg, limit=10000)
         stale_ids = set()
         future_ids = set()
-        async for a in db.appointments.find({}, {"client_id": 1, "start": 1}):
+        for a in all_appts:
             cid = a.get("client_id")
             if not cid:
                 continue
@@ -132,7 +139,7 @@ async def _resolve_recipients(filter_type: str, filter_params: dict) -> List[dic
         eligible = stale_ids - future_ids
         if not eligible:
             return []
-        q["id"] = {"$in": list(eligible)}
+        include_ids = list(eligible)
     elif filter_type == "membership":
         # Reuse existing "memberships" collection if present, else best-effort
         member_ids = set()
@@ -142,7 +149,7 @@ async def _resolve_recipients(filter_type: str, filter_params: dict) -> List[dic
                 member_ids.add(m["client_id"])
         if not member_ids:
             return []
-        q["id"] = {"$in": list(member_ids)}
+        include_ids = list(member_ids)
     elif filter_type == "treatment_group":
         # Filter by an active treatment protocol / plan title supplied in params.
         title = (filter_params.get("group_title") or "").strip()
@@ -157,21 +164,20 @@ async def _resolve_recipients(filter_type: str, filter_params: dict) -> List[dic
                 client_ids.add(p["client_id"])
         if not client_ids:
             return []
-        q["id"] = {"$in": list(client_ids)}
+        include_ids = list(client_ids)
 
-    return await db.clients.find(q).to_list(5000)
+    return await list_clients_filtered_by_ids(
+        include_ids=include_ids, exclude_ids=exclude_ids, limit=5000,
+    )
 
 
 def _classify(client: dict, channel: str) -> tuple[str, str]:
     """Return (status, reason) — status is 'eligible' | 'skipped'."""
     if client.get("consent_marketing") is False:
         return "skipped", "marketing_opt_out"
-    if channel == "email":
-        if not _is_valid_email(client.get("email")):
-            return "skipped", "invalid_email"
-    elif channel == "sms":
-        if not _is_valid_phone(client.get("phone")):
-            return "skipped", "invalid_phone"
+    # Email is the only supported channel post-2026-08 (SMS retired).
+    if not _is_valid_email(client.get("email")):
+        return "skipped", "invalid_email"
     return "eligible", ""
 
 
@@ -263,38 +269,28 @@ async def _run_campaign(campaign: dict, *, worker_id: Optional[str] = None) -> d
 
     for c in eligible:
         try:
-            if campaign["channel"] == "email":
-                # Compliance footer + per-client unsubscribe link. The campaign
-                # `kind` classifies whether the unsubscribe link is offered
-                # (marketing) or hidden (transactional). Defaults to marketing.
-                from routers.campaign_extras import unsub_link_for, compliance_footer
-                kind = campaign.get("kind") or "marketing"
-                unsub = unsub_link_for(c["id"]) if kind == "marketing" else None
-                # `portal.login_link` merge value: absolute /patient-login URL.
-                origin = (os.environ.get("FRONTEND_ORIGIN") or "").rstrip("/")
-                ctx_extra = {"portal": {"login_link": f"{origin}/patient-login"}}
-                merged_ctx = {**_build_context(c), **ctx_extra}
-                html = _render_html(campaign["message"], c)
-                html = _fill_variables(html, ctx_extra)  # substitute {{portal.login_link}}
-                html += compliance_footer(unsub, kind == "marketing")
-                status = await send_email(
-                    db, c["email"],
-                    _fill_variables(campaign.get("subject") or campaign["title"], merged_ctx),
-                    html,
-                    plain_text=_render_plain(campaign["message"], c),
-                    action="campaign.email",
-                    payload_metadata={"campaign_id": campaign["id"], "kind": kind},
-                )
-            else:
-                status = await send_sms(
-                    db, c.get("phone", ""),
-                    _render_plain(campaign["message"], c),
-                    action="campaign.sms",
-                    payload_metadata={"campaign_id": campaign["id"]},
-                )
+            # Email is the only supported channel post-2026-08. Campaigns
+            # with any other channel are rejected at create-time; this
+            # path is safe to treat as email-only.
+            from routers.campaign_extras import unsub_link_for, compliance_footer
+            kind = campaign.get("kind") or "marketing"
+            unsub = unsub_link_for(c["id"]) if kind == "marketing" else None
+            origin = (os.environ.get("FRONTEND_ORIGIN") or "").rstrip("/")
+            ctx_extra = {"portal": {"login_link": f"{origin}/patient-login"}}
+            merged_ctx = {**_build_context(c), **ctx_extra}
+            html = _render_html(campaign["message"], c)
+            html = _fill_variables(html, ctx_extra)  # substitute {{portal.login_link}}
+            html += compliance_footer(unsub, kind == "marketing")
+            status = await send_campaign_email(
+                db, c["email"],
+                subject=_fill_variables(campaign.get("subject") or campaign["title"], merged_ctx),
+                safe_html=html,
+                plain_text=_render_plain(campaign["message"], c),
+                campaign_id=campaign["id"],
+            )
             delivery_log.append({
                 "client_id": c.get("id"), "status": status, "ts": started_at,
-                "channel": campaign["channel"],
+                "channel": "email",
             })
             if status in ("sent", "sent_stub"):
                 success += 1
@@ -752,14 +748,8 @@ async def delivery_config(user=Depends(require_roles("admin", "practitioner", "s
             "sendgrid_from_email": bool(os.environ.get("SENDGRID_FROM_EMAIL")),
             "mode": email_status(),  # "live" | "sent_stub"
         },
-        "sms": {
-            "twilio_account_sid": bool(os.environ.get("TWILIO_ACCOUNT_SID")),
-            "twilio_auth_token": bool(os.environ.get("TWILIO_AUTH_TOKEN")),
-            "twilio_from_number": bool(os.environ.get("TWILIO_FROM_NUMBER")),
-            "mode": sms_status(),
-        },
         "hipaa_mode": bool(os.environ.get("HIPAA_MODE")),
-        "simulated": email_status() != "live" or sms_status() != "live",
+        "simulated": email_status() != "live",
     }
 
 

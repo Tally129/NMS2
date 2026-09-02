@@ -14,7 +14,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
-from bson import ObjectId
 from fastapi import (
     Depends, File, HTTPException, Query, Request, UploadFile,
     WebSocket, WebSocketDisconnect,
@@ -23,11 +22,28 @@ from fastapi.responses import StreamingResponse
 
 from audit import get_client_ip, log_audit
 from deps import (
-    _resolve_self_client, _strip_id, api, db, fs_bucket,
+    _resolve_self_client, _strip_id, api, db,
     get_current_user, logger, require_roles,
 )
+from storage import NotFound as StorageNotFound, get_storage
 from models import TelehealthConsentIn, new_id
 from auth_utils import decode_token
+from pg_shims import find_client, find_intake_by_client, find_user_by_id
+from postgres_db import AsyncSessionLocal
+from repositories import scheduling as sched_repo
+
+
+async def _get_appt(appt_id: str):
+    """Wrapper: fetch an appointment as a dict from PostgreSQL."""
+    async with AsyncSessionLocal() as pg:
+        return await sched_repo.get_appointment(pg, appt_id)
+
+
+async def _update_appt(appt_id: str, fields: dict) -> int:
+    """Wrapper: update an appointment row. Returns rowcount."""
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            return await sched_repo.update_appointment(pg, appt_id, fields)
 
 
 # ---------- Waiting room helpers ----------
@@ -50,7 +66,7 @@ def _serialize_waiting_room(wr: Optional[dict]) -> dict:
 
 
 async def _appointment_or_404(appt_id: str) -> dict:
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     return a
@@ -135,7 +151,7 @@ async def create_telehealth_room(
     request: Request,
     user=Depends(require_roles("practitioner", "admin", "staff")),
 ):
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     if a.get("telehealth", {}).get("room_url"):
@@ -149,7 +165,7 @@ async def create_telehealth_room(
         "created_at": datetime.now(timezone.utc),
         "_stubbed": info.get("_stubbed", False),
     }
-    await db.appointments.update_one({"id": appt_id}, {"$set": {"telehealth": telehealth, "visit_mode": "telehealth"}})
+    await _update_appt(appt_id, {"telehealth": telehealth, "visit_mode": "telehealth"})
     await db.integration_log.insert_one({
         "id": new_id(), "service": "daily", "action": "room.create",
         "payload": {"appointment_id": appt_id, "room_name": room_name},
@@ -163,7 +179,7 @@ async def create_telehealth_room(
 
 @api.get("/appointments/{appt_id}/telehealth/token")
 async def get_telehealth_token(appt_id: str, request: Request, user=Depends(get_current_user)):
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     # Access gate
@@ -188,7 +204,7 @@ async def get_telehealth_token(appt_id: str, request: Request, user=Depends(get_
             "created_at": datetime.now(timezone.utc),
             "_stubbed": info.get("_stubbed", False),
         }
-        await db.appointments.update_one({"id": appt_id}, {"$set": {"telehealth": telehealth}})
+        await _update_appt(appt_id, {"telehealth": telehealth})
 
     is_owner = user["role"] in ("practitioner", "admin", "staff")
     tok = await daily_meeting_token(telehealth["room_name"], is_owner=is_owner, user_name=user.get("full_name") or user["email"])
@@ -206,18 +222,18 @@ async def get_telehealth_token(appt_id: str, request: Request, user=Depends(get_
 
 @api.post("/appointments/{appt_id}/telehealth/consent")
 async def telehealth_consent(appt_id: str, payload: TelehealthConsentIn, request: Request, user=Depends(get_current_user)):
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     if user["role"] == "client":
         self_client = await _resolve_self_client(user)
         if not self_client or a["client_id"] != self_client["id"]:
             raise HTTPException(status_code=403, detail="Forbidden")
-    await db.appointments.update_one({"id": appt_id}, {"$set": {
+    await _update_appt(appt_id, {
         "consent_telehealth": True,
         "consent_telehealth_at": datetime.now(timezone.utc),
         "consent_telehealth_signature": payload.signature,
-    }})
+    })
     await log_audit(db, user["id"], user["email"], "telehealth.consent",
                     resource_type="appointment", resource_id=appt_id,
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
@@ -267,7 +283,7 @@ async def request_join(appt_id: str, request: Request, user=Depends(get_current_
         "ended_at": None,
         "ended_by": None,
     }
-    await db.appointments.update_one({"id": appt_id}, {"$set": {"waiting_room": wr}})
+    await _update_appt(appt_id, {"waiting_room": wr})
     await log_audit(db, user["id"], user["email"], "telehealth.waiting_room_request",
                     resource_type="appointment", resource_id=appt_id,
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
@@ -288,7 +304,7 @@ async def admit_visitor(appt_id: str, request: Request,
         })
     now = datetime.now(timezone.utc)
     new_wr = {**wr, "state": "admitted", "admitted_at": now, "admitted_by": user["id"]}
-    await db.appointments.update_one({"id": appt_id}, {"$set": {"waiting_room": new_wr}})
+    await _update_appt(appt_id, {"waiting_room": new_wr})
     await log_audit(db, user["id"], user["email"], "telehealth.waiting_room_admit",
                     resource_type="appointment", resource_id=appt_id,
                     severity="info",
@@ -319,7 +335,7 @@ async def decline_visitor(appt_id: str, payload: dict, request: Request,
     now = datetime.now(timezone.utc)
     new_wr = {**wr, "state": "declined", "declined_at": now,
               "decline_reason": reason, "declined_by": user["id"]}
-    await db.appointments.update_one({"id": appt_id}, {"$set": {"waiting_room": new_wr}})
+    await _update_appt(appt_id, {"waiting_room": new_wr})
     await log_audit(db, user["id"], user["email"], "telehealth.waiting_room_decline",
                     resource_type="appointment", resource_id=appt_id,
                     severity="high", outcome="success",
@@ -337,7 +353,7 @@ async def end_visit(appt_id: str, request: Request,
     wr = a.get("waiting_room") or {}
     now = datetime.now(timezone.utc)
     new_wr = {**wr, "state": "ended", "ended_at": now, "ended_by": user["id"]}
-    await db.appointments.update_one({"id": appt_id}, {"$set": {"waiting_room": new_wr}})
+    await _update_appt(appt_id, {"waiting_room": new_wr})
     await log_audit(db, user["id"], user["email"], "telehealth.waiting_room_end",
                     resource_type="appointment", resource_id=appt_id,
                     metadata={"client_id": a.get("client_id")},
@@ -362,12 +378,13 @@ async def waiting_room_status(appt_id: str, user=Depends(get_current_user)):
 @api.get("/telehealth/waiting-room/queue")
 async def waiting_room_queue(user=Depends(require_roles("practitioner", "admin", "staff", "medical_assistant"))):
     """Provider-facing queue: appointments with a client in the waiting room."""
-    rows = await db.appointments.find(
-        {"waiting_room.state": "requested"}
-    ).sort("waiting_room.request_at", 1).to_list(200)
+    async with AsyncSessionLocal() as pg:
+        rows = await sched_repo.list_appointments_with_waiting_state(
+            pg, state="requested", limit=200,
+        )
     out = []
     for a in rows:
-        client = await db.clients.find_one({"id": a.get("client_id")}) or {}
+        client = await find_client(client_id=a.get("client_id")) or {}
         out.append({
             "appointment_id": a.get("id"),
             "client_id": a.get("client_id"),
@@ -396,11 +413,11 @@ async def ws_visit(websocket: WebSocket, appt_id: str,
         if not t:
             await websocket.close(code=4401)
             return
-        u = await db.users.find_one({"id": t["user_id"]})
+        u = await find_user_by_id(t["user_id"])
     elif token:
         try:
             payload = decode_token(token)
-            u = await db.users.find_one({"id": payload.get("sub")})
+            u = await find_user_by_id(payload.get("sub"))
         except Exception:
             await websocket.close(code=4401)
             return
@@ -408,7 +425,7 @@ async def ws_visit(websocket: WebSocket, appt_id: str,
         await websocket.close(code=4401)
         return
 
-    appt = await db.appointments.find_one({"id": appt_id})
+    appt = await _get_appt(appt_id)
     if not appt:
         await websocket.close(code=4404)
         return
@@ -457,7 +474,7 @@ async def ws_visit(websocket: WebSocket, appt_id: str,
             t = data.get("type")
             # WebRTC signaling is BLOCKED until the provider admits the client.
             if t in ("webrtc-offer", "webrtc-answer", "ice-candidate", "screen-share"):
-                fresh = await db.appointments.find_one({"id": appt_id})
+                fresh = await _get_appt(appt_id)
                 wr_state = ((fresh or {}).get("waiting_room") or {}).get("state")
                 if wr_state != "admitted":
                     try:
@@ -484,12 +501,14 @@ async def ws_visit(websocket: WebSocket, appt_id: str,
                         pass
                 if t == "chat":
                     # persist chat
-                    await db.visit_chat.insert_one({
-                        "id": new_id(), "appointment_id": appt_id,
-                        "from_user": u["id"], "from_role": role,
-                        "body": data.get("body", "")[:2000],
-                        "ts": datetime.now(timezone.utc),
-                    })
+                    from repositories import clinical_and_messaging as cm_repo
+                    async with AsyncSessionLocal() as pg:
+                        async with pg.begin():
+                            await cm_repo.append_visit_chat(pg, {
+                                "id": new_id(), "appointment_id": appt_id,
+                                "sender_id": u["id"], "sender_role": role,
+                                "body": data.get("body", "")[:2000],
+                            })
             elif t == "ping":
                 await websocket.send_json({"type": "pong"})
     except WebSocketDisconnect:
@@ -515,15 +534,17 @@ async def ws_visit(websocket: WebSocket, appt_id: str,
 @api.get("/visits/{appt_id}/chat")
 async def visit_chat_history(appt_id: str, user=Depends(get_current_user)):
     """Recent chat history for a visit (self-hosted)."""
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     if user["role"] == "client":
         sc = await _resolve_self_client(user)
         if not sc or a.get("client_id") != sc["id"]:
             raise HTTPException(status_code=403, detail="Forbidden")
-    msgs = await db.visit_chat.find({"appointment_id": appt_id}).sort("ts", 1).to_list(500)
-    return [_strip_id(m) for m in msgs]
+    from repositories import clinical_and_messaging as cm_repo
+    async with AsyncSessionLocal() as pg:
+        msgs = await cm_repo.list_visit_chat(pg, appt_id, limit=500)
+    return msgs
 
 
 # ---------- Visit recording upload (chunked WebM to GridFS) ----------
@@ -534,20 +555,26 @@ async def upload_visit_recording(
     file: UploadFile = File(...),
     user=Depends(require_roles("practitioner", "admin", "staff")),
 ):
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     contents = await file.read()
-    file_id = await fs_bucket.upload_from_stream(
-        f"visit-{appt_id}-{int(datetime.now(timezone.utc).timestamp())}.webm",
-        contents,
-        metadata={"appointment_id": appt_id, "uploader_id": user["id"], "kind": "visit_recording"},
+    fid = new_id()
+    storage_key = f"visits/{appt_id}/{fid}.webm"
+    obj_meta = await get_storage().put_bytes(
+        storage_key, contents,
+        content_type="video/webm",
+        metadata={"appointment_id": appt_id, "uploader_id": user["id"],
+                   "kind": "visit_recording"},
     )
-    fid = str(file_id)
-    await db.appointments.update_one({"id": appt_id}, {"$push": {"recordings": {
-        "file_id": fid, "size": len(contents), "uploaded_by": user["id"],
-        "ts": datetime.now(timezone.utc),
-    }}})
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.push_appointment_recording(pg, appt_id, {
+                "file_id": fid, "storage_key": storage_key,
+                "storage_backend": obj_meta.backend,
+                "size": len(contents), "uploaded_by": user["id"],
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
     await log_audit(db, user["id"], user["email"], "telehealth.recording_upload",
                     resource_type="appointment", resource_id=appt_id,
                     metadata={"size": len(contents)},
@@ -558,7 +585,7 @@ async def upload_visit_recording(
 @api.get("/visits/{appt_id}/recordings")
 async def list_visit_recordings(appt_id: str, user=Depends(get_current_user)):
     """List recordings attached to an appointment."""
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     if user["role"] == "client":
@@ -581,18 +608,14 @@ async def list_visit_recordings(appt_id: str, user=Depends(get_current_user)):
 async def download_visit_recording(appt_id: str, file_id: str, request: Request,
                                    user=Depends(get_current_user)):
     """Stream a recorded visit WebM from GridFS. RBAC: client may only access their own."""
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     if user["role"] == "client":
         sc = await _resolve_self_client(user)
         if not sc or a.get("client_id") != sc["id"]:
             raise HTTPException(status_code=403, detail="Forbidden")
-    # Confirm file is bound to this appointment via metadata
-    try:
-        oid = ObjectId(file_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid file id")
+    # Confirm file is bound to this appointment via recording metadata
     found = None
     for r in (a.get("recordings") or []):
         if r.get("file_id") == file_id:
@@ -600,23 +623,21 @@ async def download_visit_recording(appt_id: str, file_id: str, request: Request,
             break
     if not found:
         raise HTTPException(status_code=404, detail="Recording not found")
+    storage_key = found.get("storage_key")
+    if not storage_key:
+        raise HTTPException(status_code=410, detail={
+            "code": "storage_not_migrated",
+            "message": "This recording lives in legacy GridFS. Run the S3 backfill script.",
+        })
     try:
-        stream = await fs_bucket.open_download_stream(oid)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Recording not found in GridFS")
+        stream_iter = get_storage().stream(storage_key)
+    except StorageNotFound:
+        raise HTTPException(status_code=404, detail="Recording not found in storage")
     await log_audit(db, user["id"], user["email"], "telehealth.recording_download",
                     resource_type="appointment", resource_id=appt_id,
                     metadata={"file_id": file_id},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-
-    async def _iter():
-        while True:
-            chunk = await stream.readchunk()
-            if not chunk:
-                break
-            yield chunk
-
-    return StreamingResponse(_iter(), media_type="video/webm",
+    return StreamingResponse(stream_iter, media_type="video/webm",
                              headers={"Content-Disposition": f'attachment; filename="visit-{appt_id}.webm"'})
 
 
@@ -626,7 +647,7 @@ import secrets as _secrets
 @api.post("/visits/{appt_id}/ws-ticket")
 async def issue_ws_ticket(appt_id: str, user=Depends(get_current_user)):
     """Issue a one-shot ticket (60s TTL) so the WebSocket handshake never carries a JWT."""
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
     if user["role"] == "client":
@@ -667,43 +688,48 @@ async def webrtc_config(user=Depends(get_current_user)):
 @api.put("/visits/{appt_id}/live-soap")
 async def save_live_soap(appt_id: str, payload: dict,
                           user=Depends(require_roles("practitioner", "admin"))):
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
-    update = {
-        "appointment_id": appt_id,
-        "client_id": a.get("client_id"),
-        "provider_id": user["id"],
+    from repositories import clinical_and_messaging as cm_repo
+    body = {
         "subjective": payload.get("subjective", ""),
         "objective": payload.get("objective", ""),
         "assessment": payload.get("assessment", ""),
         "plan": payload.get("plan", ""),
-        "updated_at": datetime.now(timezone.utc),
     }
-    await db.live_soap_drafts.update_one(
-        {"appointment_id": appt_id, "provider_id": user["id"]},
-        {"$set": update, "$setOnInsert": {"id": new_id(), "created_at": datetime.now(timezone.utc)}},
-        upsert=True,
-    )
-    return {"saved_at": update["updated_at"].isoformat()}
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            saved = await cm_repo.upsert_live_soap(
+                pg, id=new_id(), appointment_id=appt_id,
+                author_id=user["id"], body=body,
+            )
+    return {"saved_at": (saved.get("updated_at") or datetime.now(timezone.utc)).isoformat()}
 
 
 @api.get("/visits/{appt_id}/live-soap")
 async def get_live_soap(appt_id: str, user=Depends(require_roles("practitioner", "admin"))):
-    d = await db.live_soap_drafts.find_one({"appointment_id": appt_id, "provider_id": user["id"]})
-    return _strip_id(d) if d else {"subjective": "", "objective": "", "assessment": "", "plan": ""}
+    from repositories import clinical_and_messaging as cm_repo
+    async with AsyncSessionLocal() as pg:
+        d = await cm_repo.get_live_soap(pg, appt_id)
+    if not d:
+        return {"subjective": "", "objective": "", "assessment": "", "plan": ""}
+    b = d.get("body") or {}
+    return {**b, "updated_at": d.get("updated_at")}
 
 
 # ---------- Auto-draft visit summary from chat transcript ----------
 @api.post("/visits/{appt_id}/auto-draft")
 async def auto_draft_summary(appt_id: str, user=Depends(require_roles("practitioner", "admin"))):
     """Stitch chat transcript into a SOAP-shaped draft (rule-based, no LLM)."""
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
-    msgs = await db.visit_chat.find({"appointment_id": appt_id}).sort("ts", 1).to_list(500)
-    client_lines = [m.get("body", "") for m in msgs if m.get("from_role") == "client"]
-    provider_lines = [m.get("body", "") for m in msgs if m.get("from_role") == "provider"]
+    from repositories import clinical_and_messaging as cm_repo
+    async with AsyncSessionLocal() as pg:
+        msgs = await cm_repo.list_visit_chat(pg, appt_id, limit=500)
+    client_lines = [m.get("body", "") for m in msgs if m.get("sender_role") == "client"]
+    provider_lines = [m.get("body", "") for m in msgs if m.get("sender_role") == "provider"]
     subjective = " ".join(client_lines)[:2000]
     objective = "Telehealth visit · video and audio established · provider observed client throughout the visit."
     assessment = " ".join(provider_lines[: max(1, len(provider_lines) // 2)])[:1500]
@@ -722,19 +748,20 @@ async def auto_draft_summary(appt_id: str, user=Depends(require_roles("practitio
 @api.post("/visits/{appt_id}/llm-soap")
 async def llm_soap_draft(appt_id: str, user=Depends(require_roles("practitioner", "admin"))):
     """Use Claude Sonnet 4.5 to draft a SOAP note from intake + last note + chat."""
-    a = await db.appointments.find_one({"id": appt_id})
+    a = await _get_appt(appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
-    client = await db.clients.find_one({"id": a.get("client_id")})
+    client = await find_client(client_id=a.get("client_id"))
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
-    intake = await db.intakes.find_one({"client_id": client["id"]}, sort=[("created_at", -1)]) or {}
-    last_note = await db.visit_notes.find_one(
-        {"client_id": client["id"]}, sort=[("created_at", -1)]
-    )
-    msgs = await db.visit_chat.find({"appointment_id": appt_id}).sort("ts", 1).to_list(500)
+    intake = await find_intake_by_client(client["id"]) or {}
+    from repositories import clinical_and_messaging as cm_repo
+    async with AsyncSessionLocal() as pg:
+        notes = await cm_repo.list_notes_for_client(pg, client["id"], limit=1)
+        msgs = await cm_repo.list_visit_chat(pg, appt_id, limit=500)
+    last_note = notes[0] if notes else None
     transcript = "\n".join(
-        f"[{m.get('from_role','?')}] {m.get('body','')}" for m in msgs
+        f"[{m.get('sender_role','?')}] {m.get('body','')}" for m in msgs
     )[:6000]
 
     from llm_client import complete_text, DEFAULT_ANTHROPIC_MODEL, provider

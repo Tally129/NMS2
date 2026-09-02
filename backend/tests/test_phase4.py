@@ -84,17 +84,30 @@ class TestAuthAndAccount:
         assert r.json()["full_name"] == "Tally Ravello"
 
     def test_change_password_and_revert(self, admin_headers):
-        """Change password to a temp value, verify login, then restore original hash via mongo.
+        """Change password to a temp value, verify login, then restore original hash via PostgreSQL.
         Note: ADMIN password 'TEST123' is only 7 chars and cannot be set via API
         (PasswordChange enforces min_length=8). We restore the original bcrypt
-        hash directly so that documented credentials keep working."""
+        hash directly so that documented credentials keep working.
+
+        Phase 3.1b: users live in PostgreSQL — read/write via SQLAlchemy, not Mongo.
+        """
         import os as _os
-        from pymongo import MongoClient
+        from sqlalchemy import create_engine, text
         from auth_utils import hash_password as _hash
+
         new_pwd = "TempSafePass2026Long!"
-        mc = MongoClient(_os.environ.get("MONGO_URL", "mongodb://localhost:27017"))
-        db = mc[_os.environ.get("DB_NAME", "test_database")]
-        original_hash = db.users.find_one({"email": ADMIN["email"]})["password_hash"]
+        pg_url = _os.environ.get("DATABASE_URL", "")
+        # SQLAlchemy 2 + psycopg v3 driver.
+        if pg_url.startswith("postgresql+asyncpg://"):
+            pg_url = pg_url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
+        elif pg_url.startswith("postgresql://"):
+            pg_url = pg_url.replace("postgresql://", "postgresql+psycopg://", 1)
+        engine = create_engine(pg_url, future=True)
+        with engine.begin() as conn:
+            row = conn.execute(text(
+                "SELECT password_hash FROM auth_users WHERE lower(email) = :e"
+            ), {"e": ADMIN["email"].lower()}).first()
+            original_hash = row[0] if row else None
         try:
             r = requests.post(f"{API}/auth/change-password", headers=admin_headers,
                               json={"current_password": ADMIN["password"],
@@ -105,9 +118,11 @@ class TestAuthAndAccount:
             assert r.status_code == 200
         finally:
             # Restore original hash so TEST123 keeps working
-            db.users.update_one({"email": ADMIN["email"]},
-                                {"$set": {"password_hash": original_hash}})
-            mc.close()
+            if original_hash is not None:
+                with engine.begin() as conn:
+                    conn.execute(text(
+                        "UPDATE auth_users SET password_hash = :h WHERE lower(email) = :e"
+                    ), {"h": original_hash, "e": ADMIN["email"].lower()})
         r = requests.post(f"{API}/auth/login", json=ADMIN, timeout=15)
         assert r.status_code == 200, "Failed to restore TEST123 login"
         # Sprint 1: change-password revoked our session-scoped admin token.

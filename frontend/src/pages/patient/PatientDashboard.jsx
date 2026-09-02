@@ -6,6 +6,7 @@ import { useAuth } from "../../lib/auth";
 import { Button } from "../../components/ui/button";
 import { ClipboardList, FileText, FolderOpen, CheckCircle2, AlertCircle } from "lucide-react";
 
+import PatientMfaReminder from "../../components/PatientMfaReminder";
 export default function PatientDashboard() {
   const { user } = useAuth();
   const [stats, setStats] = React.useState(null);
@@ -21,6 +22,7 @@ export default function PatientDashboard() {
         title={`Welcome, ${user?.full_name?.split(" ")[0] || "Friend"}`}
         subtitle="Your holistic care dashboard"
       />
+      <PatientMfaReminder />
 
       {!loading && stats && !stats.intake_completed && (
         <div className="mb-6 rounded-2xl border border-[#c19a4b] bg-[#fbf2d9] p-5 flex items-start gap-3">

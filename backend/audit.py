@@ -1,6 +1,11 @@
 """
-Centralized audit event schema with tamper-evident hash chaining, severity/
-outcome fields, redaction rules, and required-event fail-loud handling.
+Centralized audit event schema with tamper-evident hash chaining.
+
+Session 2b: audit rows moved from MongoDB to PostgreSQL. The `db` argument
+retained for API compatibility (callers pass Motor's `db` handle) is now
+ignored — every write goes through the `repositories.audit` PG layer. Chain
+integrity is guarded by a PostgreSQL transaction-scoped advisory lock so
+concurrent inserts across workers still form a valid chain.
 
 Every audit row includes:
   id            — unique row id (uuid)
@@ -19,13 +24,12 @@ Every audit row includes:
   hash          — SHA-256 of this row (before hash field), enabling chain
                   verification
 
-Required actions (in `REQUIRED_ACTIONS`) MUST land in `audit_logs`. If the
+Required actions (in `REQUIRED_ACTIONS`) MUST land in the audit log. If the
 insert fails, `log_audit` raises — routers relying on it will fail-closed on
 the operation.
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -36,8 +40,6 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger("nms.audit")
 
-# Actions where insert failure MUST propagate (auth, admin, PHI writes,
-# break-glass, security events). Anything else is best-effort.
 REQUIRED_ACTIONS = frozenset({
     "auth.login", "auth.login_fail", "auth.logout", "auth.logout_all",
     "auth.refresh_reuse_detected", "auth.password_change",
@@ -49,15 +51,11 @@ REQUIRED_ACTIONS = frozenset({
     "note.finalize", "note.amend", "file.delete",
 })
 
-# Simple, defensive redaction — never log passwords, tokens, cookies, MFA
-# secrets, or OAuth codes even if a caller accidentally includes them.
 _SENSITIVE_KEYS = re.compile(
     r"(password|token|secret|cookie|otp|totp|code|mfa_secret|refresh|"
     r"access_token|authorization)",
     re.IGNORECASE,
 )
-
-# Extra scrubbing for accidental long opaque strings that look like tokens.
 _OPAQUE_TOKEN = re.compile(r"^[A-Za-z0-9_\-]{24,}$")
 
 
@@ -76,13 +74,9 @@ def _redact(value: Any, key: Optional[str] = None) -> Any:
 
 
 def _stringify(value: Any) -> Any:
-    """Convert types to a canonical string form so write- and read-time
-    serialization produce the same bytes. MongoDB stores millisecond-precision
-    datetimes; force millisecond ISO so both round-trip identically."""
     if isinstance(value, datetime):
         v = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
         v = v.astimezone(timezone.utc)
-        # Truncate to milliseconds to match Mongo storage.
         us = v.microsecond
         ms = (us // 1000) * 1000
         v = v.replace(microsecond=ms)
@@ -91,10 +85,9 @@ def _stringify(value: Any) -> Any:
 
 
 def _canonical(row: Dict[str, Any]) -> str:
-    """Deterministic JSON encoding for hashing."""
     def default(o):
         return _stringify(o)
-    # Also canonicalize any nested datetimes inside metadata.
+
     def walk(obj):
         if isinstance(obj, dict):
             return {k: walk(v) for k, v in obj.items()}
@@ -104,24 +97,8 @@ def _canonical(row: Dict[str, Any]) -> str:
     return json.dumps(walk(row), sort_keys=True, separators=(",", ":"), default=default)
 
 
-# Serialize hash-chain reads/writes so concurrent inserts still form a valid
-# chain. MUST be an asyncio.Lock — using a sync threading.Lock here deadlocks
-# the event loop the moment two coroutines contend, because the second call
-# blocks the thread while the first is awaiting its DB insert.
-_CHAIN_LOCK = asyncio.Lock()
-
-
-async def _prev_hash(db) -> str:
-    # Use `_id` (ObjectId is monotonic within a process) instead of `ts` so
-    # inserts in the same second still chain deterministically.
-    last = await db.audit_logs.find_one({}, sort=[("_id", -1)])
-    if not last:
-        return "GENESIS"
-    return last.get("hash") or "GENESIS"
-
-
 async def log_audit(
-    db,
+    db,  # noqa: ARG001 — kept for signature compat, ignored (Session 2b)
     user_id: Optional[str],
     user_email: Optional[str],
     action: str,
@@ -133,8 +110,14 @@ async def log_audit(
     severity: str = "info",
     outcome: str = "success",
 ):
-    """Write one audit row. Raises `RuntimeError` if `action` is REQUIRED and
-    the insert fails; best-effort otherwise."""
+    """Write one audit row to PostgreSQL. Raises `RuntimeError` when a REQUIRED
+    action fails to persist; best-effort otherwise. The `db` parameter is
+    accepted only for backward compatibility with pre-migration callers."""
+    # Local imports keep audit importable even if PG bootstrap fails at
+    # module-load time (e.g., during Alembic autogenerate).
+    from postgres_db import AsyncSessionLocal
+    from repositories import audit as audit_repo
+
     redacted_meta = _redact(metadata or {})
     now = datetime.now(timezone.utc)
     row: Dict[str, Any] = {
@@ -154,32 +137,29 @@ async def log_audit(
 
     required = action in REQUIRED_ACTIONS
     try:
-        # Async lock keeps the chain deterministic without blocking the loop.
-        async with _CHAIN_LOCK:
-            row["prev_hash"] = await _prev_hash(db)
-            row["hash"] = hashlib.sha256(_canonical(row).encode("utf-8")).hexdigest()
-            await db.audit_logs.insert_one(row)
+        async with AsyncSessionLocal() as pg:
+            async with pg.begin():
+                await audit_repo.acquire_chain_lock(pg)
+                row["prev_hash"] = await audit_repo.prev_hash(pg)
+                row["hash"] = hashlib.sha256(_canonical(row).encode("utf-8")).hexdigest()
+                await audit_repo.insert(pg, row)
+                if row["severity"] in {"high", "critical"}:
+                    try:
+                        await audit_repo.insert_security_event(pg, {
+                            "id": str(uuid.uuid4()), "ts": now, "audit_id": row["id"],
+                            "action": action, "severity": row["severity"],
+                            "outcome": row["outcome"], "user_id": user_id,
+                            "resource_type": resource_type, "resource_id": resource_id,
+                        })
+                    except Exception:
+                        # Alerting is best-effort; must not break the audit path.
+                        pass
     except Exception as e:
-        # Never leak the row content to logs; only shape info.
         logger.error("audit insert failed action=%s required=%s err=%s",
                      action, required, type(e).__name__)
         if required:
             raise RuntimeError(f"required audit event '{action}' failed to persist") from e
         return None
-
-    # Trigger security-event alerts (best-effort). Prevents alerting from
-    # breaking the audit path.
-    if row["severity"] in {"high", "critical"}:
-        try:
-            await db.security_events.insert_one({
-                "id": str(uuid.uuid4()), "ts": now, "audit_id": row["id"],
-                "action": action, "severity": row["severity"],
-                "outcome": row["outcome"], "user_id": user_id,
-                "resource_type": resource_type, "resource_id": resource_id,
-                "handled": False,
-            })
-        except Exception:
-            pass
     return row
 
 
@@ -194,18 +174,20 @@ def get_client_ip(request) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Chain verification (admin diagnostic)                                        #
+# Chain verification (admin diagnostic) — reads from PostgreSQL now.          #
 # --------------------------------------------------------------------------- #
-async def verify_audit_chain(db, limit: int = 5000) -> Dict[str, Any]:
-    """Verify each audit row's self-hash. Tamper-evidence primary property:
-    stored `hash` == sha256(canonical(row minus hash)). Chain linkage via
-    prev_hash is preserved on write; verification here is per-row so historic
-    ordering does not cause false negatives."""
-    rows = await db.audit_logs.find({"hash": {"$exists": True}}).sort("_id", 1).to_list(limit)
+async def verify_audit_chain(db, limit: int = 5000) -> Dict[str, Any]:  # noqa: ARG001
+    """Verify each audit row's self-hash. Same per-row semantics as the Mongo
+    implementation, but reads from PostgreSQL via `repositories.audit`."""
+    from postgres_db import AsyncSessionLocal
+    from repositories import audit as audit_repo
+
+    async with AsyncSessionLocal() as pg:
+        rows = await audit_repo.list_ordered(pg, limit=limit)
     first_break = None
     checked = 0
     for r in rows:
-        row_copy = {k: v for k, v in r.items() if k not in {"_id", "hash"}}
+        row_copy = {k: v for k, v in r.items() if k not in {"seq", "hash"}}
         expected = hashlib.sha256(_canonical(row_copy).encode("utf-8")).hexdigest()
         if r.get("hash") != expected:
             first_break = r.get("id")

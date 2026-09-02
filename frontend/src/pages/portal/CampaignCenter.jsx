@@ -12,7 +12,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "../../components/ui/dialog";
 import {
-  Send, Megaphone, Mail, MessageSquare, Users, Calendar, Loader2,
+  Send, Megaphone, Mail, Users, Calendar, Loader2,
   AlertTriangle, CheckCircle2, Clock,
 } from "lucide-react";
 import { useToast } from "../../hooks/use-toast";
@@ -24,7 +24,7 @@ import {
 } from "../../components/ai";
 
 // Preview merge-field context — realistic placeholder values so template
-// authors can visualize the final email/SMS without touching real patient data.
+// authors can visualize the final email without touching real patient data.
 const PREVIEW_CONTEXT = {
   patient: { first_name: "Alex", last_name: "Rivera", full_name: "Alex Rivera",
              email: "alex.rivera@example.com", phone: "(555) 123-4567" },
@@ -45,7 +45,7 @@ const FILTER_TYPES = [
   { value: "treatment_group", label: "Treatment / protocol group", param: "group_title", paramLabel: "Group title / plan name", defaultValue: "" },
 ];
 
-const channelIcon = (c) => (c === "sms" ? MessageSquare : Mail);
+const channelIcon = () => Mail;
 const statusChip = (s) => ({
   scheduled: "bg-[#fdf3d0] text-[#8a6a3c]",
   sending: "bg-[#e0eaf3] text-[#3a5a7a]",
@@ -188,13 +188,8 @@ export default function CampaignCenter() {
             <div className="font-medium">Simulated delivery — no live messages will be sent.</div>
             <div className="text-xs mt-1">
               Email: {config.email.mode === "live" ? "LIVE (SendGrid)" : "SIMULATED (sent_stub)"}
-              {" · "}
-              SMS: {config.sms.mode === "live" ? "LIVE (Twilio)" : "SIMULATED (sent_stub)"}
               {!config.email.sendgrid_api_key && " · Missing SENDGRID_API_KEY"}
               {!config.email.sendgrid_from_email && " · Missing SENDGRID_FROM_EMAIL"}
-              {!config.sms.twilio_account_sid && " · Missing TWILIO_ACCOUNT_SID"}
-              {!config.sms.twilio_auth_token && " · Missing TWILIO_AUTH_TOKEN"}
-              {!config.sms.twilio_from_number && " · Missing TWILIO_FROM_NUMBER"}
             </div>
           </div>
         </div>
@@ -467,7 +462,6 @@ function NewCampaignDialog({ open, onOpenChange, onSent, initial }) {
                 <SelectTrigger data-testid="campaign-channel"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="email">Email</SelectItem>
-                  <SelectItem value="sms">SMS</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -640,7 +634,6 @@ const AI_CONTENT_TYPES = [
   { value: "social_series", label: "Social series" },
   { value: "email", label: "Email" },
   { value: "email_sequence", label: "Email sequence" },
-  { value: "sms", label: "SMS" },
   { value: "blog_outline", label: "Blog outline" },
   { value: "blog_article", label: "Blog article" },
   { value: "landing_page", label: "Landing page" },
@@ -660,7 +653,7 @@ function CampaignAiPanel({
 }) {
   const { toast } = useToast();
   const [form, setForm] = React.useState({
-    content_type: channel === "sms" ? "sms" : "email",
+    content_type: "email",
     service_or_topic: "",
     audience: "",
     platform: "",
@@ -675,10 +668,7 @@ function CampaignAiPanel({
 
   React.useEffect(() => {
     if (open) {
-      setForm((p) => ({
-        ...p,
-        content_type: channel === "sms" ? "sms" : (p.content_type || "email"),
-      }));
+      setForm((p) => ({ ...p, content_type: p.content_type || "email" }));
       setDraft(null);
       setSelectedVariation(0);
     }
@@ -724,22 +714,18 @@ function CampaignAiPanel({
   const insertIntoEditor = () => {
     if (!draft) return;
     const copy = activeCopy;
-    if (form.content_type === "sms" || channel === "sms") {
-      onInsertPlain?.(copy);
-    } else {
-      const html = copy
-        .split(/\n\n+/)
-        .map((para) =>
-          `<p>${para
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/\n/g, "<br/>")}</p>`,
-        )
-        .join("");
-      onInsertHtml?.(html);
-    }
-    if (channel !== "sms" && Array.isArray(draft.subject_lines) && draft.subject_lines.length > 0) {
+    const html = copy
+      .split(/\n\n+/)
+      .map((para) =>
+        `<p>${para
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/\n/g, "<br/>")}</p>`,
+      )
+      .join("");
+    onInsertHtml?.(html);
+    if (Array.isArray(draft.subject_lines) && draft.subject_lines.length > 0) {
       onInsertSubject?.(draft.subject_lines[0]);
     }
     toast({ title: "Draft inserted — review and edit before sending." });

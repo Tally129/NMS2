@@ -30,6 +30,14 @@ export default function PatientChart() {
   const [intake, setIntake] = React.useState(null);
   const [notes, setNotes] = React.useState([]);
   const [files, setFiles] = React.useState([]);
+  const [timeline, setTimeline] = React.useState([]);
+  const [summaryData, setSummaryData] = React.useState({
+    appointments: [],
+    labs: [],
+    invoices: [],
+  });
+  const [loading, setLoading] = React.useState(true);
+  const [loadError, setLoadError] = React.useState("");
   const [amending, setAmending] = React.useState({});
   const [showNew, setShowNew] = React.useState(false);
   const [newNote, setNewNote] = React.useState({ subjective: "", objective: "", assessment: "", plan: "" });
@@ -37,14 +45,177 @@ export default function PatientChart() {
   const fileRef = React.useRef(null);
 
   const loadAll = React.useCallback(async () => {
-    const c = await api.get(`/clients/${id}`);
-    setClient(c.data);
-    const i = await api.get(`/intake/${id}`);
-    setIntake(i.data);
-    const n = await api.get("/notes", { params: { client_id: id } });
-    setNotes(n.data || []);
-    const f = await api.get("/files", { params: { client_id: id } });
-    setFiles(f.data || []);
+    setLoading(true);
+    setLoadError("");
+
+    try {
+      const clientResponse = await api.get(`/clients/${id}`);
+      setClient(clientResponse.data);
+
+      const [
+        intakeResponse,
+        notesResponse,
+        filesResponse,
+        appointmentsResponse,
+        plansResponse,
+        labsResponse,
+        invoicesResponse,
+      ] = await Promise.all([
+        api.get(`/intake/${id}`),
+        api.get("/notes", {
+          params: { client_id: id },
+        }),
+        api.get("/files", {
+          params: { client_id: id },
+        }),
+        api.get("/appointments", {
+          params: { client_id: id },
+        }),
+        api.get("/treatment-plans", {
+          params: { client_id: id },
+        }).catch(() => ({ data: [] })),
+        api.get("/lab-values", {
+          params: { client_id: id },
+        }).catch(() => ({ data: [] })),
+        api.get("/invoices", {
+          params: { client_id: id },
+        }).catch(() => ({ data: [] })),
+      ]);
+
+      const notesData = notesResponse.data || [];
+      const filesData = filesResponse.data || [];
+      const appointmentsData = appointmentsResponse.data || [];
+      const plansData = plansResponse.data || [];
+      const labsData = labsResponse.data || [];
+      const invoicesData = invoicesResponse.data || [];
+
+      setIntake(intakeResponse.data);
+      setNotes(notesData);
+      setFiles(filesData);
+      setSummaryData({
+        appointments: appointmentsData,
+        labs: labsData,
+        invoices: invoicesData,
+      });
+
+      const appointmentEvents = appointmentsData.map((item) => ({
+        id: `appointment-${item.id}`,
+        sourceId: item.id,
+        type: "appointment",
+        title:
+          item.service ||
+          (item.visit_mode === "telehealth"
+            ? "Telehealth visit"
+            : "Appointment"),
+        date: item.start || item.created_at,
+        subtitle: `${String(
+          item.visit_mode || "in_person"
+        ).replace(/_/g, " ")} · ${String(
+          item.status || "unknown"
+        ).replace(/_/g, " ")}`,
+        status: item.status,
+        visitMode: item.visit_mode,
+        notes: item.notes,
+        data: item,
+      }));
+
+      const noteEvents = notesData.map((item) => ({
+        id: `note-${item.id}`,
+        sourceId: item.id,
+        type: "soap",
+        title: "SOAP note",
+        date: item.created_at || item.updated_at,
+        subtitle:
+          item.practitioner_name
+            ? `By ${item.practitioner_name}`
+            : "Clinical note",
+        preview:
+          item.assessment ||
+          item.subjective ||
+          item.plan ||
+          "",
+        data: item,
+      }));
+
+      const fileEvents = filesData.map((item) => ({
+        id: `file-${item.id}`,
+        sourceId: item.id,
+        type: "file",
+        title: item.filename || "File uploaded",
+        date: item.created_at || item.uploaded_at,
+        subtitle: item.category
+          ? `${item.category} file`
+          : "Chart file",
+        data: item,
+      }));
+
+      const planEvents = plansData.map((item) => ({
+        id: `plan-${item.id}`,
+        sourceId: item.id,
+        type: "plan",
+        title:
+          item.title ||
+          item.name ||
+          "Treatment plan",
+        date:
+          item.updated_at ||
+          item.created_at ||
+          item.finalized_at,
+        subtitle: item.status
+          ? String(item.status).replace(/_/g, " ")
+          : "Treatment plan",
+        preview:
+          item.objective ||
+          item.assessment ||
+          item.plan ||
+          "",
+        data: item,
+      }));
+
+      const labEvents = labsData.map((item) => ({
+        id: `lab-${item.id}`,
+        sourceId: item.id,
+        type: "lab",
+        title:
+          item.test_name ||
+          item.name ||
+          item.marker ||
+          "Lab result",
+        date:
+          item.result_date ||
+          item.collected_at ||
+          item.created_at,
+        subtitle: [
+          item.value,
+          item.unit,
+          item.flag,
+        ].filter(Boolean).join(" "),
+        data: item,
+      }));
+
+      setTimeline(
+        [
+          ...appointmentEvents,
+          ...noteEvents,
+          ...fileEvents,
+          ...planEvents,
+          ...labEvents,
+        ]
+          .filter((item) => item.date)
+          .sort(
+            (a, b) =>
+              new Date(b.date) - new Date(a.date)
+          )
+      );
+    } catch (error) {
+      setClient(null);
+      setLoadError(
+        getErrorMessage(error) ||
+        "The patient chart could not be loaded."
+      );
+    } finally {
+      setLoading(false);
+    }
   }, [id]);
 
   React.useEffect(() => { loadAll(); }, [loadAll]);
@@ -106,10 +277,92 @@ export default function PatientChart() {
     }
   };
 
-  if (!client)
-    return (
-      <PortalLayout><div className="text-[#6a6a6a]">Loading…</div></PortalLayout>
+  const openChartTab = (value) => {
+    document
+      .querySelector(`[data-state][value="${value}"]`)
+      ?.click();
+  };
+
+  const now = new Date();
+
+  const nextAppointment = [...summaryData.appointments]
+    .filter((item) => {
+      const start = new Date(item.start);
+      return (
+        start >= now &&
+        !["completed", "canceled", "no_show"].includes(
+          item.status
+        )
+      );
+    })
+    .sort(
+      (a, b) => new Date(a.start) - new Date(b.start)
+    )[0];
+
+  const latestNote = [...notes].sort(
+    (a, b) =>
+      new Date(b.created_at || b.updated_at) -
+      new Date(a.created_at || a.updated_at)
+  )[0];
+
+  const latestLab = [...summaryData.labs].sort(
+    (a, b) =>
+      new Date(
+        b.result_date ||
+          b.collected_at ||
+          b.created_at ||
+          0
+      ) -
+      new Date(
+        a.result_date ||
+          a.collected_at ||
+          a.created_at ||
+          0
+      )
+  )[0];
+
+  const balanceDue = summaryData.invoices
+    .filter((invoice) => invoice.status !== "paid")
+    .reduce(
+      (total, invoice) =>
+        total + Number(invoice.amount || 0),
+      0
     );
+
+  if (loading) {
+    return (
+      <PortalLayout>
+        <div className="text-[#6a6a6a]">
+          Loading patient chart…
+        </div>
+      </PortalLayout>
+    );
+  }
+
+  if (loadError || !client) {
+    return (
+      <PortalLayout>
+        <div className="mx-auto max-w-xl rounded-2xl border border-[#c19a4b] bg-[#fbf3df] p-6 text-center">
+          <div className="font-display text-2xl text-[#1f2a22]">
+            Patient chart unavailable
+          </div>
+
+          <div className="mt-2 text-sm text-[#7a2a2a]">
+            {loadError ||
+              "The patient chart could not be loaded."}
+          </div>
+
+          <Button
+            onClick={loadAll}
+            variant="outline"
+            className="mt-4 rounded-full border-[#8a6a3c] text-[#8a6a3c]"
+          >
+            Try again
+          </Button>
+        </div>
+      </PortalLayout>
+    );
+  }
 
   return (
     <PortalLayout>
@@ -130,6 +383,7 @@ export default function PatientChart() {
       <Tabs defaultValue="summary" className="w-full">
         <TabsList className="bg-[#f1ead8] p-1 rounded-full flex-wrap h-auto">
           <TabsTrigger value="summary" className="rounded-full px-4">Summary</TabsTrigger>
+          <TabsTrigger value="timeline" className="rounded-full px-4">Timeline</TabsTrigger>
           <TabsTrigger value="intake" className="rounded-full px-4">Intake</TabsTrigger>
           <TabsTrigger value="notes" className="rounded-full px-4">SOAP Notes</TabsTrigger>
           <TabsTrigger value="plan" className="rounded-full px-4">Treatment Plan</TabsTrigger>
@@ -139,27 +393,403 @@ export default function PatientChart() {
           <TabsTrigger value="billing" className="rounded-full px-4">Billing</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="summary" className="mt-6">
-          <div className="grid md:grid-cols-3 gap-4">
+        <TabsContent value="summary" className="mt-6 space-y-6">
+          <div className="rounded-2xl border border-[#c19a4b] bg-[#fbf7ee] p-5">
+            <div className="eyebrow text-[#8a6a3c]">
+              Quick actions
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-3">
+              <Button
+                type="button"
+                disabled={!canEdit}
+                onClick={() => {
+                  setShowNew(true);
+                  openChartTab("notes");
+                }}
+                className="rounded-full bg-[#2f4a3a] text-[#f6f1e6] hover:bg-[#263d30]"
+              >
+                <PlusCircle size={15} className="mr-2" />
+                New SOAP note
+              </Button>
+
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => openChartTab("labs")}
+                className="rounded-full border-[#8a6a3c] text-[#8a6a3c]"
+              >
+                Review labs
+              </Button>
+
+              <Button
+                type="button"
+                variant="outline"
+                onClick={onPickFile}
+                disabled={uploading}
+                className="rounded-full border-[#8a6a3c] text-[#8a6a3c]"
+              >
+                <Upload size={15} className="mr-2" />
+                {uploading ? "Uploading…" : "Upload file"}
+              </Button>
+
+              <Link to="/portal/provider/appointments">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="rounded-full border-[#2f4a3a] text-[#2f4a3a]"
+                >
+                  Schedule visit
+                </Button>
+              </Link>
+
+              <Link to="/portal/messages">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="rounded-full border-[#2f4a3a] text-[#2f4a3a]"
+                >
+                  Message patient
+                </Button>
+              </Link>
+            </div>
+
+            <input
+              type="file"
+              ref={fileRef}
+              onChange={onFile}
+              className="hidden"
+            />
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5">
-              <div className="eyebrow text-[#8a6a3c]">Demographics</div>
-              <dl className="mt-3 text-sm space-y-1 text-[#3a3a3a]">
-                <div><span className="text-[#6a6a6a]">DOB:</span> {client.dob || intake?.demographics?.dob || "—"}</div>
-                <div><span className="text-[#6a6a6a]">Sex:</span> {client.sex || intake?.demographics?.sex || "—"}</div>
-                <div><span className="text-[#6a6a6a]">Address:</span> {client.address || intake?.demographics?.address || "—"}</div>
-                <div><span className="text-[#6a6a6a]">Emergency:</span> {client.emergency_contact || intake?.demographics?.emergency_contact || "—"}</div>
+              <div className="eyebrow text-[#8a6a3c]">
+                Next appointment
+              </div>
+
+              {nextAppointment ? (
+                <div className="mt-3">
+                  <div className="font-medium text-[#1f2a22]">
+                    {nextAppointment.service ||
+                      (nextAppointment.visit_mode ===
+                      "telehealth"
+                        ? "Telehealth visit"
+                        : "Patient visit")}
+                  </div>
+
+                  <div className="mt-1 text-sm text-[#6a6a6a]">
+                    {new Date(
+                      nextAppointment.start
+                    ).toLocaleString()}
+                  </div>
+
+                  <div className="mt-2 text-xs capitalize text-[#8a6a3c]">
+                    {String(
+                      nextAppointment.status || "scheduled"
+                    ).replace(/_/g, " ")}
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-3 text-sm text-[#6a6a6a]">
+                  No upcoming appointment.
+                </div>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => openChartTab("notes")}
+              className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5 text-left hover:bg-[#f7f1e4]"
+            >
+              <div className="eyebrow text-[#8a6a3c]">
+                Latest SOAP note
+              </div>
+
+              {latestNote ? (
+                <>
+                  <div className="mt-3 text-sm font-medium text-[#1f2a22]">
+                    {latestNote.assessment ||
+                      latestNote.subjective ||
+                      "Clinical note"}
+                  </div>
+
+                  <div className="mt-2 text-xs text-[#6a6a6a]">
+                    {new Date(
+                      latestNote.created_at ||
+                        latestNote.updated_at
+                    ).toLocaleString()}
+                  </div>
+                </>
+              ) : (
+                <div className="mt-3 text-sm text-[#6a6a6a]">
+                  No SOAP notes yet.
+                </div>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => openChartTab("labs")}
+              className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5 text-left hover:bg-[#f7f1e4]"
+            >
+              <div className="eyebrow text-[#8a6a3c]">
+                Latest lab
+              </div>
+
+              {latestLab ? (
+                <>
+                  <div className="mt-3 font-medium text-[#1f2a22]">
+                    {latestLab.test_name ||
+                      latestLab.name ||
+                      latestLab.marker ||
+                      "Lab result"}
+                  </div>
+
+                  <div className="mt-1 text-sm text-[#6a6a6a]">
+                    {[latestLab.value, latestLab.unit]
+                      .filter(Boolean)
+                      .join(" ") || "Result available"}
+                  </div>
+
+                  {latestLab.flag && (
+                    <div className="mt-2 text-xs font-medium uppercase text-[#8b2f2f]">
+                      {latestLab.flag}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="mt-3 text-sm text-[#6a6a6a]">
+                  No lab results yet.
+                </div>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => openChartTab("files")}
+              className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5 text-left hover:bg-[#f7f1e4]"
+            >
+              <div className="eyebrow text-[#8a6a3c]">
+                Files on chart
+              </div>
+              <div className="mt-3 font-display text-3xl text-[#1f2a22]">
+                {files.length}
+              </div>
+              <div className="mt-1 text-xs text-[#6a6a6a]">
+                Uploaded documents
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => openChartTab("billing")}
+              className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5 text-left hover:bg-[#f7f1e4]"
+            >
+              <div className="eyebrow text-[#8a6a3c]">
+                Outstanding balance
+              </div>
+              <div className="mt-3 font-display text-3xl text-[#1f2a22]">
+                {balanceDue.toLocaleString("en-US", {
+                  style: "currency",
+                  currency: "USD",
+                })}
+              </div>
+              <div className="mt-1 text-xs text-[#6a6a6a]">
+                Unpaid invoices
+              </div>
+            </button>
+
+            <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5">
+              <div className="eyebrow text-[#8a6a3c]">
+                Demographics
+              </div>
+
+              <dl className="mt-3 space-y-1 text-sm text-[#3a3a3a]">
+                <div>
+                  <span className="text-[#6a6a6a]">
+                    DOB:
+                  </span>{" "}
+                  {client.dob ||
+                    intake?.demographics?.dob ||
+                    "—"}
+                </div>
+
+                <div>
+                  <span className="text-[#6a6a6a]">
+                    Sex:
+                  </span>{" "}
+                  {client.sex ||
+                    intake?.demographics?.sex ||
+                    "—"}
+                </div>
+
+                <div>
+                  <span className="text-[#6a6a6a]">
+                    Phone:
+                  </span>{" "}
+                  {client.phone || "—"}
+                </div>
+
+                <div>
+                  <span className="text-[#6a6a6a]">
+                    Email:
+                  </span>{" "}
+                  {client.email || "—"}
+                </div>
               </dl>
             </div>
-            <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5">
-              <div className="eyebrow text-[#8a6a3c]">Recent notes</div>
-              <div className="mt-3 text-2xl font-display text-[#1f2a22]">{notes.length}</div>
-              <Link to="#" onClick={(e) => { e.preventDefault(); document.querySelector('[value="notes"]')?.click(); }} className="text-sm text-[#2f4a3a] hover:underline">View all</Link>
-            </div>
-            <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5">
-              <div className="eyebrow text-[#8a6a3c]">Files on chart</div>
-              <div className="mt-3 text-2xl font-display text-[#1f2a22]">{files.length}</div>
-            </div>
           </div>
+        </TabsContent>
+
+        <TabsContent value="timeline" className="mt-6">
+          {timeline.length === 0 ? (
+            <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-10 text-center text-[#6a6a6a]">
+              No patient activity yet.
+            </div>
+          ) : (
+            <div className="relative space-y-4">
+              <div className="absolute left-[19px] top-5 bottom-5 w-px bg-[#e0d6bc]" />
+
+              {timeline.map((item) => {
+                const labels = {
+                  appointment: "Appointment",
+                  soap: "SOAP note",
+                  file: "File",
+                  plan: "Treatment plan",
+                  lab: "Lab result",
+                };
+
+                const dotClasses = {
+                  appointment:
+                    "border-[#2f4a3a] bg-[#e7efe9]",
+                  soap:
+                    "border-[#8a6a3c] bg-[#f1ead8]",
+                  file:
+                    "border-[#4f6f8f] bg-[#eaf1f7]",
+                  plan:
+                    "border-[#7b5b8e] bg-[#f0eaf4]",
+                  lab:
+                    "border-[#a36a3a] bg-[#f8eee5]",
+                };
+
+                return (
+                  <article
+                    key={item.id}
+                    className="relative pl-12"
+                    data-testid={`patient-timeline-${item.id}`}
+                  >
+                    <div
+                      className={`absolute left-3 top-5 h-4 w-4 rounded-full border-2 ${
+                        dotClasses[item.type] ||
+                        "border-[#c19a4b] bg-[#fbf7ee]"
+                      }`}
+                    />
+
+                    <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                          <div className="text-[10px] uppercase tracking-widest text-[#8a6a3c]">
+                            {labels[item.type] || "Activity"}
+                          </div>
+
+                          <div className="mt-1 font-medium text-[#1f2a22]">
+                            {item.title}
+                          </div>
+
+                          {item.subtitle && (
+                            <div className="mt-1 text-xs capitalize text-[#6a6a6a]">
+                              {item.subtitle}
+                            </div>
+                          )}
+                        </div>
+
+                        <time className="text-xs text-[#6a6a6a]">
+                          {new Date(item.date).toLocaleString()}
+                        </time>
+                      </div>
+
+                      {item.preview && (
+                        <div className="mt-3 line-clamp-3 whitespace-pre-wrap text-sm text-[#3a3a3a]">
+                          {item.preview}
+                        </div>
+                      )}
+
+                      {item.notes && (
+                        <div className="mt-3 line-clamp-3 whitespace-pre-wrap text-sm text-[#3a3a3a]">
+                          {item.notes}
+                        </div>
+                      )}
+
+                      <div className="mt-4 flex flex-wrap gap-3 text-sm">
+                        {item.type === "appointment" &&
+                          item.visitMode === "telehealth" && (
+                            <Link
+                              to={`/portal/visit/${item.sourceId}`}
+                              className="font-medium text-[#2f4a3a] hover:underline"
+                            >
+                              Open telehealth visit
+                            </Link>
+                          )}
+
+                        {item.type === "file" && (
+                          <button
+                            type="button"
+                            onClick={() => downloadFile(item.data)}
+                            className="font-medium text-[#2f4a3a] hover:underline"
+                          >
+                            Download file
+                          </button>
+                        )}
+
+                        {item.type === "soap" && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              document
+                                .querySelector('[value="notes"]')
+                                ?.click()
+                            }
+                            className="font-medium text-[#2f4a3a] hover:underline"
+                          >
+                            View SOAP notes
+                          </button>
+                        )}
+
+                        {item.type === "lab" && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              document
+                                .querySelector('[value="labs"]')
+                                ?.click()
+                            }
+                            className="font-medium text-[#2f4a3a] hover:underline"
+                          >
+                            View labs
+                          </button>
+                        )}
+
+                        {item.type === "plan" && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              document
+                                .querySelector('[value="plan"]')
+                                ?.click()
+                            }
+                            className="font-medium text-[#2f4a3a] hover:underline"
+                          >
+                            View treatment plans
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
         </TabsContent>
 
         <TabsContent value="intake" className="mt-6">

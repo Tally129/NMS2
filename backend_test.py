@@ -1,918 +1,784 @@
-#!/usr/bin/env python3
 """
-Comprehensive backend test suite for NatMedSol EMR Phase-1
-Tests all 12 scenarios from agent_communication in test_result.md
+Phase 3: Competitor Intelligence + Keyword Gap + Backlink + Local SEO Backend Tests
+
+Tests all 8 scenarios for Phase 3 integration:
+1. AUTH: Unauthenticated rejected, admin allowed
+2. SITE: Ensure site exists (create if needed)
+3. COMPETITORS (first-party): POST, GET list, GET by id, PHI reject
+4. KEYWORD GAP: GET with connected=false, not_connected_reason, records=[]
+5. CONTENT OPPORTUNITIES: GET with advisory_only=true, requires_human_approval=true
+6. BACKLINKS: GET overview with connected=false and NULL counts (NOT 0), GET list
+7. LOCAL SEO: GET with connected=false, GET opportunities with advisory_only=true
+8. SAFETY: GET capabilities with correct policy flags
 """
+
 import requests
-import pyotp
-import io
-import os
-from datetime import datetime
+import json
+from typing import Optional
 
-# Load backend URL from frontend/.env
-BACKEND_URL = "https://design-158.preview.emergentagent.com/api"
+# Base URL from frontend/.env
+BASE_URL = "https://nms-campaign-command.preview.emergentagent.com"
+API_BASE = f"{BASE_URL}/api"
 
-# Pre-seeded credentials
+# Test credentials from /app/memory/test_credentials.md
 ADMIN_EMAIL = "admin@natmedsol.local"
 ADMIN_PASSWORD = "Admin!2345"
-PRACTITIONER_EMAIL = "ravello@natmedsol.local"
-PRACTITIONER_PASSWORD = "Ravello!2345"
-
-# Test state
-test_results = []
-client_tokens = {}
-admin_tokens = {}
-practitioner_tokens = {}
-test_client_id = None
-test_intake_id = None
-test_note_id = None
-test_file_id = None
 
 
-def log_test(scenario, test_name, passed, details=""):
-    """Log test result"""
-    status = "✅ PASS" if passed else "❌ FAIL"
-    result = f"{status} | Scenario {scenario} | {test_name}"
-    if details:
-        result += f"\n    Details: {details}"
-    test_results.append((passed, result))
-    print(result)
-
-
-def test_scenario_1_register():
-    """Scenario 1: POST /api/auth/register (happy path + duplicate-email 409)"""
-    print("\n=== SCENARIO 1: Auth Register ===")
+class TestResult:
+    def __init__(self):
+        self.passed = []
+        self.failed = []
+        self.warnings = []
     
-    # Happy path - register new client
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    new_email = f"testclient_{timestamp}@natmedsol.test"
-    payload = {
-        "email": new_email,
-        "password": "TestClient!123",
-        "full_name": "Test Client User",
-        "phone": "555-0100"
-    }
+    def add_pass(self, test_name: str, details: str = ""):
+        self.passed.append(f"✅ {test_name}: {details}")
     
-    try:
-        resp = requests.post(f"{BACKEND_URL}/auth/register", json=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("access_token") and data.get("refresh_token") and data.get("user"):
-                user = data["user"]
-                if user.get("role") == "client" and user.get("email") == new_email:
-                    global client_tokens, test_client_id
-                    client_tokens = {
-                        "access": data["access_token"],
-                        "refresh": data["refresh_token"],
-                        "email": new_email
-                    }
-                    log_test(1, "Register new client (happy path)", True, 
-                            f"Created client with role={user['role']}, email={user['email']}")
-                else:
-                    log_test(1, "Register new client (happy path)", False, 
-                            f"User data incorrect: role={user.get('role')}, email={user.get('email')}")
-            else:
-                log_test(1, "Register new client (happy path)", False, 
-                        f"Missing tokens or user in response: {data}")
-        else:
-            log_test(1, "Register new client (happy path)", False, 
-                    f"Status {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_test(1, "Register new client (happy path)", False, f"Exception: {e}")
+    def add_fail(self, test_name: str, details: str):
+        self.failed.append(f"❌ {test_name}: {details}")
     
-    # Duplicate email - should return 409
-    try:
-        resp = requests.post(f"{BACKEND_URL}/auth/register", json=payload, timeout=10)
-        if resp.status_code == 409:
-            log_test(1, "Register duplicate email (409)", True, "Correctly rejected duplicate")
-        else:
-            log_test(1, "Register duplicate email (409)", False, 
-                    f"Expected 409, got {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_test(1, "Register duplicate email (409)", False, f"Exception: {e}")
-
-
-def test_scenario_2_login():
-    """Scenario 2: POST /api/auth/login (happy + bad-password 401 + login_history entry)"""
-    print("\n=== SCENARIO 2: Auth Login ===")
+    def add_warning(self, test_name: str, details: str):
+        self.warnings.append(f"⚠️  {test_name}: {details}")
     
-    # Happy path - admin login
-    try:
-        payload = {"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}
-        resp = requests.post(f"{BACKEND_URL}/auth/login", json=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("access_token") and data.get("user"):
-                user = data["user"]
-                if user.get("role") == "admin":
-                    global admin_tokens
-                    admin_tokens = {
-                        "access": data["access_token"],
-                        "refresh": data["refresh_token"]
-                    }
-                    log_test(2, "Admin login (happy path)", True, 
-                            f"Admin logged in: {user['email']}")
-                else:
-                    log_test(2, "Admin login (happy path)", False, 
-                            f"Wrong role: {user.get('role')}")
-            else:
-                log_test(2, "Admin login (happy path)", False, 
-                        f"Missing tokens: {data}")
-        else:
-            log_test(2, "Admin login (happy path)", False, 
-                    f"Status {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_test(2, "Admin login (happy path)", False, f"Exception: {e}")
-    
-    # Practitioner login
-    try:
-        payload = {"email": PRACTITIONER_EMAIL, "password": PRACTITIONER_PASSWORD}
-        resp = requests.post(f"{BACKEND_URL}/auth/login", json=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("access_token") and data.get("user"):
-                user = data["user"]
-                if user.get("role") == "practitioner":
-                    global practitioner_tokens
-                    practitioner_tokens = {
-                        "access": data["access_token"],
-                        "refresh": data["refresh_token"]
-                    }
-                    log_test(2, "Practitioner login (happy path)", True, 
-                            f"Practitioner logged in: {user['email']}")
-                else:
-                    log_test(2, "Practitioner login (happy path)", False, 
-                            f"Wrong role: {user.get('role')}")
-            else:
-                log_test(2, "Practitioner login (happy path)", False, 
-                        f"Missing tokens: {data}")
-        else:
-            log_test(2, "Practitioner login (happy path)", False, 
-                    f"Status {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_test(2, "Practitioner login (happy path)", False, f"Exception: {e}")
-    
-    # Bad password - should return 401
-    try:
-        payload = {"email": ADMIN_EMAIL, "password": "WrongPassword123!"}
-        resp = requests.post(f"{BACKEND_URL}/auth/login", json=payload, timeout=10)
-        if resp.status_code == 401:
-            log_test(2, "Login with bad password (401)", True, "Correctly rejected bad password")
-        else:
-            log_test(2, "Login with bad password (401)", False, 
-                    f"Expected 401, got {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_test(2, "Login with bad password (401)", False, f"Exception: {e}")
-
-
-def test_scenario_3_me():
-    """Scenario 3: GET /api/auth/me"""
-    print("\n=== SCENARIO 3: Auth Me ===")
-    
-    if not client_tokens.get("access"):
-        log_test(3, "GET /auth/me", False, "No client token available")
-        return
-    
-    try:
-        headers = {"Authorization": f"Bearer {client_tokens['access']}"}
-        resp = requests.get(f"{BACKEND_URL}/auth/me", headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("email") == client_tokens["email"] and data.get("role") == "client":
-                log_test(3, "GET /auth/me", True, 
-                        f"Returned correct user: {data['email']}, role={data['role']}")
-            else:
-                log_test(3, "GET /auth/me", False, 
-                        f"User data mismatch: {data}")
-        else:
-            log_test(3, "GET /auth/me", False, 
-                    f"Status {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_test(3, "GET /auth/me", False, f"Exception: {e}")
-
-
-def test_scenario_4_refresh():
-    """Scenario 4: POST /api/auth/refresh"""
-    print("\n=== SCENARIO 4: Auth Refresh ===")
-    
-    if not client_tokens.get("refresh"):
-        log_test(4, "POST /auth/refresh", False, "No refresh token available")
-        return
-    
-    try:
-        payload = {"refresh_token": client_tokens["refresh"]}
-        resp = requests.post(f"{BACKEND_URL}/auth/refresh", json=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("access_token") and data.get("refresh_token"):
-                # Update tokens
-                client_tokens["access"] = data["access_token"]
-                client_tokens["refresh"] = data["refresh_token"]
-                log_test(4, "POST /auth/refresh", True, "Successfully refreshed tokens")
-            else:
-                log_test(4, "POST /auth/refresh", False, 
-                        f"Missing tokens in response: {data}")
-        else:
-            log_test(4, "POST /auth/refresh", False, 
-                    f"Status {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_test(4, "POST /auth/refresh", False, f"Exception: {e}")
-
-
-def test_scenario_5_mfa():
-    """Scenario 5: MFA flow (setup, verify, login with mfa_token)"""
-    print("\n=== SCENARIO 5: MFA Flow ===")
-    
-    if not client_tokens.get("access"):
-        log_test(5, "MFA flow", False, "No client token available")
-        return
-    
-    headers = {"Authorization": f"Bearer {client_tokens['access']}"}
-    mfa_secret = None
-    
-    # Step 1: Setup MFA
-    try:
-        resp = requests.post(f"{BACKEND_URL}/auth/mfa/setup", headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("secret") and data.get("provisioning_uri"):
-                mfa_secret = data["secret"]
-                log_test(5, "MFA setup", True, f"Received secret and provisioning_uri")
-            else:
-                log_test(5, "MFA setup", False, f"Missing secret or uri: {data}")
-                return
-        else:
-            log_test(5, "MFA setup", False, f"Status {resp.status_code}: {resp.text}")
-            return
-    except Exception as e:
-        log_test(5, "MFA setup", False, f"Exception: {e}")
-        return
-    
-    # Step 2: Generate valid TOTP and verify
-    try:
-        totp = pyotp.TOTP(mfa_secret)
-        token = totp.now()
-        payload = {"token": token}
-        resp = requests.post(f"{BACKEND_URL}/auth/mfa/verify", json=payload, 
-                           headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("ok") and data.get("mfa_enabled"):
-                log_test(5, "MFA verify", True, "MFA enabled successfully")
-            else:
-                log_test(5, "MFA verify", False, f"Unexpected response: {data}")
-                return
-        else:
-            log_test(5, "MFA verify", False, f"Status {resp.status_code}: {resp.text}")
-            return
-    except Exception as e:
-        log_test(5, "MFA verify", False, f"Exception: {e}")
-        return
-    
-    # Step 3: Login without mfa_token should return mfa_required=true
-    try:
-        payload = {"email": client_tokens["email"], "password": "TestClient!123"}
-        resp = requests.post(f"{BACKEND_URL}/auth/login", json=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("mfa_required") and not data.get("access_token"):
-                log_test(5, "Login without MFA token (mfa_required)", True, 
-                        "Correctly returned mfa_required=true with empty tokens")
-            else:
-                log_test(5, "Login without MFA token (mfa_required)", False, 
-                        f"Expected mfa_required=true with empty tokens: {data}")
-                return
-        else:
-            log_test(5, "Login without MFA token (mfa_required)", False, 
-                    f"Status {resp.status_code}: {resp.text}")
-            return
-    except Exception as e:
-        log_test(5, "Login without MFA token (mfa_required)", False, f"Exception: {e}")
-        return
-    
-    # Step 4: Login with valid mfa_token should succeed
-    try:
-        token = totp.now()
-        payload = {
-            "email": client_tokens["email"], 
-            "password": "TestClient!123",
-            "mfa_token": token
-        }
-        resp = requests.post(f"{BACKEND_URL}/auth/login", json=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("access_token") and not data.get("mfa_required"):
-                log_test(5, "Login with valid MFA token", True, 
-                        "Successfully logged in with MFA token")
-            else:
-                log_test(5, "Login with valid MFA token", False, 
-                        f"Expected tokens with mfa_required=false: {data}")
-        else:
-            log_test(5, "Login with valid MFA token", False, 
-                    f"Status {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_test(5, "Login with valid MFA token", False, f"Exception: {e}")
-
-
-def test_scenario_6_rbac():
-    """Scenario 6: RBAC (client restrictions)"""
-    print("\n=== SCENARIO 6: RBAC ===")
-    
-    if not client_tokens.get("access"):
-        log_test(6, "RBAC tests", False, "No client token available")
-        return
-    
-    client_headers = {"Authorization": f"Bearer {client_tokens['access']}"}
-    
-    # Test 1: Client tries GET /api/clients -> should be 403
-    try:
-        resp = requests.get(f"{BACKEND_URL}/clients", headers=client_headers, timeout=10)
-        if resp.status_code == 403:
-            log_test(6, "Client GET /clients (403)", True, "Correctly forbidden")
-        else:
-            log_test(6, "Client GET /clients (403)", False, 
-                    f"Expected 403, got {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_test(6, "Client GET /clients (403)", False, f"Exception: {e}")
-    
-    # Test 2: Client GET /api/clients/me -> should be 200
-    try:
-        resp = requests.get(f"{BACKEND_URL}/clients/me", headers=client_headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("id"):
-                global test_client_id
-                test_client_id = data["id"]
-                log_test(6, "Client GET /clients/me (200)", True, 
-                        f"Successfully retrieved own client record: {test_client_id}")
-            else:
-                log_test(6, "Client GET /clients/me (200)", False, 
-                        f"Missing id in response: {data}")
-        else:
-            log_test(6, "Client GET /clients/me (200)", False, 
-                    f"Status {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_test(6, "Client GET /clients/me (200)", False, f"Exception: {e}")
-    
-    # Test 3: Create another client as admin, then test client cannot access it
-    if admin_tokens.get("access"):
-        admin_headers = {"Authorization": f"Bearer {admin_tokens['access']}"}
-        try:
-            # Create another client
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            payload = {
-                "full_name": "Other Client",
-                "email": f"other_{timestamp}@test.com",
-                "phone": "555-9999"
-            }
-            resp = requests.post(f"{BACKEND_URL}/clients", json=payload, 
-                               headers=admin_headers, timeout=10)
-            if resp.status_code == 200:
-                other_client_id = resp.json().get("id")
-                # Now try to access as client
-                resp2 = requests.get(f"{BACKEND_URL}/clients/{other_client_id}", 
-                                   headers=client_headers, timeout=10)
-                if resp2.status_code == 403:
-                    log_test(6, "Client GET /clients/{other_id} (403)", True, 
-                            "Correctly forbidden from accessing other client")
-                else:
-                    log_test(6, "Client GET /clients/{other_id} (403)", False, 
-                            f"Expected 403, got {resp2.status_code}: {resp2.text}")
-            else:
-                log_test(6, "Client GET /clients/{other_id} (403)", False, 
-                        f"Failed to create other client: {resp.status_code}")
-        except Exception as e:
-            log_test(6, "Client GET /clients/{other_id} (403)", False, f"Exception: {e}")
-
-
-def test_scenario_7_intake():
-    """Scenario 7: Intake (upsert, get own, forbidden for others)"""
-    print("\n=== SCENARIO 7: Intake ===")
-    
-    if not client_tokens.get("access") or not test_client_id:
-        log_test(7, "Intake tests", False, "No client token or client_id available")
-        return
-    
-    client_headers = {"Authorization": f"Bearer {client_tokens['access']}"}
-    
-    # Test 1: Client POST /api/intake -> upsert
-    try:
-        payload = {
-            "demographics": {"age": 35, "gender": "female"},
-            "health_history": {"conditions": ["hypertension"]},
-            "symptoms": {"current": "fatigue"},
-            "lifestyle": {"exercise": "moderate"},
-            "consent": {"signed": True, "signature": "Test Client"},
-            "completed": True
-        }
-        resp = requests.post(f"{BACKEND_URL}/intake", json=payload, 
-                           headers=client_headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("id") and data.get("client_id") == test_client_id:
-                global test_intake_id
-                test_intake_id = data["id"]
-                log_test(7, "Client POST /intake (upsert)", True, 
-                        f"Created intake: {test_intake_id}")
-            else:
-                log_test(7, "Client POST /intake (upsert)", False, 
-                        f"Unexpected response: {data}")
-        else:
-            log_test(7, "Client POST /intake (upsert)", False, 
-                    f"Status {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_test(7, "Client POST /intake (upsert)", False, f"Exception: {e}")
-    
-    # Test 2: Client GET /api/intake/{own_id} -> 200
-    try:
-        resp = requests.get(f"{BACKEND_URL}/intake/{test_client_id}", 
-                          headers=client_headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data and data.get("client_id") == test_client_id:
-                log_test(7, "Client GET /intake/{own_id} (200)", True, 
-                        "Successfully retrieved own intake")
-            else:
-                log_test(7, "Client GET /intake/{own_id} (200)", False, 
-                        f"Unexpected response: {data}")
-        else:
-            log_test(7, "Client GET /intake/{own_id} (200)", False, 
-                    f"Status {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_test(7, "Client GET /intake/{own_id} (200)", False, f"Exception: {e}")
-    
-    # Test 3: Client GET /api/intake/{other_id} -> 403
-    # Create another client and try to access their intake
-    if admin_tokens.get("access"):
-        admin_headers = {"Authorization": f"Bearer {admin_tokens['access']}"}
-        try:
-            # Create another client
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            payload = {
-                "full_name": "Another Client",
-                "email": f"another_{timestamp}@test.com"
-            }
-            resp = requests.post(f"{BACKEND_URL}/clients", json=payload, 
-                               headers=admin_headers, timeout=10)
-            if resp.status_code == 200:
-                other_client_id = resp.json().get("id")
-                # Try to access as client
-                resp2 = requests.get(f"{BACKEND_URL}/intake/{other_client_id}", 
-                                   headers=client_headers, timeout=10)
-                if resp2.status_code == 403:
-                    log_test(7, "Client GET /intake/{other_id} (403)", True, 
-                            "Correctly forbidden from accessing other intake")
-                else:
-                    log_test(7, "Client GET /intake/{other_id} (403)", False, 
-                            f"Expected 403, got {resp2.status_code}: {resp2.text}")
-            else:
-                log_test(7, "Client GET /intake/{other_id} (403)", False, 
-                        f"Failed to create other client: {resp.status_code}")
-        except Exception as e:
-            log_test(7, "Client GET /intake/{other_id} (403)", False, f"Exception: {e}")
-
-
-def test_scenario_8_soap():
-    """Scenario 8: SOAP (client forbidden, practitioner create/amend)"""
-    print("\n=== SCENARIO 8: SOAP Notes ===")
-    
-    if not test_client_id:
-        log_test(8, "SOAP tests", False, "No test_client_id available")
-        return
-    
-    # Test 1: Client POST /api/notes -> 403
-    if client_tokens.get("access"):
-        client_headers = {"Authorization": f"Bearer {client_tokens['access']}"}
-        try:
-            payload = {
-                "client_id": test_client_id,
-                "subjective": "Patient reports fatigue",
-                "objective": "BP 120/80",
-                "assessment": "Mild fatigue",
-                "plan": "Rest and hydration"
-            }
-            resp = requests.post(f"{BACKEND_URL}/notes", json=payload, 
-                               headers=client_headers, timeout=10)
-            if resp.status_code == 403:
-                log_test(8, "Client POST /notes (403)", True, 
-                        "Correctly forbidden for client")
-            else:
-                log_test(8, "Client POST /notes (403)", False, 
-                        f"Expected 403, got {resp.status_code}: {resp.text}")
-        except Exception as e:
-            log_test(8, "Client POST /notes (403)", False, f"Exception: {e}")
-    
-    # Test 2: Practitioner POST /api/notes -> 201 with amendments=[]
-    if practitioner_tokens.get("access"):
-        prac_headers = {"Authorization": f"Bearer {practitioner_tokens['access']}"}
-        try:
-            payload = {
-                "client_id": test_client_id,
-                "subjective": "Patient reports improved energy",
-                "objective": "Vitals normal",
-                "assessment": "Responding well to treatment",
-                "plan": "Continue current regimen"
-            }
-            resp = requests.post(f"{BACKEND_URL}/notes", json=payload, 
-                               headers=prac_headers, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("id") and data.get("amendments") == []:
-                    global test_note_id
-                    test_note_id = data["id"]
-                    log_test(8, "Practitioner POST /notes (201)", True, 
-                            f"Created note with amendments=[]: {test_note_id}")
-                else:
-                    log_test(8, "Practitioner POST /notes (201)", False, 
-                            f"Unexpected response: {data}")
-            else:
-                log_test(8, "Practitioner POST /notes (201)", False, 
-                        f"Status {resp.status_code}: {resp.text}")
-        except Exception as e:
-            log_test(8, "Practitioner POST /notes (201)", False, f"Exception: {e}")
+    def print_summary(self):
+        print("\n" + "="*80)
+        print("PHASE 3 COMPETITOR INTELLIGENCE + KEYWORD GAP + BACKLINK + LOCAL SEO")
+        print("Backend Test Results")
+        print("="*80)
         
-        # Test 3: Practitioner POST /api/notes/{id}/amend -> appended
-        if test_note_id:
-            try:
-                payload = {"content": "Amendment: Patient also mentioned better sleep quality"}
-                resp = requests.post(f"{BACKEND_URL}/notes/{test_note_id}/amend", 
-                                   json=payload, headers=prac_headers, timeout=10)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    amendments = data.get("amendments", [])
-                    if len(amendments) == 1 and amendments[0].get("content") == payload["content"]:
-                        log_test(8, "Practitioner POST /notes/{id}/amend", True, 
-                                "Amendment appended correctly")
-                    else:
-                        log_test(8, "Practitioner POST /notes/{id}/amend", False, 
-                                f"Amendment not appended correctly: {amendments}")
-                else:
-                    log_test(8, "Practitioner POST /notes/{id}/amend", False, 
-                            f"Status {resp.status_code}: {resp.text}")
-            except Exception as e:
-                log_test(8, "Practitioner POST /notes/{id}/amend", False, f"Exception: {e}")
-
-
-def test_scenario_9_files():
-    """Scenario 9: Files (upload, list, download)"""
-    print("\n=== SCENARIO 9: Files ===")
-    
-    if not client_tokens.get("access") or not test_client_id:
-        log_test(9, "Files tests", False, "No client token or client_id available")
-        return
-    
-    client_headers = {"Authorization": f"Bearer {client_tokens['access']}"}
-    
-    # Test 1: POST /api/files/upload (multipart with category=lab)
-    try:
-        # Create a small test file
-        test_content = b"This is a test lab report file for NatMedSol EMR testing."
-        files = {"file": ("test_lab_report.txt", io.BytesIO(test_content), "text/plain")}
-        data = {"category": "lab"}
+        if self.failed:
+            print("\n❌ FAILED TESTS:")
+            for fail in self.failed:
+                print(f"  {fail}")
         
-        resp = requests.post(f"{BACKEND_URL}/files/upload", files=files, data=data,
-                           headers=client_headers, timeout=10)
-        if resp.status_code == 200:
-            file_data = resp.json()
-            if file_data.get("id") and file_data.get("category") == "lab":
-                global test_file_id
-                test_file_id = file_data["id"]
-                log_test(9, "POST /files/upload (multipart)", True, 
-                        f"Uploaded file: {test_file_id}, category=lab")
-            else:
-                log_test(9, "POST /files/upload (multipart)", False, 
-                        f"Unexpected response: {file_data}")
-        else:
-            log_test(9, "POST /files/upload (multipart)", False, 
-                    f"Status {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_test(9, "POST /files/upload (multipart)", False, f"Exception: {e}")
-    
-    # Test 2: GET /api/files (list)
+        if self.warnings:
+            print("\n⚠️  WARNINGS:")
+            for warn in self.warnings:
+                print(f"  {warn}")
+        
+        if self.passed:
+            print("\n✅ PASSED TESTS:")
+            for p in self.passed:
+                print(f"  {p}")
+        
+        total = len(self.passed) + len(self.failed)
+        success_rate = (len(self.passed) / total * 100) if total > 0 else 0
+        print(f"\n{'='*80}")
+        print(f"SUMMARY: {len(self.passed)}/{total} tests passed ({success_rate:.0f}%)")
+        print(f"{'='*80}\n")
+
+
+def login(email: str, password: str) -> Optional[str]:
+    """Login and return access token. Handle MFA if required."""
     try:
-        resp = requests.get(f"{BACKEND_URL}/files", headers=client_headers, timeout=10)
-        if resp.status_code == 200:
-            files_list = resp.json()
-            if isinstance(files_list, list) and len(files_list) > 0:
-                # Check if our uploaded file is in the list
-                found = any(f.get("id") == test_file_id for f in files_list)
-                if found:
-                    log_test(9, "GET /files (list)", True, 
-                            f"Listed {len(files_list)} files, found uploaded file")
-                else:
-                    log_test(9, "GET /files (list)", False, 
-                            f"Uploaded file not in list: {files_list}")
-            else:
-                log_test(9, "GET /files (list)", False, 
-                        f"Unexpected response: {files_list}")
+        response = requests.post(
+            f"{API_BASE}/auth/login",
+            json={"email": email, "password": password},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("mfa_required"):
+                print(f"⚠️  MFA required for {email}. Report this in test results.")
+                return None
+            return data.get("access_token")
         else:
-            log_test(9, "GET /files (list)", False, 
-                    f"Status {resp.status_code}: {resp.text}")
+            print(f"❌ Login failed for {email}: {response.status_code} - {response.text}")
+            return None
     except Exception as e:
-        log_test(9, "GET /files (list)", False, f"Exception: {e}")
+        print(f"❌ Login error for {email}: {str(e)}")
+        return None
+
+
+def test_scenario_1_auth(result: TestResult):
+    """Scenario 1: Auth gate - unauthenticated rejected, admin allowed"""
+    print("\n[Scenario 1] Testing Auth Gate...")
     
-    # Test 3: GET /api/files/{id}/download (streams bytes correctly)
-    if test_file_id:
+    # Test 1.1: Unauthenticated request should be rejected
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/competitors",
+            timeout=10
+        )
+        if response.status_code in [401, 403]:
+            result.add_pass(
+                "1.1 Unauthenticated rejected",
+                f"GET /competitors returned {response.status_code}"
+            )
+        else:
+            result.add_fail(
+                "1.1 Unauthenticated rejected",
+                f"Expected 401/403, got {response.status_code}"
+            )
+    except Exception as e:
+        result.add_fail("1.1 Unauthenticated rejected", f"Error: {str(e)}")
+    
+    # Test 1.2: Admin should be allowed
+    admin_token = login(ADMIN_EMAIL, ADMIN_PASSWORD)
+    if not admin_token:
+        result.add_fail("1.2 Admin login", "Failed to login as admin (MFA may be required)")
+        return None
+    
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/competitors",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            timeout=10
+        )
+        if response.status_code == 200:
+            result.add_pass(
+                "1.2 Admin access",
+                "GET /competitors returned 200"
+            )
+        else:
+            result.add_fail(
+                "1.2 Admin access",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+    except Exception as e:
+        result.add_fail("1.2 Admin access", f"Error: {str(e)}")
+    
+    return admin_token
+
+
+def test_scenario_2_site(result: TestResult, token: str):
+    """Scenario 2: Ensure site exists (create if needed)"""
+    print("\n[Scenario 2] Testing Site Registration...")
+    
+    try:
+        # Check if competitors endpoint returns connected=false (no site)
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/competitors",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "2.1 Check site status",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+            return
+        
+        data = response.json()
+        if data.get("connected") is False:
+            # Need to create a site
+            result.add_pass(
+                "2.1 Site not connected",
+                "connected=false (no site configured)"
+            )
+            
+            # Create site
+            response = requests.post(
+                f"{API_BASE}/marketing-os/search/sites",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"site_url": "https://natmedsol.com", "label": "NMS"},
+                timeout=10
+            )
+            
+            if response.status_code == 201:
+                result.add_pass(
+                    "2.2 Site created",
+                    f"POST /sites returned 201"
+                )
+            else:
+                result.add_fail(
+                    "2.2 Site created",
+                    f"Expected 201, got {response.status_code}: {response.text}"
+                )
+        else:
+            result.add_pass(
+                "2.1 Site already exists",
+                "connected=true (site already configured)"
+            )
+    
+    except Exception as e:
+        result.add_fail("2.x Site registration", f"Error: {str(e)}")
+
+
+def test_scenario_3_competitors(result: TestResult, token: str):
+    """Scenario 3: Competitors (first-party) - POST, GET list, GET by id, PHI reject"""
+    print("\n[Scenario 3] Testing Competitors (First-Party)...")
+    
+    # Test 3.1: POST competitor with domain normalization
+    try:
+        response = requests.post(
+            f"{API_BASE}/marketing-os/search/competitors",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "domain": "https://www.rival-clinic.com",
+                "display_name": "Rival Clinic"
+            },
+            timeout=10
+        )
+        
+        if response.status_code == 201:
+            data = response.json()
+            normalized = data.get("normalized_domain")
+            if normalized == "rival-clinic.com":
+                result.add_pass(
+                    "3.1 POST competitor",
+                    f"201 created, normalized_domain='rival-clinic.com'"
+                )
+                competitor_id = data.get("id")
+            else:
+                result.add_fail(
+                    "3.1 POST competitor",
+                    f"Expected normalized_domain='rival-clinic.com', got '{normalized}'"
+                )
+                competitor_id = data.get("id")
+        else:
+            result.add_fail(
+                "3.1 POST competitor",
+                f"Expected 201, got {response.status_code}: {response.text}"
+            )
+            competitor_id = None
+    except Exception as e:
+        result.add_fail("3.1 POST competitor", f"Error: {str(e)}")
+        competitor_id = None
+    
+    # Test 3.2: GET list shows competitor
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/competitors",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            competitors = data.get("competitors", [])
+            if len(competitors) > 0:
+                result.add_pass(
+                    "3.2 GET competitors list",
+                    f"200 OK, {len(competitors)} competitor(s) listed"
+                )
+            else:
+                result.add_fail(
+                    "3.2 GET competitors list",
+                    "Expected at least 1 competitor, got 0"
+                )
+        else:
+            result.add_fail(
+                "3.2 GET competitors list",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+    except Exception as e:
+        result.add_fail("3.2 GET competitors list", f"Error: {str(e)}")
+    
+    # Test 3.3: GET competitor by id
+    if competitor_id:
         try:
-            resp = requests.get(f"{BACKEND_URL}/files/{test_file_id}/download", 
-                              headers=client_headers, timeout=10)
-            if resp.status_code == 200:
-                downloaded_content = resp.content
-                if downloaded_content == test_content:
-                    log_test(9, "GET /files/{id}/download", True, 
-                            "Downloaded file matches uploaded content")
-                else:
-                    log_test(9, "GET /files/{id}/download", False, 
-                            f"Content mismatch: expected {len(test_content)} bytes, got {len(downloaded_content)}")
-            else:
-                log_test(9, "GET /files/{id}/download", False, 
-                        f"Status {resp.status_code}: {resp.text}")
-        except Exception as e:
-            log_test(9, "GET /files/{id}/download", False, f"Exception: {e}")
-
-
-def test_scenario_10_admin():
-    """Scenario 10: Admin (audit, users)"""
-    print("\n=== SCENARIO 10: Admin ===")
-    
-    # Test 1: Non-admin GET /api/admin/audit -> 403
-    if client_tokens.get("access"):
-        client_headers = {"Authorization": f"Bearer {client_tokens['access']}"}
-        try:
-            resp = requests.get(f"{BACKEND_URL}/admin/audit", headers=client_headers, timeout=10)
-            if resp.status_code == 403:
-                log_test(10, "Non-admin GET /admin/audit (403)", True, 
-                        "Correctly forbidden for non-admin")
-            else:
-                log_test(10, "Non-admin GET /admin/audit (403)", False, 
-                        f"Expected 403, got {resp.status_code}: {resp.text}")
-        except Exception as e:
-            log_test(10, "Non-admin GET /admin/audit (403)", False, f"Exception: {e}")
-    
-    if not admin_tokens.get("access"):
-        log_test(10, "Admin tests", False, "No admin token available")
-        return
-    
-    admin_headers = {"Authorization": f"Bearer {admin_tokens['access']}"}
-    
-    # Test 2: Admin GET /api/admin/audit -> list with latest events
-    try:
-        resp = requests.get(f"{BACKEND_URL}/admin/audit?limit=10", 
-                          headers=admin_headers, timeout=10)
-        if resp.status_code == 200:
-            audit_logs = resp.json()
-            if isinstance(audit_logs, list) and len(audit_logs) > 0:
-                # Check if logs have expected fields
-                first_log = audit_logs[0]
-                if first_log.get("id") and first_log.get("action"):
-                    log_test(10, "Admin GET /admin/audit (200)", True, 
-                            f"Retrieved {len(audit_logs)} audit logs")
-                else:
-                    log_test(10, "Admin GET /admin/audit (200)", False, 
-                            f"Missing fields in audit log: {first_log}")
-            else:
-                log_test(10, "Admin GET /admin/audit (200)", False, 
-                        f"Unexpected response: {audit_logs}")
-        else:
-            log_test(10, "Admin GET /admin/audit (200)", False, 
-                    f"Status {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_test(10, "Admin GET /admin/audit (200)", False, f"Exception: {e}")
-    
-    # Test 3: Admin POST /api/admin/users with role=practitioner
-    try:
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        payload = {
-            "email": f"newpractitioner_{timestamp}@natmedsol.test",
-            "password": "NewPrac!123",
-            "full_name": "New Practitioner",
-            "phone": "555-0200",
-            "role": "practitioner"
-        }
-        resp = requests.post(f"{BACKEND_URL}/admin/users", json=payload, 
-                           headers=admin_headers, timeout=10)
-        if resp.status_code == 200:
-            user_data = resp.json()
-            if user_data.get("role") == "practitioner" and user_data.get("email") == payload["email"]:
-                log_test(10, "Admin POST /admin/users (practitioner)", True, 
-                        f"Created practitioner: {user_data['email']}")
-            else:
-                log_test(10, "Admin POST /admin/users (practitioner)", False, 
-                        f"Unexpected response: {user_data}")
-        else:
-            log_test(10, "Admin POST /admin/users (practitioner)", False, 
-                    f"Status {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_test(10, "Admin POST /admin/users (practitioner)", False, f"Exception: {e}")
-    
-    # Test 4: Admin PUT /api/admin/users/{user_id}/role
-    try:
-        # First get list of users to find one to update
-        resp = requests.get(f"{BACKEND_URL}/admin/users", headers=admin_headers, timeout=10)
-        if resp.status_code == 200:
-            users = resp.json()
-            # Find a client user to update
-            client_user = next((u for u in users if u.get("role") == "client"), None)
-            if client_user:
-                user_id = client_user["id"]
-                payload = {"role": "staff"}
-                resp2 = requests.put(f"{BACKEND_URL}/admin/users/{user_id}/role", 
-                                   json=payload, headers=admin_headers, timeout=10)
-                if resp2.status_code == 200:
-                    updated_user = resp2.json()
-                    if updated_user.get("role") == "staff":
-                        log_test(10, "Admin PUT /admin/users/{id}/role", True, 
-                                f"Updated user role to staff")
-                    else:
-                        log_test(10, "Admin PUT /admin/users/{id}/role", False, 
-                                f"Role not updated: {updated_user}")
-                else:
-                    log_test(10, "Admin PUT /admin/users/{id}/role", False, 
-                            f"Status {resp2.status_code}: {resp2.text}")
-            else:
-                log_test(10, "Admin PUT /admin/users/{id}/role", False, 
-                        "No client user found to update")
-        else:
-            log_test(10, "Admin PUT /admin/users/{id}/role", False, 
-                    f"Failed to get users: {resp.status_code}")
-    except Exception as e:
-        log_test(10, "Admin PUT /admin/users/{id}/role", False, f"Exception: {e}")
-
-
-def test_scenario_11_public():
-    """Scenario 11: Public (appointment-request, vip-signup)"""
-    print("\n=== SCENARIO 11: Public Endpoints ===")
-    
-    # Test 1: POST /api/public/appointment-request
-    try:
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        payload = {
-            "fullName": "Test Appointment User",
-            "email": f"appointment_{timestamp}@test.com",
-            "phone": "555-1234",
-            "returning": "new",
-            "service": "consultation",
-            "date": "2024-12-20",
-            "time": "10:00 AM",
-            "notes": "Test appointment request",
-            "addOns": []
-        }
-        resp = requests.post(f"{BACKEND_URL}/public/appointment-request", 
-                           json=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("ok") and data.get("id"):
-                log_test(11, "POST /public/appointment-request", True, 
-                        f"Created appointment request: {data['id']}")
+            response = requests.get(
+                f"{API_BASE}/marketing-os/search/competitors/{competitor_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                comparison = data.get("comparison", {})
+                data_available = comparison.get("data_available")
                 
-                # Verify integration_log entry with _stubbed:true
-                if admin_tokens.get("access"):
-                    admin_headers = {"Authorization": f"Bearer {admin_tokens['access']}"}
-                    # Check audit logs for integration_log entry
-                    # Note: We can't directly query integration_log, but we can verify the response
-                    log_test(11, "Appointment request integration_log stub", True, 
-                            "Integration log entry should be created with _stubbed:true")
+                if data_available is False:
+                    reason = comparison.get("reason")
+                    if reason == "no_competitor_data_provider":
+                        result.add_pass(
+                            "3.3 GET competitor by id",
+                            f"200 OK, comparison.data_available=false, reason='no_competitor_data_provider'"
+                        )
+                    else:
+                        result.add_fail(
+                            "3.3 GET competitor by id",
+                            f"Expected reason='no_competitor_data_provider', got '{reason}'"
+                        )
+                else:
+                    result.add_fail(
+                        "3.3 GET competitor by id",
+                        f"Expected data_available=false, got {data_available}"
+                    )
             else:
-                log_test(11, "POST /public/appointment-request", False, 
-                        f"Unexpected response: {data}")
-        else:
-            log_test(11, "POST /public/appointment-request", False, 
-                    f"Status {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_test(11, "POST /public/appointment-request", False, f"Exception: {e}")
+                result.add_fail(
+                    "3.3 GET competitor by id",
+                    f"Expected 200, got {response.status_code}: {response.text}"
+                )
+        except Exception as e:
+            result.add_fail("3.3 GET competitor by id", f"Error: {str(e)}")
+    else:
+        result.add_warning("3.3 GET competitor by id", "Skipped (no competitor_id)")
     
-    # Test 2: POST /api/public/vip-signup
+    # Test 3.4: PHI rejection - POST with email field
     try:
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        payload = {"email": f"vip_{timestamp}@test.com"}
-        resp = requests.post(f"{BACKEND_URL}/public/vip-signup", json=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("ok"):
-                log_test(11, "POST /public/vip-signup", True, 
-                        "VIP signup successful")
-                log_test(11, "VIP signup integration_log stub", True, 
-                        "Integration log entry should be created with _stubbed:true")
-            else:
-                log_test(11, "POST /public/vip-signup", False, 
-                        f"Unexpected response: {data}")
+        response = requests.post(
+            f"{API_BASE}/marketing-os/search/competitors",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "domain": "https://x.com",
+                "email": "a@b.com"
+            },
+            timeout=10
+        )
+        
+        if response.status_code == 400 or response.status_code == 422:
+            result.add_pass(
+                "3.4 PHI rejection",
+                f"POST with email field rejected with {response.status_code}"
+            )
         else:
-            log_test(11, "POST /public/vip-signup", False, 
-                    f"Status {resp.status_code}: {resp.text}")
+            result.add_fail(
+                "3.4 PHI rejection",
+                f"Expected 400/422, got {response.status_code}: {response.text}"
+            )
     except Exception as e:
-        log_test(11, "POST /public/vip-signup", False, f"Exception: {e}")
+        result.add_fail("3.4 PHI rejection", f"Error: {str(e)}")
 
 
-def test_scenario_12_dashboard():
-    """Scenario 12: Dashboard stats per role"""
-    print("\n=== SCENARIO 12: Dashboard Stats ===")
+def test_scenario_4_keyword_gap(result: TestResult, token: str):
+    """Scenario 4: Keyword gap - connected=false, not_connected_reason, records=[]"""
+    print("\n[Scenario 4] Testing Keyword Gap...")
     
-    # Test 1: Client dashboard
-    if client_tokens.get("access"):
-        client_headers = {"Authorization": f"Bearer {client_tokens['access']}"}
-        try:
-            resp = requests.get(f"{BACKEND_URL}/dashboard/stats", 
-                              headers=client_headers, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("role") == "client" and "client_id" in data:
-                    log_test(12, "Client dashboard stats", True, 
-                            f"Client stats: role={data['role']}, client_id={data.get('client_id')}")
-                else:
-                    log_test(12, "Client dashboard stats", False, 
-                            f"Unexpected client stats: {data}")
-            else:
-                log_test(12, "Client dashboard stats", False, 
-                        f"Status {resp.status_code}: {resp.text}")
-        except Exception as e:
-            log_test(12, "Client dashboard stats", False, f"Exception: {e}")
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/keyword-gap",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "4.1 Keyword gap status",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+            return
+        
+        data = response.json()
+        
+        # Check connected=false
+        if data.get("connected") is False:
+            result.add_pass(
+                "4.1 Keyword gap connected",
+                "connected=false"
+            )
+        else:
+            result.add_fail(
+                "4.1 Keyword gap connected",
+                f"Expected connected=false, got {data.get('connected')}"
+            )
+        
+        # Check not_connected_reason
+        reason = data.get("not_connected_reason")
+        if reason == "no_competitor_data_provider":
+            result.add_pass(
+                "4.2 Not connected reason",
+                "not_connected_reason='no_competitor_data_provider'"
+            )
+        else:
+            result.add_fail(
+                "4.2 Not connected reason",
+                f"Expected 'no_competitor_data_provider', got '{reason}'"
+            )
+        
+        # Check records=[]
+        records = data.get("records", None)
+        if records == []:
+            result.add_pass(
+                "4.3 Records empty",
+                "records=[]"
+            )
+        else:
+            result.add_fail(
+                "4.3 Records empty",
+                f"Expected records=[], got {len(records) if records else 'null'} items"
+            )
+        
+        # Check summary present with numeric zero counts (acceptable for count of zero records)
+        summary = data.get("summary", {})
+        if summary:
+            result.add_pass(
+                "4.4 Summary present",
+                f"summary present with keys: {list(summary.keys())}"
+            )
+        else:
+            result.add_fail(
+                "4.4 Summary present",
+                "summary not present"
+            )
     
-    # Test 2: Practitioner dashboard
-    if practitioner_tokens.get("access"):
-        prac_headers = {"Authorization": f"Bearer {practitioner_tokens['access']}"}
-        try:
-            resp = requests.get(f"{BACKEND_URL}/dashboard/stats", 
-                              headers=prac_headers, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("role") == "practitioner" and "my_notes" in data:
-                    log_test(12, "Practitioner dashboard stats", True, 
-                            f"Practitioner stats: role={data['role']}, my_notes={data.get('my_notes')}")
-                else:
-                    log_test(12, "Practitioner dashboard stats", False, 
-                            f"Unexpected practitioner stats: {data}")
-            else:
-                log_test(12, "Practitioner dashboard stats", False, 
-                        f"Status {resp.status_code}: {resp.text}")
-        except Exception as e:
-            log_test(12, "Practitioner dashboard stats", False, f"Exception: {e}")
+    except Exception as e:
+        result.add_fail("4.x Keyword gap", f"Error: {str(e)}")
+
+
+def test_scenario_5_content_opportunities(result: TestResult, token: str):
+    """Scenario 5: Content opportunities - advisory_only=true, requires_human_approval=true"""
+    print("\n[Scenario 5] Testing Content Opportunities...")
     
-    # Test 3: Admin dashboard
-    if admin_tokens.get("access"):
-        admin_headers = {"Authorization": f"Bearer {admin_tokens['access']}"}
-        try:
-            resp = requests.get(f"{BACKEND_URL}/dashboard/stats", 
-                              headers=admin_headers, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("role") == "admin" and "clients" in data and "users" in data:
-                    log_test(12, "Admin dashboard stats", True, 
-                            f"Admin stats: role={data['role']}, clients={data.get('clients')}, users={data.get('users')}")
-                else:
-                    log_test(12, "Admin dashboard stats", False, 
-                            f"Unexpected admin stats: {data}")
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/content-opportunities",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "5.1 Content opportunities status",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+            return
+        
+        data = response.json()
+        
+        # Check advisory_only=true
+        if data.get("advisory_only") is True:
+            result.add_pass(
+                "5.1 Advisory only",
+                "advisory_only=true"
+            )
+        else:
+            result.add_fail(
+                "5.1 Advisory only",
+                f"Expected advisory_only=true, got {data.get('advisory_only')}"
+            )
+        
+        # Check requires_human_approval=true
+        if data.get("requires_human_approval") is True:
+            result.add_pass(
+                "5.2 Requires human approval",
+                "requires_human_approval=true"
+            )
+        else:
+            result.add_fail(
+                "5.2 Requires human approval",
+                f"Expected requires_human_approval=true, got {data.get('requires_human_approval')}"
+            )
+        
+        # Check opportunities is a list
+        opportunities = data.get("opportunities")
+        if isinstance(opportunities, list):
+            result.add_pass(
+                "5.3 Opportunities list",
+                f"opportunities is a list with {len(opportunities)} items"
+            )
+            
+            # If any items exist, check external_write=false
+            if len(opportunities) > 0:
+                all_correct = True
+                for i, opp in enumerate(opportunities):
+                    if opp.get("external_write") is not False:
+                        result.add_fail(
+                            f"5.4 Opportunity {i+1} external_write",
+                            f"Expected external_write=false, got {opp.get('external_write')}"
+                        )
+                        all_correct = False
+                
+                if all_correct:
+                    result.add_pass(
+                        "5.4 All opportunities external_write",
+                        f"All {len(opportunities)} opportunities have external_write=false"
+                    )
+        else:
+            result.add_fail(
+                "5.3 Opportunities list",
+                f"Expected opportunities to be a list, got {type(opportunities)}"
+            )
+    
+    except Exception as e:
+        result.add_fail("5.x Content opportunities", f"Error: {str(e)}")
+
+
+def test_scenario_6_backlinks(result: TestResult, token: str):
+    """Scenario 6: Backlinks - overview with connected=false and NULL counts (NOT 0), list empty"""
+    print("\n[Scenario 6] Testing Backlinks...")
+    
+    # Test 6.1: Backlinks overview
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/backlinks/overview",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "6.1 Backlinks overview status",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+        else:
+            data = response.json()
+            
+            # Check connected=false
+            if data.get("connected") is False:
+                result.add_pass(
+                    "6.1a Backlinks connected",
+                    "connected=false"
+                )
             else:
-                log_test(12, "Admin dashboard stats", False, 
-                        f"Status {resp.status_code}: {resp.text}")
-        except Exception as e:
-            log_test(12, "Admin dashboard stats", False, f"Exception: {e}")
+                result.add_fail(
+                    "6.1a Backlinks connected",
+                    f"Expected connected=false, got {data.get('connected')}"
+                )
+            
+            # Check counts are NULL (not 0)
+            count_fields = ["backlink_count", "referring_domains", "new_backlinks", "lost_backlinks"]
+            all_null = True
+            for field in count_fields:
+                value = data.get(field)
+                if value is not None:
+                    result.add_fail(
+                        f"6.1b {field}",
+                        f"Expected null, got {value} (must be null, NOT 0)"
+                    )
+                    all_null = False
+            
+            if all_null:
+                result.add_pass(
+                    "6.1b Backlink counts NULL",
+                    "All counts (backlink_count, referring_domains, new_backlinks, lost_backlinks) are null (NOT 0)"
+                )
+    
+    except Exception as e:
+        result.add_fail("6.1 Backlinks overview", f"Error: {str(e)}")
+    
+    # Test 6.2: Backlinks list
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/backlinks",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "6.2 Backlinks list status",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+        else:
+            data = response.json()
+            
+            # Check backlinks=[]
+            backlinks = data.get("backlinks", None)
+            if backlinks == []:
+                result.add_pass(
+                    "6.2a Backlinks empty",
+                    "backlinks=[]"
+                )
+            else:
+                result.add_fail(
+                    "6.2a Backlinks empty",
+                    f"Expected backlinks=[], got {len(backlinks) if backlinks else 'null'} items"
+                )
+            
+            # Check not_connected_reason present
+            reason = data.get("not_connected_reason")
+            if reason:
+                result.add_pass(
+                    "6.2b Not connected reason",
+                    f"not_connected_reason='{reason}'"
+                )
+            else:
+                result.add_fail(
+                    "6.2b Not connected reason",
+                    "not_connected_reason not present"
+                )
+    
+    except Exception as e:
+        result.add_fail("6.2 Backlinks list", f"Error: {str(e)}")
+
+
+def test_scenario_7_local_seo(result: TestResult, token: str):
+    """Scenario 7: Local SEO - connected=false, not_connected_reason, opportunities advisory_only=true"""
+    print("\n[Scenario 7] Testing Local SEO...")
+    
+    # Test 7.1: Local SEO endpoint
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/local",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "7.1 Local SEO status",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+        else:
+            data = response.json()
+            
+            # Check connected=false
+            if data.get("connected") is False:
+                result.add_pass(
+                    "7.1a Local connected",
+                    "connected=false"
+                )
+            else:
+                result.add_fail(
+                    "7.1a Local connected",
+                    f"Expected connected=false, got {data.get('connected')}"
+                )
+            
+            # Check not_connected_reason
+            reason = data.get("not_connected_reason")
+            if reason == "no_local_data_source":
+                result.add_pass(
+                    "7.1b Not connected reason",
+                    "not_connected_reason='no_local_data_source'"
+                )
+            else:
+                result.add_fail(
+                    "7.1b Not connected reason",
+                    f"Expected 'no_local_data_source', got '{reason}'"
+                )
+            
+            # Check locations=[]
+            locations = data.get("locations", None)
+            if locations == []:
+                result.add_pass(
+                    "7.1c Locations empty",
+                    "locations=[]"
+                )
+            else:
+                result.add_fail(
+                    "7.1c Locations empty",
+                    f"Expected locations=[], got {len(locations) if locations else 'null'} items"
+                )
+    
+    except Exception as e:
+        result.add_fail("7.1 Local SEO", f"Error: {str(e)}")
+    
+    # Test 7.2: Local opportunities
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/local/opportunities",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "7.2 Local opportunities status",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+        else:
+            data = response.json()
+            
+            # Check advisory_only=true
+            if data.get("advisory_only") is True:
+                result.add_pass(
+                    "7.2a Advisory only",
+                    "advisory_only=true"
+                )
+            else:
+                result.add_fail(
+                    "7.2a Advisory only",
+                    f"Expected advisory_only=true, got {data.get('advisory_only')}"
+                )
+            
+            # Check requires_human_approval=true
+            if data.get("requires_human_approval") is True:
+                result.add_pass(
+                    "7.2b Requires human approval",
+                    "requires_human_approval=true"
+                )
+            else:
+                result.add_fail(
+                    "7.2b Requires human approval",
+                    f"Expected requires_human_approval=true, got {data.get('requires_human_approval')}"
+                )
+    
+    except Exception as e:
+        result.add_fail("7.2 Local opportunities", f"Error: {str(e)}")
+
+
+def test_scenario_8_safety(result: TestResult, token: str):
+    """Scenario 8: Safety policy - all flags correct"""
+    print("\n[Scenario 8] Testing Safety Policy...")
+    
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/capabilities",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "8.1 Capabilities status",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+            return
+        
+        data = response.json()
+        policy = data.get("policy", {})
+        
+        # Check policy flags
+        policy_checks = [
+            ("external_writes_enabled", False),
+            ("automatic_budget_changes_enabled", False),
+            ("automatic_campaign_creation_enabled", False),
+            ("automatic_publishing_enabled", False),
+            ("human_approval_required", True),
+        ]
+        
+        all_correct = True
+        for key, expected in policy_checks:
+            actual = policy.get(key)
+            if actual == expected:
+                result.add_pass(
+                    f"8.{policy_checks.index((key, expected)) + 1} policy.{key}",
+                    f"{key}={expected}"
+                )
+            else:
+                result.add_fail(
+                    f"8.{policy_checks.index((key, expected)) + 1} policy.{key}",
+                    f"Expected {key}={expected}, got {actual}"
+                )
+                all_correct = False
+    
+    except Exception as e:
+        result.add_fail("8.x Safety policy", f"Error: {str(e)}")
 
 
 def main():
-    """Run all test scenarios"""
-    print("=" * 80)
-    print("NatMedSol EMR Phase-1 Backend Comprehensive Test Suite")
-    print(f"Backend URL: {BACKEND_URL}")
-    print("=" * 80)
+    print("="*80)
+    print("PHASE 3: COMPETITOR INTELLIGENCE + KEYWORD GAP + BACKLINK + LOCAL SEO")
+    print("Backend Testing Suite")
+    print("="*80)
     
-    # Run all scenarios in order
-    test_scenario_1_register()
-    test_scenario_2_login()
-    test_scenario_3_me()
-    test_scenario_4_refresh()
-    test_scenario_5_mfa()
-    test_scenario_6_rbac()
-    test_scenario_7_intake()
-    test_scenario_8_soap()
-    test_scenario_9_files()
-    test_scenario_10_admin()
-    test_scenario_11_public()
-    test_scenario_12_dashboard()
+    result = TestResult()
     
-    # Summary
-    print("\n" + "=" * 80)
-    print("TEST SUMMARY")
-    print("=" * 80)
+    # Scenario 1: Auth gate
+    admin_token = test_scenario_1_auth(result)
+    if not admin_token:
+        print("\n❌ Cannot proceed without admin token")
+        result.print_summary()
+        return
     
-    passed = sum(1 for p, _ in test_results if p)
-    failed = sum(1 for p, _ in test_results if not p)
-    total = len(test_results)
+    # Scenario 2: Site registration
+    test_scenario_2_site(result, admin_token)
     
-    print(f"\nTotal Tests: {total}")
-    print(f"Passed: {passed} ✅")
-    print(f"Failed: {failed} ❌")
-    print(f"Success Rate: {(passed/total*100):.1f}%\n")
+    # Scenario 3: Competitors (first-party)
+    test_scenario_3_competitors(result, admin_token)
     
-    if failed > 0:
-        print("FAILED TESTS:")
-        for passed, result in test_results:
-            if not passed:
-                print(result)
+    # Scenario 4: Keyword gap
+    test_scenario_4_keyword_gap(result, admin_token)
     
-    print("\n" + "=" * 80)
-    return failed == 0
+    # Scenario 5: Content opportunities
+    test_scenario_5_content_opportunities(result, admin_token)
+    
+    # Scenario 6: Backlinks
+    test_scenario_6_backlinks(result, admin_token)
+    
+    # Scenario 7: Local SEO
+    test_scenario_7_local_seo(result, admin_token)
+    
+    # Scenario 8: Safety policy
+    test_scenario_8_safety(result, admin_token)
+    
+    # Print summary
+    result.print_summary()
 
 
 if __name__ == "__main__":
-    success = main()
-    exit(0 if success else 1)
+    main()

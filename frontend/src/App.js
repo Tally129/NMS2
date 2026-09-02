@@ -53,11 +53,14 @@ import TelehealthHub from "./pages/portal/TelehealthHub";
 import Tasks from "./pages/portal/Tasks";
 import LabReviewQueue from "./pages/portal/LabReviewQueue";
 import CampaignCenter from "./pages/portal/CampaignCenter";
+import ContentStrategist from "./pages/portal/ContentStrategist";
+import MarketingCommandCenter from "./pages/portal/MarketingCommandCenter";
 import Accounting from "./pages/portal/Accounting";
 import StaffLogin from "./pages/StaffLogin";
-import OAuthComplete from "./pages/OAuthComplete";
 import MfaChallenge from "./pages/MfaChallenge";
 import ChangePassword from "./pages/ChangePassword";
+import BootstrapMfa from "./pages/BootstrapMfa";
+import ResetPassword from "./pages/ResetPassword";
 import Unsubscribe from "./pages/Unsubscribe";
 import LegalHub from "./pages/LegalHub";
 import LegalPolicyPage from "./pages/LegalPolicyPage";
@@ -94,9 +97,10 @@ function App() {
             <Route path="/login" element={<Login />} />
             <Route path="/patient-login" element={<Login />} />
             <Route path="/staff-login" element={<StaffLogin />} />
-            <Route path="/oauth-complete" element={<OAuthComplete />} />
             <Route path="/mfa-challenge" element={<MfaChallenge />} />
-            <Route path="/change-password" element={<Protected><ChangePassword /></Protected>} />
+            <Route path="/change-password" element={<ChangePassword />} />
+            <Route path="/bootstrap-mfa" element={<BootstrapMfa />} />
+            <Route path="/reset-password" element={<ResetPassword />} />
             <Route path="/unsubscribe" element={<Unsubscribe />} />
             {/* Legal & Policies (publicly readable) */}
             <Route path="/legal" element={<LegalHub />} />
@@ -115,6 +119,8 @@ function App() {
             <Route path="/portal/staff/tasks" element={<Protected roles={CLINICAL_STAFF_ROLES}><Tasks /></Protected>} />
             <Route path="/portal/staff/lab-review" element={<Protected roles={CLINICAL_STAFF_ROLES}><LabReviewQueue /></Protected>} />
             <Route path="/portal/staff/campaigns" element={<Protected roles={["staff", "admin", "practitioner", "front_desk", "frontdesk"]}><CampaignCenter /></Protected>} />
+            <Route path="/portal/marketing" element={<Protected roles={["admin", "practitioner"]}><MarketingCommandCenter /></Protected>} />
+            <Route path="/portal/staff/content-strategist" element={<Protected roles={["staff", "admin", "practitioner", "medical_assistant", "front_desk", "frontdesk", "auditor"]}><ContentStrategist /></Protected>} />
             <Route path="/portal/admin/accounting" element={<Protected roles={["admin", "auditor"]}><Accounting /></Protected>} />
             <Route path="/portal/admin/telehealth" element={<Protected roles={["admin"]}><TelehealthHub /></Protected>} />
 

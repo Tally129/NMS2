@@ -52,6 +52,7 @@ export default function TelehealthVisit() {
   const remoteVideoRef = React.useRef(null);
   const wsRef = React.useRef(null);
   const pcRef = React.useRef(null);
+  const pendingIceRef = React.useRef([]);
   const localStreamRef = React.useRef(null); // mirror for cleanup
   const recorderRef = React.useRef(null);
   const recChunksRef = React.useRef([]);
@@ -103,6 +104,35 @@ export default function TelehealthVisit() {
     })();
     // eslint-disable-next-line
   }, [stage]);
+
+  // Reattach the existing camera stream whenever React replaces the
+  // local <video> element during tech → waiting → in-call transitions.
+  React.useEffect(() => {
+    const video = localVideoRef.current;
+
+    if (!video || !localStream) return;
+
+    if (video.srcObject !== localStream) {
+      video.srcObject = localStream;
+    }
+
+    video.muted = true;
+    video.playsInline = true;
+    video.autoplay = true;
+
+    const playPreview = async () => {
+      try {
+        await video.play();
+      } catch (error) {
+        console.warn(
+          "Local mobile preview could not autoplay:",
+          error,
+        );
+      }
+    };
+
+    playPreview();
+  }, [localStream, stage]);
 
   // Cleanup on unmount
   React.useEffect(() => {
@@ -163,6 +193,9 @@ export default function TelehealthVisit() {
     try {
       const r = await api.post(`/appointments/${id}/telehealth/request-join`);
       setWaitingRoom(r.data || { state: "requested" });
+
+      // Move to the waiting-room UI. The local-stream effect will attach
+      // the existing mobile camera stream to the newly mounted video.
       setStage("waiting");
     } catch (e) {
       toast({ title: "Could not request to join", description: getErrorMessage(e) || "" });
@@ -230,9 +263,44 @@ export default function TelehealthVisit() {
   const newPC = (signalingStream, iceServers = FALLBACK_ICE) => {
     const pc = new RTCPeerConnection({ iceServers });
     pc.onicecandidate = (e) => { if (e.candidate) sendWS({ type: "ice-candidate", candidate: e.candidate }); };
-    pc.ontrack = (e) => {
-      if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== e.streams[0]) {
-        remoteVideoRef.current.srcObject = e.streams[0];
+    pc.ontrack = (event) => {
+      console.info(
+        "Remote track received:",
+        event.track?.kind,
+        event.track?.readyState,
+      );
+
+      let remoteStream = event.streams?.[0];
+
+      // Some mobile browsers deliver a track without a populated streams
+      // array. Build a MediaStream so the remote video still receives it.
+      if (!remoteStream && event.track) {
+        remoteStream = new MediaStream([event.track]);
+      }
+
+      if (remoteVideoRef.current && remoteStream) {
+        remoteVideoRef.current.srcObject = remoteStream;
+        remoteVideoRef.current
+          .play()
+          .catch((error) =>
+            console.warn("Remote video play failed:", error)
+          );
+      }
+
+      if (event.track) {
+        event.track.onunmute = () => {
+          setPeerOnline(true);
+
+          if (remoteVideoRef.current) {
+            remoteVideoRef.current
+              .play()
+              .catch(() => {});
+          }
+        };
+
+        event.track.onended = () => {
+          console.warn("Remote track ended:", event.track.kind);
+        };
       }
     };
     pc.onconnectionstatechange = () => {
@@ -241,7 +309,18 @@ export default function TelehealthVisit() {
       }
     };
     if (signalingStream) {
-      signalingStream.getTracks().forEach((t) => pc.addTrack(t, signalingStream));
+      signalingStream.getTracks().forEach((track) => {
+        track.enabled = true;
+
+        console.info(
+          "Adding local track:",
+          track.kind,
+          track.readyState,
+          track.enabled,
+        );
+
+        pc.addTrack(track, signalingStream);
+      });
     }
     return pc;
   };
@@ -303,14 +382,55 @@ export default function TelehealthVisit() {
         setPeerOnline(false);
         toast({ title: "Other party disconnected" });
       } else if (data.type === "webrtc-offer") {
-        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        await pc.setRemoteDescription(
+          new RTCSessionDescription(data.sdp)
+        );
+
+        // Mobile candidates can arrive before the offer. Apply them only
+        // after the remote description exists.
+        for (const candidate of pendingIceRef.current) {
+          try {
+            await pc.addIceCandidate(candidate);
+          } catch (error) {
+            console.warn("Queued ICE candidate failed:", error);
+          }
+        }
+        pendingIceRef.current = [];
+
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        sendWS({ type: "webrtc-answer", sdp: answer });
+
+        sendWS({
+          type: "webrtc-answer",
+          sdp: pc.localDescription,
+        });
       } else if (data.type === "webrtc-answer") {
-        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        await pc.setRemoteDescription(
+          new RTCSessionDescription(data.sdp)
+        );
+
+        for (const candidate of pendingIceRef.current) {
+          try {
+            await pc.addIceCandidate(candidate);
+          } catch (error) {
+            console.warn("Queued ICE candidate failed:", error);
+          }
+        }
+        pendingIceRef.current = [];
       } else if (data.type === "ice-candidate") {
-        try { await pc.addIceCandidate(data.candidate); } catch (e) { console.warn("ice add", e); }
+        if (!data.candidate) return;
+
+        const candidate = new RTCIceCandidate(data.candidate);
+
+        if (pc.remoteDescription?.type) {
+          try {
+            await pc.addIceCandidate(candidate);
+          } catch (error) {
+            console.warn("ICE candidate failed:", error);
+          }
+        } else {
+          pendingIceRef.current.push(candidate);
+        }
       } else if (data.type === "chat") {
         setChatMsgs((m) => [...m, { from: data.from, body: data.body, ts: new Date().toISOString() }]);
       } else if (data.type === "waiting-room") {
@@ -537,7 +657,14 @@ export default function TelehealthVisit() {
             <h1 className="font-display text-3xl mb-2">Test your camera & microphone</h1>
             <p className="text-[#c8d4cc] mb-6">Make sure you can be seen and heard before joining.</p>
             <div className="rounded-2xl bg-[#0e1a14] border border-[#2f4a3a] overflow-hidden aspect-video relative max-w-2xl mx-auto mb-6">
-              <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" data-testid="techcheck-video" />
+              <video
+                ref={localVideoRef}
+                autoPlay
+                muted
+                playsInline
+                disablePictureInPicture
+                className="w-full h-full object-cover"
+ data-testid="techcheck-video" />
               {!localStream && (
                 <div className="absolute inset-0 flex items-center justify-center text-[#8a9a8e]">
                   <Loader2 className="animate-spin mr-2" size={18} /> Requesting camera & mic…
@@ -580,7 +707,14 @@ export default function TelehealthVisit() {
               Feel free to keep testing your camera and microphone below.
             </p>
             <div className="rounded-2xl bg-[#0e1a14] border border-[#2f4a3a] overflow-hidden aspect-video relative max-w-2xl mx-auto mb-4">
-              <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" data-testid="waiting-video" />
+              <video
+                ref={localVideoRef}
+                autoPlay
+                muted
+                playsInline
+                disablePictureInPicture
+                className="w-full h-full object-cover"
+ data-testid="waiting-video" />
               <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-2">
                 <button onClick={toggleMic} className={`p-3 rounded-full ${micOn ? "bg-[#2f4a3a]" : "bg-[#7a2a2a]"} text-[#f6f1e6]`} data-testid="waiting-mic-toggle">
                   {micOn ? <Mic size={16} /> : <MicOff size={16} />}
@@ -636,7 +770,14 @@ export default function TelehealthVisit() {
                 : "The patient will appear here once they complete their device check and request to join."}
             </p>
             <div className="rounded-2xl bg-[#0e1a14] border border-[#2f4a3a] overflow-hidden aspect-video relative max-w-2xl mx-auto mb-6">
-              <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" data-testid="provider-preview-video" />
+              <video
+                ref={localVideoRef}
+                autoPlay
+                muted
+                playsInline
+                disablePictureInPicture
+                className="w-full h-full object-cover"
+ data-testid="provider-preview-video" />
               {!localStream && (
                 <div className="absolute inset-0 flex items-center justify-center text-[#8a9a8e]">
                   <Loader2 className="animate-spin mr-2" size={18} /> Requesting camera & mic…
@@ -712,12 +853,19 @@ export default function TelehealthVisit() {
               {!peerOnline && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center text-[#8a9a8e] bg-[#0e1a14]/90">
                   <Loader2 className="animate-spin mb-3" size={28} />
-                  <p className="text-sm">Waiting for the {isProvider ? "client" : "provider"} to join…</p>
+                  <p className="text-sm">Waiting for the {isProvider ? "patient" : "provider"} to join…</p>
                 </div>
               )}
               {/* Local PIP */}
               <div className="absolute bottom-4 right-4 w-40 aspect-video rounded-lg overflow-hidden border-2 border-[#c19a4b] shadow-lg">
-                <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
+                <video
+                ref={localVideoRef}
+                autoPlay
+                muted
+                playsInline
+                disablePictureInPicture
+                className="w-full h-full object-cover"
+ />
               </div>
               {/* Controls */}
               <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-2 bg-[#0e1a14]/80 rounded-full px-3 py-2 backdrop-blur">

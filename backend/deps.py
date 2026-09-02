@@ -1,12 +1,12 @@
 """
 Shared FastAPI singletons + auth dependencies.
 
-Sprint 1 changes:
-- `assert_valid_secret()` runs at import — HIPAA_MODE=on refuses insufficient config.
-- `get_authenticated_user()` — decodes access token + verifies session revocation status.
-- `require_workforce_mfa()` — 403 with `must_enroll_mfa` when workforce user hasn't finished MFA.
-- `require_roles()` composes both: authentication + role + workforce-MFA gate.
-- No URL-path allowlist inside `get_authenticated_user` — enrollment routes use it directly (no MFA).
+Phase 3.7 (S3 cutover + MongoDB removal): the app runs entirely on
+PostgreSQL. The Motor client is gone. `db` is a `MotorCompatDb` bound
+purely to PostgreSQL — every collection referenced at runtime resolves
+to a PG-backed model. Requesting an unknown collection raises
+`AttributeError` (no silent Mongo fallback). Blob storage flows through
+`storage.get_storage()` (filesystem in dev, S3 in prod) — not GridFS.
 """
 from __future__ import annotations
 
@@ -19,12 +19,24 @@ from typing import Optional
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorGridFSBucket
 
 from audit import get_client_ip, log_audit  # noqa: F401 (re-exported for routers)
 from auth_utils import (
     assert_valid_secret, decode_token, get_jwt_audience, get_jwt_issuer,
 )
+from motor_compat_pg import MotorCompatDb
+
+# The FastAPI-wide db handle. No Motor. No Mongo. Pure PostgreSQL router
+# behind a Motor-shaped facade so pre-existing router code keeps working.
+db = MotorCompatDb()
+
+
+async def close_mongo():  # noqa: D401 — kept for callsite compatibility
+    """No-op shim; MongoDB was fully retired in Phase 3.7."""
+    return None
+from postgres_db import AsyncSessionLocal
+from repositories import user_sessions as sessions_repo
+from repositories import users as users_repo
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -35,21 +47,11 @@ load_dotenv(ROOT_DIR / ".env")
 # --------------------------------------------------------------------------- #
 _HIPAA_MODE = os.environ.get("HIPAA_MODE", "false").lower() in {"1", "true", "yes", "on"}
 
-# These raise RuntimeError at import if HIPAA_MODE=on and any is missing/weak.
 assert_valid_secret()
 get_jwt_issuer()
 get_jwt_audience()
 
 WORKFORCE_ROLES = {"admin", "practitioner", "staff", "front_desk", "frontdesk", "medical_assistant", "auditor"}
-
-
-# --------------------------------------------------------------------------- #
-# Mongo                                                                        #
-# --------------------------------------------------------------------------- #
-_mongo_url = os.environ["MONGO_URL"]
-_client = AsyncIOMotorClient(_mongo_url)
-db = _client[os.environ["DB_NAME"]]
-fs_bucket = AsyncIOMotorGridFSBucket(db, bucket_name="emr_files")
 
 
 # --------------------------------------------------------------------------- #
@@ -91,24 +93,24 @@ def to_user_out(user) -> dict:
 
 
 async def _resolve_self_client(user) -> Optional[dict]:
-    return await db.clients.find_one({"user_id": user["id"]})
-
-
-def close_mongo():
-    _client.close()
+    """Client business data reads from PostgreSQL (Phase 3.1a landed the
+    data + Phase 3.1b partial adds the repository). Non-auth routers that
+    still call `db.clients.find_one(...)` will migrate individually in the
+    remainder of Phase 3.1b."""
+    from repositories import clients as clients_repo  # local import to avoid boot cycle
+    async with AsyncSessionLocal() as pg:
+        return await clients_repo.get_by_user_id(pg, user["id"])
 
 
 # --------------------------------------------------------------------------- #
-# Sprint-1 dependency: decode + session-revocation check                       #
+# Session 2b: decode + session-revocation check via PostgreSQL                #
 # --------------------------------------------------------------------------- #
 async def get_authenticated_user(
     request: Request,
     creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer),
 ):
-    """Verify the bearer JWT + session revocation + session_version + idle/absolute
-    timeouts. Only touches `last_used_at` AFTER all checks pass, and throttles
-    that write to once per minute (per Sprint 2 gate corrections).
-    """
+    """Verify the bearer JWT + session revocation + session_version + idle/
+    absolute timeouts. Reads the user + session rows from PostgreSQL."""
     if creds is None:
         raise HTTPException(status_code=401, detail="Missing auth token")
 
@@ -118,53 +120,43 @@ async def get_authenticated_user(
     if not sid:
         raise HTTPException(status_code=401, detail="Session binding required; please sign in again.")
 
-    session = await db.user_sessions.find_one({"id": sid})
-    if not session:
-        raise HTTPException(status_code=401, detail="Session not found")
+    async with AsyncSessionLocal() as pg:
+        session_row = await sessions_repo.get(pg, sid)
+        if not session_row:
+            raise HTTPException(status_code=401, detail="Session not found")
 
-    # Order of checks per Sprint 2 gate: revoked → absolute → idle → status → session_version → THEN touch.
+    # Order: revoked → absolute → idle → status → session_version → THEN touch.
     from sessions import check_and_touch_session
-    reason = await check_and_touch_session(session, get_client_ip(request))
+    reason = await check_and_touch_session(session_row, get_client_ip(request))
     if reason:
-        # Do not silently overwrite — bump the session row's reason field too.
+        # Persist the revocation reason on the row that triggered the failure.
         try:
-            await db.user_sessions.update_one(
-                {"id": sid, "revoked_at": None},
-                {"$set": {"revoked_at": datetime.now(timezone.utc), "revoke_reason": reason}},
-            )
+            async with AsyncSessionLocal() as pg:
+                async with pg.begin():
+                    await sessions_repo.revoke_by_id(pg, sid, reason)
         except Exception:
             pass
         raise HTTPException(status_code=401, detail=reason)
 
-    user = await db.users.find_one({"id": payload["sub"]})
+    async with AsyncSessionLocal() as pg:
+        user = await users_repo.get_by_id(pg, payload["sub"])
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     if not user.get("is_active", True):
         raise HTTPException(status_code=403, detail="Account disabled")
 
-    # Session-version staleness: any access token issued before the current version is invalid.
     token_sv = payload.get("sv")
     if token_sv is not None and int(user.get("session_version") or 1) > int(token_sv):
         raise HTTPException(status_code=401, detail="session_version_stale")
 
-    user["_session"] = session
+    user["_session"] = session_row
     return user
 
 
-# Back-compat alias: existing routers import `get_current_user`.
 get_current_user = get_authenticated_user
 
 
 async def require_workforce_mfa(user=Depends(get_authenticated_user)):
-    """403 `must_enroll_mfa` when a workforce user hasn't completed MFA setup.
-    Client role is exempt (they are not workforce).
-
-    Per-account MFA bypass: if a user document carries `mfa_bypass: True`, the
-    workforce-MFA gate is skipped. Used as an emergency-recovery lever when
-    a TOTP secret is lost and the container clock prevents on-the-fly TOTP
-    generation. Enable/disable via a direct DB write; the flag is intentionally
-    invisible from the UI to prevent casual toggling.
-    """
     role = user.get("role")
     if role in WORKFORCE_ROLES and not user.get("mfa_bypass"):
         if not user.get("mfa_enabled"):
@@ -176,7 +168,6 @@ async def require_workforce_mfa(user=Depends(get_authenticated_user)):
                     "next": {"setup": "/api/auth/mfa/setup", "verify": "/api/auth/mfa/verify"},
                 },
             )
-        # Also require this login's MFA-satisfied timestamp (set only on successful TOTP verify)
         sess = user.get("_session") or {}
         if not sess.get("mfa_satisfied_at"):
             raise HTTPException(
@@ -190,20 +181,7 @@ async def require_workforce_mfa(user=Depends(get_authenticated_user)):
 
 
 def require_roles(*roles):
-    """Role gate. Composes: authentication → workforce-MFA (if applicable) → role check.
-
-    `auditor` retains break-glass READ-only access on any GET (still MFA-gated).
-    Also enforces `must_change_password`: patients (and any user) with the
-    flag set can only reach `/auth/*` — everything else 403s with
-    `password_change_required` so the frontend gate can route them to
-    /change-password.
-    """
     async def dep(request: Request, user=Depends(require_workforce_mfa)):
-        # Force-change-password gate: block PHI access until the temporary
-        # password has been replaced. Auth-related endpoints are still
-        # reachable because they use `get_authenticated_user` directly
-        # rather than `require_roles`, so the user can call
-        # /auth/change-password to clear the flag.
         if user.get("must_change_password"):
             raise HTTPException(
                 status_code=403,

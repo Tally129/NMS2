@@ -71,7 +71,7 @@ export default function ProviderSchedule() {
   };
 
   const createAppt = async () => {
-    if (!form.client_id || !newSlot) return toast({ title: "Pick a client and slot" });
+    if (!form.client_id || !newSlot) return toast({ title: "Pick a patient and slot" });
     const start = new Date(newSlot.date);
     const end = new Date(start.getTime() + form.duration * 60000);
     try {
@@ -198,9 +198,9 @@ export default function ProviderSchedule() {
           </DialogHeader>
           <div className="space-y-3">
             <div className="text-sm text-[#6a6a6a]">{newSlot?.date?.toLocaleString()}</div>
-            <div><Label>Client</Label>
+            <div><Label>Patient</Label>
               <Select value={form.client_id} onValueChange={(v) => setForm({ ...form, client_id: v })}>
-                <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]"><SelectValue placeholder="Select client" /></SelectTrigger>
+                <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]"><SelectValue placeholder="Select patient" /></SelectTrigger>
                 <SelectContent>{clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}</SelectContent>
               </Select>
             </div>
@@ -236,7 +236,7 @@ export default function ProviderSchedule() {
           </DialogHeader>
           {editing && (
             <div className="space-y-3 text-sm">
-              <div><span className="text-[#6a6a6a]">Client:</span> {editing.client_name}</div>
+              <div><span className="text-[#6a6a6a]">Patient:</span> {editing.client_name}</div>
               <div><span className="text-[#6a6a6a]">When:</span> {new Date(editing.start).toLocaleString()}</div>
               <div><span className="text-[#6a6a6a]">Service:</span> {editing.service || "—"}</div>
               <div><span className="text-[#6a6a6a]">Visit type:</span> {editing.visit_mode === "telehealth" ? "Telehealth" : "In-person"}</div>

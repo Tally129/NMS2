@@ -7,7 +7,6 @@ FastAPI middleware, the seed/startup jobs, and mounts the shared router.
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Request, Query
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
-from bson import ObjectId
 import os
 import io
 import json
@@ -60,10 +59,13 @@ from audit import log_audit, get_client_ip
 
 # Shared singletons (mongo, api router, auth helpers) live in deps.py
 from deps import (
-    api, db, fs_bucket, bearer, logger,
+    api, db, bearer, logger,
     _strip_id, get_current_user, require_roles, to_user_out, _resolve_self_client,
     close_mongo,
 )
+from pg_shims import find_client, find_user_by_email, insert_user, list_users_by_roles, update_user
+from postgres_db import AsyncSessionLocal
+from repositories import scheduling as sched_repo
 
 # Register modular routers (side-effect: each file adds routes to `api`)
 from routers import auth as _auth_routes  # noqa: F401
@@ -81,9 +83,12 @@ from routers import tasks as _tasks_routes  # noqa: F401
 from routers import lab_review as _lab_review_routes  # noqa: F401
 from routers import campaign_extras as _campaign_extras_routes  # noqa: F401 — registered BEFORE campaigns so /templates isn't shadowed by /{id}
 from routers import campaigns as _campaigns_routes  # noqa: F401
+from routers import content_strategist as _content_strategist_routes  # noqa: F401
+from marketing_os.routers import core as _marketing_os_core_routes  # noqa: F401
 from routers import accounting as _accounting_routes  # noqa: F401
 from routers import portal_ops as _portal_ops_routes  # noqa: F401
 from routers import legal as _legal_routes  # noqa: F401
+from routers import terminals as _terminal_routes  # noqa: F401
 
 # Startup config safety validation (fail-fast in HIPAA_MODE)
 from security_config import enforce_production_config
@@ -102,21 +107,430 @@ app = FastAPI(title="NatMedSol EMR API")
 async def public_appointment_request(payload: AppointmentRequestIn, request: Request):
     doc = payload.dict()
     doc["id"] = new_id()
-    doc["created_at"] = datetime.now(timezone.utc)
     doc["status"] = "new"
     doc["ip"] = get_client_ip(request)
-    await db.appointment_requests.insert_one(doc)
-    from notifiers import send_email as _send_email
-    _delivery = await _send_email(
-        db=db,
-        to=os.environ.get("REMINDERS_STAFF_EMAIL", payload.email),
-        subject=f"New appointment request from {payload.fullName}",
-        html=f"{payload.fullName} &lt;{payload.email}&gt; requested an appointment.",
-        action="appointment_request.new",
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            doc = await sched_repo.create_appointment_request(pg, doc)
+
+    # ---------------------------------------------------------------
+    # First-party Marketing OS attribution bridge.
+    #
+    # Marketing metadata arrives separately from the appointment
+    # payload so contact/clinical fields never enter Marketing OS.
+    #
+    # Attribution is best-effort: a marketing measurement failure
+    # must never cause a successfully stored appointment request to
+    # fail.
+    # ---------------------------------------------------------------
+    marketing_header = request.headers.get(
+        "X-NMS-Marketing-Attribution"
     )
+
+    if marketing_header:
+        try:
+            import json as _json
+
+            from marketing_os.services.persistence import (
+                persist_conversion_and_attribution,
+            )
+
+            raw_marketing = _json.loads(marketing_header)
+
+            if not isinstance(raw_marketing, dict):
+                raise ValueError(
+                    "marketing attribution must be an object"
+                )
+
+            allowed = {
+                "session_id",
+                "external_click_id",
+                "source",
+                "medium",
+                "campaign",
+                "content",
+                "term",
+                "click_id_type",
+            }
+
+            marketing = {
+                key: value
+                for key, value in raw_marketing.items()
+                if key in allowed
+            }
+
+            properties = {}
+
+            click_id_type = marketing.pop(
+                "click_id_type",
+                None,
+            )
+
+            if click_id_type:
+                properties["click_id_type"] = (
+                    str(click_id_type)[:32]
+                )
+
+            conversion_payload = {
+                "event_type": "lead_submit",
+                **marketing,
+                "properties": properties,
+            }
+
+            async with AsyncSessionLocal() as marketing_pg:
+                async with marketing_pg.begin():
+                    await persist_conversion_and_attribution(
+                        marketing_pg,
+                        payload=conversion_payload,
+                        idempotency_key=(
+                            "appointment-request:"
+                            + str(doc["id"])
+                        ),
+                        provider="first_party",
+                    )
+
+        except Exception as exc:
+            # Do not log appointment/contact payload values.
+            logger.warning(
+                "Marketing attribution capture failed for "
+                "appointment request %s: %s",
+                doc.get("id"),
+                type(exc).__name__,
+            )
+
+    from notifiers import send_email as _send_email
+
+    notification_email = os.environ.get(
+        "APPOINTMENT_REQUEST_NOTIFICATION_EMAIL",
+        ""
+    ).strip()
+
+    if not notification_email:
+        logger.error(
+            "Appointment request notification email is not configured"
+        )
+        _delivery = "not_configured"
+    else:
+        _delivery = await _send_email(
+            db=db,
+            to=notification_email,
+            subject=(
+                "New Appointment Request | "
+                "Natural Medical Solutions"
+            ),
+            html="""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+  >
+  <title>New Appointment Request</title>
+</head>
+
+<body
+  style="
+    margin:0;
+    padding:0;
+    background:#f4f1e8;
+    font-family:Arial,Helvetica,sans-serif;
+    color:#34382f;
+  "
+>
+  <table
+    role="presentation"
+    width="100%"
+    cellspacing="0"
+    cellpadding="0"
+    border="0"
+    style="background:#f4f1e8;"
+  >
+    <tr>
+      <td
+        align="center"
+        style="padding:40px 16px;"
+      >
+
+        <table
+          role="presentation"
+          width="100%"
+          cellspacing="0"
+          cellpadding="0"
+          border="0"
+          style="
+            max-width:620px;
+            background:#ffffff;
+            border:1px solid #e4dfd2;
+            border-radius:18px;
+            overflow:hidden;
+          "
+        >
+
+          <!-- NMS BRAND HEADER -->
+          <tr>
+            <td
+              align="center"
+              style="
+                padding:30px 28px 26px;
+                background:#66705a;
+              "
+            >
+
+              <img
+                src="https://preview.natmedsol.org/nms-logo.png"
+                width="155"
+                alt="Natural Medical Solutions"
+                style="
+                  display:block;
+                  width:155px;
+                  max-width:100%;
+                  height:auto;
+                  margin:0 auto 18px;
+                  border:0;
+                  outline:none;
+                  text-decoration:none;
+                "
+              >
+
+              <div
+                style="
+                  font-size:11px;
+                  line-height:18px;
+                  letter-spacing:2.7px;
+                  text-transform:uppercase;
+                  color:#eee6c7;
+                  font-weight:bold;
+                "
+              >
+                Natural Medical Solutions
+              </div>
+
+              <div
+                style="
+                  margin-top:5px;
+                  font-family:Georgia,'Times New Roman',serif;
+                  font-size:22px;
+                  line-height:30px;
+                  color:#ffffff;
+                "
+              >
+                Wellness Center
+              </div>
+
+            </td>
+          </tr>
+
+          <!-- GOLD ACCENT -->
+          <tr>
+            <td
+              style="
+                height:5px;
+                background:#c6a968;
+                font-size:0;
+                line-height:0;
+              "
+            >
+              &nbsp;
+            </td>
+          </tr>
+
+          <!-- MAIN MESSAGE -->
+          <tr>
+            <td
+              style="
+                padding:40px 38px 34px;
+              "
+            >
+
+              <div
+                style="
+                  margin-bottom:9px;
+                  font-size:11px;
+                  line-height:18px;
+                  font-weight:bold;
+                  letter-spacing:1.8px;
+                  text-transform:uppercase;
+                  color:#9a8149;
+                "
+              >
+                Appointment Notification
+              </div>
+
+              <h1
+                style="
+                  margin:0 0 20px;
+                  font-family:Georgia,'Times New Roman',serif;
+                  font-size:30px;
+                  line-height:38px;
+                  font-weight:normal;
+                  color:#34382f;
+                "
+              >
+                New Appointment Request
+              </h1>
+
+              <p
+                style="
+                  margin:0 0 18px;
+                  font-size:16px;
+                  line-height:26px;
+                  color:#55584f;
+                "
+              >
+                A new appointment request has been submitted
+                through the Natural Medical Solutions
+                appointment portal.
+              </p>
+
+              <p
+                style="
+                  margin:0 0 28px;
+                  font-size:16px;
+                  line-height:26px;
+                  color:#55584f;
+                "
+              >
+                Please sign in to the secure staff portal to
+                review and process the request.
+              </p>
+
+              <!-- CTA BUTTON -->
+              <table
+                role="presentation"
+                cellspacing="0"
+                cellpadding="0"
+                border="0"
+                style="margin:0 0 30px;"
+              >
+                <tr>
+                  <td
+                    align="center"
+                    style="
+                      background:#66705a;
+                      border-radius:999px;
+                    "
+                  >
+                    <a
+                      href="https://app.natmedsol.org/"
+                      style="
+                        display:inline-block;
+                        padding:15px 28px;
+                        font-size:15px;
+                        line-height:20px;
+                        font-weight:bold;
+                        color:#ffffff;
+                        text-decoration:none;
+                      "
+                    >
+                      Review Appointment Requests
+                    </a>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- PRIVACY CARD -->
+              <table
+                role="presentation"
+                width="100%"
+                cellspacing="0"
+                cellpadding="0"
+                border="0"
+                style="
+                  background:#f8f6ef;
+                  border-left:4px solid #c6a968;
+                  border-radius:8px;
+                "
+              >
+                <tr>
+                  <td
+                    style="
+                      padding:18px 20px;
+                      font-size:13px;
+                      line-height:21px;
+                      color:#68695f;
+                    "
+                  >
+                    <strong
+                      style="color:#4f5248;"
+                    >
+                      Privacy &amp; Security
+                    </strong>
+
+                    <br>
+
+                    For patient privacy, personal information
+                    and appointment details are not included
+                    in this notification. Review request
+                    information only through the secure
+                    staff portal.
+                  </td>
+                </tr>
+              </table>
+
+            </td>
+          </tr>
+
+          <!-- FOOTER -->
+          <tr>
+            <td
+              align="center"
+              style="
+                padding:24px 30px 28px;
+                border-top:1px solid #eee9dd;
+                font-size:12px;
+                line-height:20px;
+                color:#89897f;
+              "
+            >
+              <strong
+                style="color:#62665a;"
+              >
+                Natural Medical Solutions Wellness Center
+              </strong>
+
+              <br>
+
+              Automated staff appointment notification
+            </td>
+          </tr>
+
+        </table>
+
+        <div
+          style="
+            max-width:620px;
+            padding:17px 20px 0;
+            font-size:11px;
+            line-height:18px;
+            color:#99988f;
+            text-align:center;
+          "
+        >
+          This operational notification was generated by
+          the Natural Medical Solutions secure appointment
+          system.
+        </div>
+
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+""",
+            action="appointment_request.new",
+        )
+
     await db.integration_log.insert_one({
-        "id": new_id(), "service": "sendgrid", "action": "appointment_request_notification",
-        "payload": {"to": payload.email, "name": payload.fullName},
+        "id": new_id(),
+        "service": "sendgrid",
+        "action": "appointment_request_notification",
+        "payload": {
+            "to": notification_email or None,
+            "request_id": doc["id"],
+        },
         "_stubbed": _delivery == "sent_stub",
         "delivery_status": _delivery,
         "ts": datetime.now(timezone.utc),
@@ -133,9 +547,9 @@ async def public_appointment_request(payload: AppointmentRequestIn, request: Req
 @api.get("/appointment-requests")
 async def list_appointment_requests(status: Optional[str] = None,
                                     user=Depends(require_roles("admin", "staff", "front_desk", "frontdesk"))):
-    q = {"status": status} if status else {}
-    rows = await db.appointment_requests.find(q).sort("created_at", -1).to_list(200)
-    return [_strip_id(r) for r in rows]
+    async with AsyncSessionLocal() as pg:
+        rows = await sched_repo.list_appointment_requests(pg, status=status, limit=200)
+    return rows
 
 
 async def _notify_patient(req_row: dict, action: str, extra: dict | None = None):
@@ -163,14 +577,18 @@ async def _notify_patient(req_row: dict, action: str, extra: dict | None = None)
 @api.post("/appointment-requests/{req_id}/approve")
 async def approve_request(req_id: str, request: Request,
                           user=Depends(require_roles("admin", "staff", "front_desk", "frontdesk"))):
-    req = await db.appointment_requests.find_one({"id": req_id})
+    async with AsyncSessionLocal() as pg:
+        req = await sched_repo.get_appointment_request(pg, req_id)
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
     if req.get("status") == "approved":
         return {"ok": True, "already_approved": True}
     now = datetime.now(timezone.utc)
-    await db.appointment_requests.update_one({"id": req_id},
-        {"$set": {"status": "approved", "reviewed_at": now, "reviewed_by": user["id"]}})
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.update_appointment_request(pg, req_id, {
+                "status": "approved", "reviewed_at": now, "reviewed_by": user["id"],
+            })
     delivery = await _notify_patient(req, "approve")
     await log_audit(db, user["id"], user["email"], "appointment_request.approve",
                     resource_type="appointment_request", resource_id=req_id,
@@ -183,14 +601,18 @@ async def approve_request(req_id: str, request: Request,
 @api.post("/appointment-requests/{req_id}/decline")
 async def decline_request(req_id: str, request: Request, payload: dict = None,
                           user=Depends(require_roles("admin", "staff", "front_desk", "frontdesk"))):
-    req = await db.appointment_requests.find_one({"id": req_id})
+    async with AsyncSessionLocal() as pg:
+        req = await sched_repo.get_appointment_request(pg, req_id)
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
     reason = str((payload or {}).get("reason") or "")
     now = datetime.now(timezone.utc)
-    await db.appointment_requests.update_one({"id": req_id},
-        {"$set": {"status": "declined", "reviewed_at": now, "reviewed_by": user["id"],
-                  "decline_reason": reason}})
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.update_appointment_request(pg, req_id, {
+                "status": "declined", "reviewed_at": now, "reviewed_by": user["id"],
+                "decline_reason": reason,
+            })
     delivery = await _notify_patient(req, "decline")
     await log_audit(db, user["id"], user["email"], "appointment_request.decline",
                     resource_type="appointment_request", resource_id=req_id,
@@ -203,16 +625,20 @@ async def decline_request(req_id: str, request: Request, payload: dict = None,
 @api.post("/appointment-requests/{req_id}/reschedule")
 async def reschedule_request(req_id: str, payload: dict, request: Request,
                              user=Depends(require_roles("admin", "staff", "front_desk", "frontdesk"))):
-    req = await db.appointment_requests.find_one({"id": req_id})
+    async with AsyncSessionLocal() as pg:
+        req = await sched_repo.get_appointment_request(pg, req_id)
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
     suggested = str((payload or {}).get("suggested_time") or "")
     if not suggested:
         raise HTTPException(status_code=400, detail="suggested_time is required")
     now = datetime.now(timezone.utc)
-    await db.appointment_requests.update_one({"id": req_id},
-        {"$set": {"status": "reschedule_proposed", "reviewed_at": now,
-                  "reviewed_by": user["id"], "suggested_time": suggested}})
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.update_appointment_request(pg, req_id, {
+                "status": "reschedule_proposed", "reviewed_at": now,
+                "reviewed_by": user["id"], "suggested_time": suggested,
+            })
     delivery = await _notify_patient(req, "reschedule", {"suggested_time": suggested})
     await log_audit(db, user["id"], user["email"], "appointment_request.reschedule",
                     resource_type="appointment_request", resource_id=req_id,
@@ -255,12 +681,6 @@ async def health():
         "integrations": {
             "llm": llm_client.provider(),
             "email": notifiers.email_status(),
-            "sms": notifiers.sms_status(),
-            "google_oauth_direct": bool(
-                os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
-                and os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
-                and os.environ.get("GOOGLE_OAUTH_REDIRECT_URI")
-            ),
         },
     }
 
@@ -273,38 +693,46 @@ async def set_recurrence(appt_id: str, payload: dict,
     """Generate a recurring series. Body: {pattern: 'weekly'|'biweekly'|'monthly', count: int}"""
     pattern = payload.get("pattern", "weekly")
     count = max(1, min(int(payload.get("count", 4)), 26))
-    parent = await db.appointments.find_one({"id": appt_id})
+    async with AsyncSessionLocal() as pg:
+        parent = await sched_repo.get_appointment(pg, appt_id)
     if not parent:
         raise HTTPException(status_code=404, detail="Appointment not found")
     series_id = parent.get("series_id") or new_id()
-    await db.appointments.update_one({"id": appt_id}, {"$set": {"series_id": series_id, "series_pattern": pattern}})
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.update_appointment(pg, appt_id, {
+                "series_id": series_id, "series_pattern": pattern,
+            })
 
     delta_days = {"weekly": 7, "biweekly": 14}.get(pattern)
     use_months = pattern == "monthly"
     created = []
     base_start = parent["start"]
     base_end = parent["end"]
-    for i in range(1, count + 1):
-        if use_months:
-            try:
-                from dateutil.relativedelta import relativedelta
-                new_start = base_start + relativedelta(months=i)
-                new_end = base_end + relativedelta(months=i)
-            except ImportError:
-                new_start = base_start + timedelta(days=30 * i)
-                new_end = base_end + timedelta(days=30 * i)
-        else:
-            new_start = base_start + timedelta(days=delta_days * i)
-            new_end = base_end + timedelta(days=delta_days * i)
-        doc = {**{k: v for k, v in parent.items() if k != "_id"},
-               "id": new_id(),
-               "start": new_start, "end": new_end,
-               "series_id": series_id,
-               "series_pattern": pattern,
-               "status": "scheduled",
-               "created_at": datetime.now(timezone.utc)}
-        await db.appointments.insert_one(doc)
-        created.append(doc["id"])
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            for i in range(1, count + 1):
+                if use_months:
+                    try:
+                        from dateutil.relativedelta import relativedelta
+                        new_start = base_start + relativedelta(months=i)
+                        new_end = base_end + relativedelta(months=i)
+                    except ImportError:
+                        new_start = base_start + timedelta(days=30 * i)
+                        new_end = base_end + timedelta(days=30 * i)
+                else:
+                    new_start = base_start + timedelta(days=delta_days * i)
+                    new_end = base_end + timedelta(days=delta_days * i)
+                doc = {k: v for k, v in parent.items()
+                       if k not in {"id", "created_at", "updated_at"}}
+                doc.update({
+                    "id": new_id(),
+                    "start": new_start, "end": new_end,
+                    "series_id": series_id, "series_pattern": pattern,
+                    "status": "scheduled",
+                })
+                await sched_repo.create_appointment(pg, doc)
+                created.append(doc["id"])
     await log_audit(db, user["id"], user["email"], "appointment.recurrence",
                     resource_type="appointment", resource_id=appt_id,
                     metadata={"pattern": pattern, "count": count, "series_id": series_id})
@@ -316,11 +744,10 @@ async def cancel_series(series_id: str,
                          user=Depends(require_roles("practitioner", "admin", "staff"))):
     """Cancel all FUTURE appointments in a series."""
     now = datetime.now(timezone.utc)
-    res = await db.appointments.update_many(
-        {"series_id": series_id, "start": {"$gte": now}, "status": {"$ne": "completed"}},
-        {"$set": {"status": "canceled"}},
-    )
-    return {"cancelled": res.modified_count}
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            n = await sched_repo.bulk_cancel_series(pg, series_id, now)
+    return {"cancelled": n}
 
 
 # ---------- Inventory lots / expiration ----------
@@ -374,15 +801,13 @@ async def push_subscribe(payload: dict, user=Depends(get_current_user)):
     sub = payload.get("subscription") or payload  # accept either shape
     if not sub.get("endpoint"):
         raise HTTPException(status_code=400, detail="Missing subscription endpoint")
-    await db.push_subscriptions.update_one(
-        {"user_id": user["id"], "endpoint": sub["endpoint"]},
-        {"$set": {
-            "user_id": user["id"], "endpoint": sub["endpoint"],
-            "keys": sub.get("keys", {}),
-            "updated_at": datetime.now(timezone.utc),
-        }, "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
-        upsert=True,
-    )
+    from repositories import clinical_and_messaging as _cm
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await _cm.upsert_push_subscription(
+                pg, user_id=user["id"], endpoint=sub["endpoint"],
+                keys=sub.get("keys", {}), new_id_fn=new_id,
+            )
     return {"ok": True}
 
 
@@ -390,7 +815,10 @@ async def push_subscribe(payload: dict, user=Depends(get_current_user)):
 async def push_unsubscribe(payload: dict, user=Depends(get_current_user)):
     endpoint = payload.get("endpoint")
     if endpoint:
-        await db.push_subscriptions.delete_one({"user_id": user["id"], "endpoint": endpoint})
+        from repositories import clinical_and_messaging as _cm
+        async with AsyncSessionLocal() as pg:
+            async with pg.begin():
+                await _cm.delete_push_subscription(pg, endpoint)
     return {"ok": True}
 
 
@@ -409,13 +837,14 @@ async def _appointment_reminder_loop():
             now = datetime.now(timezone.utc)
             window_start = now + timedelta(minutes=55)
             window_end = now + timedelta(minutes=65)
-            cursor = db.appointments.find({
-                "start": {"$gte": window_start, "$lte": window_end},
-                "status": {"$in": ["scheduled", "confirmed", "requested"]},
-                "reminder_sent_at": {"$exists": False},
-            })
-            async for a in cursor:
-                client = await db.clients.find_one({"id": a.get("client_id")})
+            async with AsyncSessionLocal() as pg:
+                appts = await sched_repo.list_appointments(
+                    pg, start_gte=window_start, start_lte=window_end,
+                    status_in=["scheduled", "confirmed", "requested"],
+                    reminder_not_sent=True, limit=500,
+                )
+            for a in appts:
+                client = await find_client(client_id=a.get("client_id"))
                 if not client or not client.get("user_id"):
                     continue
                 start_local = a["start"].strftime("%-I:%M %p")
@@ -427,10 +856,9 @@ async def _appointment_reminder_loop():
                     f"{mode} visit at {start_local}",
                     url=url, tag=f"appt-{a['id']}",
                 )
-                await db.appointments.update_one(
-                    {"id": a["id"]},
-                    {"$set": {"reminder_sent_at": now}},
-                )
+                async with AsyncSessionLocal() as pg:
+                    async with pg.begin():
+                        await sched_repo.update_appointment(pg, a["id"], {"reminder_sent_at": now})
         except Exception as e:
             logger.warning("reminder loop tick failed: %s", e)
         await _asyncio.sleep(300)  # 5 min
@@ -449,7 +877,7 @@ async def _expiring_inventory_loop():
                         expiring.append(it["name"])
                         break
             if expiring:
-                admins = await db.users.find({"role": {"$in": ["admin", "staff"]}}).to_list(50)
+                admins = await list_users_by_roles(["admin", "staff"], limit=50)
                 for u in admins:
                     await push_to_user(
                         u["id"],
@@ -460,10 +888,6 @@ async def _expiring_inventory_loop():
         except Exception as e:
             logger.warning("expiring loop tick failed: %s", e)
         await _asyncio.sleep(60 * 60 * 24)  # daily
-
-
-# ---------- Emergent-managed Google SSO ----------
-
 
 
 # =================== STARTUP ===================
@@ -515,14 +939,13 @@ async def seed_demo():
     # Sprint 1: In HIPAA_MODE=on, refuse to seed predictable staff credentials.
     _hipaa = os.environ.get("HIPAA_MODE", "false").lower() in {"1", "true", "yes", "on"}
     try:
-        await db.users.create_index("email", unique=True)
-        await db.clients.create_index("user_id")
-        await db.intake_forms.create_index("client_id", unique=True)
-        await db.visit_notes.create_index("client_id")
+        # Phase 3.1b: users/clients/intake_forms/client_supplement_assignments
+        # live in PostgreSQL now. Only Mongo-resident collections keep indexes here.
+        # visit_notes lives in PostgreSQL now (Phase 3.3); indexes are managed by Alembic.
         await db.files.create_index("client_id")
-        await db.audit_logs.create_index("ts")
+        # Session 3.0b: audit_logs / security_events live in PostgreSQL now;
+        # Mongo mirrors were dropped after the compliance viewer was cut over.
         await db.ws_tickets.create_index("expires_at", expireAfterSeconds=0)
-        await db.push_subscriptions.create_index([("user_id", 1), ("endpoint", 1)], unique=True)
         await db.form_templates.create_index([("builtin", 1), ("title", 1)])
         await db.form_submissions.create_index("token", unique=True)
         await db.form_submissions.create_index("client_id")
@@ -530,20 +953,14 @@ async def seed_demo():
         await db.protocol_templates.create_index([("builtin", 1), ("title", 1)])
         await db.protocol_enrollments.create_index("client_id")
         await db.protocol_enrollments.create_index("practitioner_id")
-        await db.client_supplement_assignments.create_index([("client_id", 1), ("active", 1)])
-        await db.client_supplement_assignments.create_index([("client_id", 1), ("sheet_id", 1)], unique=False)
         await db.protocol_enrollments.create_index("status")
-        # Sprint 3+ collections
-        await db.audit_logs.create_index([("ts", 1)])
-        await db.audit_logs.create_index("action")
-        await db.audit_logs.create_index("severity")
-        await db.security_events.create_index([("ts", -1)])
-        await db.security_events.create_index("handled")
+        # Sprint 3+ collections (audit_logs/security_events moved to PG in Session 3.0b)
         await db.breakglass_sessions.create_index("user_id")
         await db.breakglass_sessions.create_index("expires_at")
         await db.breakglass_sessions.create_index("target_client_id")
         await db.files.create_index("deleted_at")
-        await db.visit_notes.create_index("status")
+        # visit_notes lives in PostgreSQL now (Phase 3.3).
+        pass
     except Exception as e:
         logger.warning("Index creation warning: %s", e)
 
@@ -557,62 +974,73 @@ async def seed_demo():
         logger.warning("HIPAA_MODE=on — skipping predictable-password demo seed.")
         return
 
-    if await db.users.count_documents({}) == 0:
-        admin = {
-            "id": new_id(), "email": "admin@natmedsol.local",
-            "password_hash": hash_password("Admin!2345"),
-            "full_name": "Site Administrator", "phone": None,
-            "role": "admin", "mfa_enabled": False, "mfa_secret": None,
-            "is_active": True, "created_at": datetime.now(timezone.utc), "last_login_at": None,
-        }
-        prac = {
-            "id": new_id(), "email": "ravello@natmedsol.local",
-            "password_hash": hash_password("Ravello!2345"),
-            "full_name": "Dr. Gail Ravello", "phone": None,
-            "role": "practitioner", "mfa_enabled": False, "mfa_secret": None,
-            "is_active": True, "created_at": datetime.now(timezone.utc), "last_login_at": None,
-        }
-        await db.users.insert_many([admin, prac])
-        logger.info("Seeded demo admin + practitioner users.")
+    # Explicit env-driven kill-switch for the demo seeder. Set
+    # `DEMO_SEED_DISABLE=1` after a `scripts/reset_test_data.py` run so the
+    # environment stays empty across restarts.
+    if os.environ.get("DEMO_SEED_DISABLE", "").lower() in {"1", "true", "yes", "on"}:
+        logger.info("DEMO_SEED_DISABLE=on — skipping demo seed accounts.")
+        return
 
-    # Idempotent: ensure a real staff-role front-desk user exists for QA / RBAC testing
-    if not await db.users.find_one({"email": "frontdesk@natmedsol.local"}):
-        await db.users.insert_one({
-            "id": new_id(), "email": "frontdesk@natmedsol.local",
-            "password_hash": hash_password("FrontDesk!2345"),
-            "full_name": "Front Desk Staff", "phone": None,
-            "role": "staff", "mfa_enabled": False, "mfa_secret": None,
-            "is_active": True, "created_at": datetime.now(timezone.utc), "last_login_at": None,
-        })
-        logger.info("Seeded demo staff (front desk) user.")
+    # Phase 3.7 hardening: predictable-password demo seeding was removed
+    # from application startup. Production admins are created via the
+    # first-admin bootstrap flow (`BOOTSTRAP_SECRET` + POST /api/auth/bootstrap
+    # or the `BOOTSTRAP_ADMIN_EMAIL` one-shot below). For local development
+    # convenience, run `python -m scripts.seed_demo_users` (guarded by
+    # HIPAA_MODE=false + ENVIRONMENT != production + CONFIRM_DEMO_SEED=YES).
 
-    # Idempotent break-glass auditor account (read-only, all reads stamped emergency=true)
-    if not await db.users.find_one({"email": "auditor@natmedsol.local"}):
-        await db.users.insert_one({
-            "id": new_id(), "email": "auditor@natmedsol.local",
-            "password_hash": hash_password("Auditor!2345"),
-            "full_name": "Compliance Auditor", "phone": None,
-            "role": "auditor", "mfa_enabled": False, "mfa_secret": None,
-            "is_active": True, "created_at": datetime.now(timezone.utc), "last_login_at": None,
-        })
-        logger.info("Seeded break-glass auditor user.")
+    # Session 2c (dev only): seed a brand-new bootstrap admin whose email
+    # is set via BOOTSTRAP_ADMIN_EMAIL. Skipped in HIPAA_MODE and skipped if
+    # any admin already exists. Prints the temp password to the console ONCE
+    # so a developer can pick it up on the first `docker logs` glance.
+    hipaa = os.environ.get("HIPAA_MODE", "false").lower() in {"1", "true", "yes", "on"}
+    boot_email = (os.environ.get("BOOTSTRAP_ADMIN_EMAIL") or "").strip().lower()
+    if boot_email and not hipaa:
+        try:
+            from postgres_db import AsyncSessionLocal as _S
+            from postgres_models import User as _User
+            from repositories import users as _users_repo
+            from routers.auth_impl.bootstrap import (
+                TEMP_PASSWORD_TTL_HOURS, _generate_temp_password,
+            )
+            from auth_utils import hash_password as _hp
+            from models import new_id as _new_id
+            from sqlalchemy import select as _select
 
-    # Idempotent: seed a Medical Assistant test account for delegated-editing QA.
-    ma_doc = await db.users.find_one({"email": "ma@natmedsol.local"})
-    if not ma_doc:
-        await db.users.insert_one({
-            "id": new_id(), "email": "ma@natmedsol.local",
-            "password_hash": hash_password("MedAssist!2345"),
-            "full_name": "Morgan Assistant", "phone": None,
-            "role": "medical_assistant", "mfa_enabled": False, "mfa_secret": None,
-            "is_active": True, "created_at": datetime.now(timezone.utc), "last_login_at": None,
-        })
-        logger.info("Seeded demo medical assistant user.")
-    elif ma_doc.get("role") != "medical_assistant":
-        # Self-heal: an earlier build shipped this seed with role="client".
-        # Correct it on boot without wiping the record so audit history is preserved.
-        await db.users.update_one({"id": ma_doc["id"]}, {"$set": {"role": "medical_assistant"}})
-        logger.info("Self-healed medical assistant role for ma@natmedsol.local.")
+            async with _S() as pg:
+                any_admin = (
+                    await pg.execute(_select(_User).where(_User.role == "admin").limit(1))
+                ).scalar_one_or_none()
+                existing = await _users_repo.get_by_email(pg, boot_email)
+            if any_admin is None and existing is None:
+                temp_pw = _generate_temp_password()
+                now = datetime.now(timezone.utc)
+                async with _S() as pg:
+                    async with pg.begin():
+                        await _users_repo.create_user(
+                            pg, user_id=_new_id(), email=boot_email,
+                            password_hash=_hp(temp_pw),
+                            full_name="Bootstrap Admin", role="admin",
+                            is_active=True, must_change_password=True,
+                            onboarding_status="password_change_required",
+                            temporary_password_expires_at=now + timedelta(hours=TEMP_PASSWORD_TTL_HOURS),
+                            session_version=1, created_at=now,
+                        )
+                logger.warning(
+                    "\n"
+                    "================================================================\n"
+                    " BOOTSTRAP ADMIN CREATED (development only) — copy the password!\n"
+                    "----------------------------------------------------------------\n"
+                    "  email:              %s\n"
+                    "  temporary password: %s\n"
+                    "  expires:            %s (in %sh)\n"
+                    "  next step:          POST /api/auth/login → follow bootstrap flow\n"
+                    "================================================================\n",
+                    boot_email, temp_pw,
+                    (now + timedelta(hours=TEMP_PASSWORD_TTL_HOURS)).isoformat(),
+                    TEMP_PASSWORD_TTL_HOURS,
+                )
+        except Exception as _e:
+            logger.warning("BOOTSTRAP_ADMIN_EMAIL seed skipped: %s", _e)
 
     # Legal & Policies: seed the nine default policies (idempotent).
     try:
@@ -786,7 +1214,7 @@ async def seed_demo():
 @app.on_event("shutdown")
 async def shutdown_db_client():
     _stop_campaign_scheduler()
-    close_mongo()
+    await close_mongo()  # no-op; retained for callsite compatibility
 
 
 # --------------------------------------------------------------------------- #
@@ -842,6 +1270,110 @@ async def _start_campaign_scheduler():
     scheduler.start()
     _campaign_scheduler = scheduler
     logger.info("Campaign scheduler started (interval=5min, mode=internal)")
+
+
+
+# --------------------------------------------------------------------------- #
+# Publishing Queue Scheduler                                                  #
+# --------------------------------------------------------------------------- #
+
+_publishing_scheduler = None
+
+
+def _stop_publishing_scheduler() -> None:
+    global _publishing_scheduler
+
+    if _publishing_scheduler is not None:
+        try:
+            _publishing_scheduler.shutdown(
+                wait=False
+            )
+        except Exception:
+            pass
+
+        _publishing_scheduler = None
+
+
+@app.on_event("startup")
+async def _start_publishing_scheduler():
+    global _publishing_scheduler
+
+    mode = os.environ.get(
+        "PUBLISHING_SCHEDULER_MODE",
+        "internal",
+    ).lower()
+
+    if mode in {"external", "disabled"}:
+        logger.info(
+            "Publishing scheduler disabled "
+            "(PUBLISHING_SCHEDULER_MODE=%s)",
+            mode,
+        )
+        return
+
+    if _publishing_scheduler is not None:
+        return
+
+    try:
+        from apscheduler.schedulers.asyncio import (
+            AsyncIOScheduler,
+        )
+    except ImportError:
+        logger.warning(
+            "APScheduler not installed; scheduled "
+            "publishing will not auto-dispatch"
+        )
+        return
+
+    from routers.content_strategist import (
+        process_due_publishing_queue,
+    )
+
+    scheduler = AsyncIOScheduler(
+        timezone="UTC"
+    )
+
+    async def _publishing_tick():
+        try:
+            summary = (
+                await process_due_publishing_queue(
+                    worker_prefix="apscheduler"
+                )
+            )
+
+            if (
+                summary.get("published")
+                or summary.get("failed")
+            ):
+                logger.info(
+                    "Publishing scheduler tick: %s",
+                    summary,
+                )
+
+        except Exception as exc:
+            logger.exception(
+                "Publishing scheduler tick failed: %s",
+                exc,
+            )
+
+    scheduler.add_job(
+        _publishing_tick,
+        "interval",
+        minutes=5,
+        id="publishing_scheduler_tick",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+
+    scheduler.start()
+
+    _publishing_scheduler = scheduler
+
+    logger.info(
+        "Publishing scheduler started "
+        "(interval=5min, mode=internal)"
+    )
 
 
 app.include_router(api)

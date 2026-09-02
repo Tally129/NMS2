@@ -26,6 +26,9 @@ from delegations import (
 )
 from deps import _strip_id, api, db, get_current_user, require_roles
 from models import new_id
+from pg_shims import find_client, find_user_by_id
+from postgres_db import AsyncSessionLocal
+from repositories import clinical_and_messaging as cm_repo
 
 
 class DelegationIn(BaseModel):
@@ -39,7 +42,7 @@ class DelegationIn(BaseModel):
 @api.post("/delegations")
 async def create_delegation(payload: DelegationIn, request: Request,
                             user=Depends(require_roles("practitioner"))):
-    delegate = await db.users.find_one({"id": payload.delegate_id})
+    delegate = await find_user_by_id(payload.delegate_id)
     if not delegate:
         raise HTTPException(status_code=404, detail="Delegate user not found")
     if delegate.get("role") not in ELIGIBLE_DELEGATE_ROLES:
@@ -49,7 +52,7 @@ async def create_delegation(payload: DelegationIn, request: Request,
             "eligible_roles": sorted(ELIGIBLE_DELEGATE_ROLES),
         })
     if payload.client_id:
-        client = await db.clients.find_one({"id": payload.client_id})
+        client = await find_client(client_id=payload.client_id)
         if not client:
             raise HTTPException(status_code=404, detail="Client not found")
     if payload.scope != "documentation":
@@ -60,18 +63,17 @@ async def create_delegation(payload: DelegationIn, request: Request,
     doc = {
         "id": new_id(),
         "provider_id": user["id"],
-        "provider_name": user.get("full_name", ""),
         "delegate_id": delegate["id"],
-        "delegate_name": delegate.get("full_name", ""),
-        "delegate_role": delegate.get("role"),
         "client_id": payload.client_id,
         "scope": payload.scope,
-        "note": (payload.note or "").strip()[:400] or None,
+        "reason": (payload.note or "").strip()[:400] or None,
+        "active": True,
         "created_at": now,
         "expires_at": expires_at,
-        "revoked_at": None,
     }
-    await db.clinical_delegations.insert_one(doc)
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            doc = await cm_repo.create_delegation(pg, doc)
     await log_audit(
         db, user["id"], user["email"], "delegation.grant",
         resource_type="delegation", resource_id=doc["id"],
@@ -94,20 +96,26 @@ async def list_delegations(role_scope: str = Query("all"),
     if user.get("role") == "client":
         raise HTTPException(status_code=403, detail="Forbidden")
     now = datetime.now(timezone.utc)
-    q: dict = {}
-    if role_scope == "granted":
-        q = {"provider_id": user["id"]}
-    elif role_scope == "received":
-        q = {"delegate_id": user["id"]}
-    else:
-        q = {"$or": [{"provider_id": user["id"]}, {"delegate_id": user["id"]}]}
-    rows = await db.clinical_delegations.find(q).sort("created_at", -1).to_list(200)
+    async with AsyncSessionLocal() as pg:
+        if role_scope == "granted":
+            rows = await cm_repo.list_delegations(pg, provider_id=user["id"], limit=200)
+        elif role_scope == "received":
+            rows = await cm_repo.list_delegations(pg, delegate_id=user["id"], limit=200)
+        else:
+            granted = await cm_repo.list_delegations(pg, provider_id=user["id"], limit=200)
+            received = await cm_repo.list_delegations(pg, delegate_id=user["id"], limit=200)
+            # De-dupe by id, most-recent first.
+            seen = {}
+            for r in granted + received:
+                seen[r["id"]] = r
+            rows = sorted(seen.values(),
+                          key=lambda r: r.get("created_at") or now,
+                          reverse=True)[:200]
     out = []
     for r in rows:
-        r = _strip_id(r)
         r["is_active"] = (
-            r.get("revoked_at") is None
-            and (r.get("expires_at") and r["expires_at"] > now)
+            r.get("active") is True
+            and (r.get("expires_at") is None or r["expires_at"] > now)
         )
         out.append(r)
     return out
@@ -116,20 +124,20 @@ async def list_delegations(role_scope: str = Query("all"),
 @api.delete("/delegations/{delegation_id}")
 async def revoke_delegation(delegation_id: str, request: Request,
                             user=Depends(get_current_user)):
-    d = await db.clinical_delegations.find_one({"id": delegation_id})
+    async with AsyncSessionLocal() as pg:
+        rows = await cm_repo.list_delegations(pg, limit=200)
+    d = next((r for r in rows if r["id"] == delegation_id), None)
     if not d:
         raise HTTPException(status_code=404, detail="Delegation not found")
     if user.get("role") not in ("admin", "practitioner") or (
         user.get("role") == "practitioner" and d.get("provider_id") != user["id"]
     ):
         raise HTTPException(status_code=403, detail="Only the granting provider or an admin can revoke")
-    if d.get("revoked_at"):
+    if d.get("active") is False:
         return {"ok": True, "already_revoked": True}
-    now = datetime.now(timezone.utc)
-    await db.clinical_delegations.update_one(
-        {"id": delegation_id, "revoked_at": None},
-        {"$set": {"revoked_at": now}},
-    )
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await cm_repo.revoke_delegation(pg, delegation_id, by_id=user["id"])
     await log_audit(
         db, user["id"], user["email"], "delegation.revoke",
         resource_type="delegation", resource_id=delegation_id,

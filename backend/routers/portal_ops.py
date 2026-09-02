@@ -35,6 +35,15 @@ from auth_utils import hash_password, validate_password_strength
 from deps import _strip_id, api, db, get_current_user, require_roles
 from models import new_id
 from notifiers import send_email as notify_email
+from pg_shims import (
+    delete_client as _pg_delete_client, delete_user, find_client,
+    find_latest_active_portal_reset, find_user_by_email, find_user_by_id,
+    insert_client, insert_portal_reset_token, insert_user,
+    invalidate_portal_reset_tokens, list_users_by_roles, search_clients,
+    search_users, update_client as _pg_update_client, update_user,
+)
+from postgres_db import AsyncSessionLocal
+from repositories import scheduling as sched_repo
 
 
 _PORTAL_ADMIN_ROLES = ("admin", "practitioner", "staff", "front_desk", "frontdesk")
@@ -68,19 +77,21 @@ async def _issue_portal_link(user: dict, request: Request, ttl_min: int = RESET_
     """Create a fresh password-reset token for `user`; return (raw_token, url)."""
     raw = secrets.token_urlsafe(48)
     now = datetime.now(timezone.utc)
-    await db.password_reset_tokens.insert_one({
-        "id": new_id(),
-        "token_hash": _hash_token(raw),
-        "user_id": user["id"],
-        "email_hash": _hash_email(user["email"]),
-        "created_at": now,
-        "expires_at": now + timedelta(minutes=ttl_min),
-        "consumed_at": None,
-        "ip": get_client_ip(request),
-        "purpose": "portal_invite",
-    })
+    await insert_portal_reset_token(
+        token_id=new_id(),
+        user_id=user["id"],
+        token_hash=_hash_token(raw),
+        expires_at=now + timedelta(minutes=ttl_min),
+        email_hash=_hash_email(user["email"]),
+        ip=get_client_ip(request),
+        purpose="portal_invite",
+    )
     origin = _frontend_origin(request)
-    url = f"{origin}/reset-password?token={raw}" if origin else f"[configure FRONTEND_ORIGIN]?token={raw}"
+    from urllib.parse import quote as _url_quote
+    _encoded = _url_quote(raw, safe="")
+    url = (f"{origin}/reset-password?token={_encoded}"
+            if origin
+            else f"/reset-password?token={_encoded}")
     return raw, url
 
 
@@ -110,10 +121,7 @@ async def global_search(
 
     if workforce:
         # Clients / patients
-        clients = await db.clients.find(
-            {"$or": [{"full_name": rx}, {"email": rx}, {"phone": rx}, {"mrn": rx}]},
-            {"id": 1, "full_name": 1, "email": 1, "mrn": 1, "phone": 1},
-        ).limit(limit).to_list(limit)
+        clients = await search_clients(query, limit=limit)
         results["patients"] = [
             {"id": c["id"], "label": c.get("full_name") or c.get("email") or c["id"],
              "sub": c.get("mrn") or c.get("email") or c.get("phone") or "",
@@ -146,13 +154,10 @@ async def global_search(
         ]
 
         # Users (staff/providers/admins). Admins see all; providers/staff see their own peer list minus clients.
-        user_query: dict = {"$or": [{"full_name": rx}, {"email": rx}]}
-        if role != "admin":
-            user_query["role"] = {"$in": ["admin", "practitioner", "staff", "medical_assistant"]}
-        users = await db.users.find(
-            user_query,
-            {"id": 1, "full_name": 1, "email": 1, "role": 1},
-        ).limit(limit).to_list(limit)
+        user_roles_filter = None if role == "admin" else [
+            "admin", "practitioner", "staff", "medical_assistant",
+        ]
+        users = await search_users(query, roles=user_roles_filter, limit=limit)
         results["users"] = [
             {"id": u["id"], "label": u.get("full_name") or u.get("email"),
              "sub": f"{u.get('role', '')} · {u.get('email', '')}",
@@ -160,15 +165,18 @@ async def global_search(
             for u in users
         ]
 
-        # Appointments
-        appt_lookup = await db.appointments.find(
-            {"$or": [{"client_name": rx}, {"provider_name": rx}, {"visit_type": rx}, {"reason": rx}]},
-            {"id": 1, "client_name": 1, "provider_name": 1, "start_at": 1, "status": 1},
-        ).sort("start_at", -1).limit(limit).to_list(limit)
+        # Appointments — search by service string. Legacy `client_name`,
+        # `provider_name`, `visit_type`, `reason` fields do not exist in the
+        # PostgreSQL `emr_appointments` schema (Phase 3.2 cutover); recent
+        # appointments matching the query's `service` field are surfaced instead.
+        q_lower = query.lower()
+        async with AsyncSessionLocal() as pg:
+            all_appts = await sched_repo.list_appointments(pg, sort_desc=True, limit=200)
+        appt_lookup = [a for a in all_appts if q_lower in (a.get("service") or "").lower()][:limit]
         results["appointments"] = [
             {"id": a["id"],
-             "label": f"{a.get('client_name') or 'Patient'} · {a.get('provider_name') or ''}",
-             "sub": f"{(a.get('start_at').strftime('%b %d, %I:%M %p') if a.get('start_at') else '')} · {a.get('status', '')}",
+             "label": f"Appointment · {a.get('service') or ''}",
+             "sub": f"{(a.get('start').strftime('%b %d, %I:%M %p') if a.get('start') else '')} · {a.get('status', '')}",
              "url": f"/portal/{'admin' if role == 'admin' else ('provider' if role == 'practitioner' else 'staff')}/appointments"}
             for a in appt_lookup
         ]
@@ -186,16 +194,19 @@ async def global_search(
         ]
     else:
         # Client role: search only their own appointments + treatment plans / lab tests names.
-        self_client = await db.clients.find_one({"user_id": user["id"]}, {"id": 1})
+        self_client = await find_client(user_id=user["id"])
         if self_client:
-            appts = await db.appointments.find(
-                {"client_id": self_client["id"], "$or": [{"visit_type": rx}, {"provider_name": rx}, {"reason": rx}]},
-                {"id": 1, "provider_name": 1, "start_at": 1, "visit_type": 1},
-            ).sort("start_at", -1).limit(limit).to_list(limit)
+            q_lower = query.lower()
+            async with AsyncSessionLocal() as pg:
+                own_appts = await sched_repo.list_appointments(
+                    pg, client_id=self_client["id"], sort_desc=True, limit=200,
+                )
+            appts = [a for a in own_appts
+                     if q_lower in (a.get("service") or "").lower()][:limit]
             results["appointments"] = [
                 {"id": a["id"],
-                 "label": f"{a.get('provider_name') or 'Provider'} · {a.get('visit_type') or ''}",
-                 "sub": a.get("start_at").strftime("%b %d, %I:%M %p") if a.get("start_at") else "",
+                 "label": f"Appointment · {a.get('service') or ''}",
+                 "sub": a.get("start").strftime("%b %d, %I:%M %p") if a.get("start") else "",
                  "url": "/portal/patient/appointments"}
                 for a in appts
             ]
@@ -222,7 +233,7 @@ class PortalDisableIn(BaseModel):
 
 
 async def _fetch_client(client_id: str) -> dict:
-    c = await db.clients.find_one({"id": client_id})
+    c = await find_client(client_id=client_id)
     if not c:
         raise HTTPException(status_code=404, detail="Client not found")
     return c
@@ -234,14 +245,14 @@ async def _get_or_create_portal_user(client: dict, email: str) -> tuple[dict, bo
     client-role user with a random unusable password (which they'll replace
     via the invite link).
     """
-    existing = await db.users.find_one({"email": email.lower()})
+    existing = await find_user_by_email(email.lower())
     if existing:
         # Link the client if not already linked.
         if not client.get("user_id"):
-            await db.clients.update_one({"id": client["id"]}, {"$set": {"user_id": existing["id"]}})
+            await _pg_update_client(client["id"], {"user_id": existing["id"]})
         # Ensure activation.
         if not existing.get("is_active", True):
-            await db.users.update_one({"id": existing["id"]}, {"$set": {"is_active": True}})
+            await update_user(existing["id"], {"is_active": True})
             existing["is_active"] = True
         return existing, False
 
@@ -261,8 +272,8 @@ async def _get_or_create_portal_user(client: dict, email: str) -> tuple[dict, bo
         "last_login_at": None,
         "must_change_password": True,
     }
-    await db.users.insert_one(doc)
-    await db.clients.update_one({"id": client["id"]}, {"$set": {"user_id": doc["id"]}})
+    await insert_user(doc)
+    await _pg_update_client(client["id"], {"user_id": doc["id"]})
     return doc, True
 
 
@@ -271,19 +282,11 @@ async def portal_status(client_id: str, user=Depends(require_roles(*_PORTAL_ADMI
     client = await _fetch_client(client_id)
     linked = None
     if client.get("user_id"):
-        linked = await db.users.find_one(
-            {"id": client["user_id"]},
-            {"id": 1, "email": 1, "is_active": 1, "last_login_at": 1, "created_at": 1,
-             "must_change_password": 1, "mfa_enabled": 1, "password_changed_at": 1},
-        )
+        linked = await find_user_by_id(client["user_id"])
     # Newest reset/invite token — used to surface "invitation pending" state.
     latest_token = None
     if linked:
-        latest_token = await db.password_reset_tokens.find_one(
-            {"user_id": linked["id"], "consumed_at": None},
-            sort=[("created_at", -1)],
-            projection={"created_at": 1, "expires_at": 1, "purpose": 1, "consumed_at": 1},
-        )
+        latest_token = await find_latest_active_portal_reset(linked["id"])
 
     now = datetime.now(timezone.utc)
     exp = latest_token.get("expires_at") if latest_token else None
@@ -363,7 +366,7 @@ async def portal_create_account(client_id: str, payload: PortalCreateIn, request
         raise HTTPException(status_code=400, detail={"code": "weak_password", "message": reason})
 
     # Existing account? Refuse — admins must use "Set Temporary Password" for those.
-    existing = await db.users.find_one({"email": email})
+    existing = await find_user_by_email(email)
     if existing and existing.get("role") != "client":
         raise HTTPException(status_code=409, detail={
             "code": "email_in_use_workforce",
@@ -371,7 +374,14 @@ async def portal_create_account(client_id: str, payload: PortalCreateIn, request
         })
     if existing:
         # Existing client user linked to a different patient?
-        other = await db.clients.find_one({"user_id": existing["id"], "id": {"$ne": client_id}})
+        from postgres_db import AsyncSessionLocal as _ASL
+        from sqlalchemy import select as _select
+        from postgres_models import Client as _Client
+        async with _ASL() as _pg:
+            _row = (await _pg.execute(
+                _select(_Client).where(_Client.user_id == existing["id"], _Client.id != client_id)
+            )).scalar_one_or_none()
+        other = _row is not None
         if other:
             raise HTTPException(status_code=409, detail={
                 "code": "email_in_use_client",
@@ -381,20 +391,21 @@ async def portal_create_account(client_id: str, payload: PortalCreateIn, request
     now = datetime.now(timezone.utc)
     if existing:
         # Update in place — never create a duplicate patient or account.
-        await db.users.update_one(
-            {"id": existing["id"]},
-            {"$set": {
+        await update_user(
+            existing["id"],
+            {
                 "password_hash": hash_password(payload.password),
                 "password_changed_at": now,
                 "must_change_password": payload.require_password_change,
                 "is_active": True,
                 "full_name": client.get("full_name") or existing.get("full_name") or "",
                 "phone": client.get("phone") or existing.get("phone"),
-            }, "$inc": {"session_version": 1}},
+            },
+            inc={"session_version": 1},
         )
         # Ensure the client is linked to this user.
         if not client.get("user_id"):
-            await db.clients.update_one({"id": client_id}, {"$set": {"user_id": existing["id"]}})
+            await _pg_update_client(client_id, {"user_id": existing["id"]})
         # Revoke any active sessions so the fresh password is required next time.
         try:
             from sessions import revoke_all_user_sessions
@@ -419,17 +430,14 @@ async def portal_create_account(client_id: str, payload: PortalCreateIn, request
             "must_change_password": payload.require_password_change,
             "session_version": 1,
         }
-        await db.users.insert_one(doc)
-        await db.clients.update_one({"id": client_id}, {"$set": {"user_id": doc["id"]}})
+        await insert_user(doc)
+        await _pg_update_client(client_id, {"user_id": doc["id"]})
         user_id = doc["id"]
         created = True
 
     # Invalidate any outstanding invitation tokens so an admin-set password
     # supersedes any email link.
-    await db.password_reset_tokens.update_many(
-        {"user_id": user_id, "consumed_at": None},
-        {"$set": {"consumed_at": now, "consumed_reason": "superseded_by_admin_password"}},
-    )
+    await invalidate_portal_reset_tokens(user_id)
 
     await log_audit(
         db, user["id"], user["email"], "portal.account_created",
@@ -480,20 +488,12 @@ async def portal_invite(client_id: str, request: Request,
     linked_user, created = await _get_or_create_portal_user(client, email)
 
     raw, url = await _issue_portal_link(linked_user, request, ttl_min=RESET_TTL_MIN * 24)  # 24h for first-time
-    subject = "Welcome to your Natural Medical Solutions patient portal"
-    html = (
-        f"<p>Hi {client.get('full_name') or 'there'},</p>"
-        "<p>Your patient portal at Natural Medical Solutions Wellness Center is ready. "
-        "Click the link below within 24 hours to choose a password and sign in:</p>"
-        f"<p><a href=\"{url}\">{url}</a></p>"
-        "<p>Once signed in you can review your appointments, treatment plan, labs, "
-        "messages, and secure documents.</p>"
-        "<p>— Natural Medical Solutions</p>"
-    )
-    delivery_status = await notify_email(
-        db, email, subject, html,
-        action="portal.invite_dispatch",
-        redact_recipient=True,
+    from notifiers import send_account_setup_email
+    delivery_status = await send_account_setup_email(
+        db, email,
+        first_name=(client.get("full_name") or "").split(" ")[0] or None,
+        setup_url=url,
+        expires_in_hours=int((RESET_TTL_MIN * 24) / 60),
     )
     await log_audit(db, user["id"], user["email"], "portal.invite",
                     resource_type="client", resource_id=client_id,
@@ -525,23 +525,17 @@ async def portal_reset_password(client_id: str, request: Request,
         })
     from rate_limit import enforce_forgot_rate
     enforce_forgot_rate(request, client.get("email") or client_id)
-    linked = await db.users.find_one({"id": client["user_id"]})
+    linked = await find_user_by_id(client["user_id"])
     if not linked:
         raise HTTPException(status_code=404, detail="Linked user not found")
 
     raw, url = await _issue_portal_link(linked, request, ttl_min=RESET_TTL_MIN)
-    subject = "Reset your Natural Medical Solutions portal password"
-    html = (
-        f"<p>Hi {linked.get('full_name') or 'there'},</p>"
-        "<p>An administrator sent you a fresh password-reset link. "
-        f"Use it within {RESET_TTL_MIN} minutes:</p>"
-        f"<p><a href=\"{url}\">{url}</a></p>"
-        "<p>If you didn't expect this, you can safely ignore it — your current password stays valid.</p>"
-    )
-    delivery_status = await notify_email(
-        db, linked["email"], subject, html,
-        action="portal.reset_dispatch",
-        redact_recipient=True,
+    from notifiers import send_password_reset_email
+    delivery_status = await send_password_reset_email(
+        db, linked["email"],
+        first_name=(linked.get("full_name") or "").split(" ")[0] or None,
+        reset_url=url,
+        expires_in_minutes=RESET_TTL_MIN,
     )
     await log_audit(db, user["id"], user["email"], "portal.reset_password",
                     resource_type="client", resource_id=client_id,
@@ -564,9 +558,7 @@ async def portal_disable(client_id: str, payload: PortalDisableIn, request: Requ
     client = await _fetch_client(client_id)
     if not client.get("user_id"):
         raise HTTPException(status_code=400, detail="No portal user to disable")
-    result = await db.users.update_one(
-        {"id": client["user_id"]}, {"$set": {"is_active": False}},
-    )
+    result = await update_user(client["user_id"], {"is_active": False})
     # Revoke all active sessions
     from sessions import revoke_all_user_sessions
     revoked = await revoke_all_user_sessions(client["user_id"], "portal_disabled")
@@ -575,7 +567,7 @@ async def portal_disable(client_id: str, payload: PortalDisableIn, request: Requ
                     severity="high", outcome="success",
                     metadata={"user_id": client["user_id"], "reason": payload.reason, **(revoked or {})},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    return {"ok": True, "disabled": bool(result.modified_count)}
+    return {"ok": True, "disabled": bool(result)}
 
 
 @api.post("/clients/{client_id}/portal-enable")
@@ -584,14 +576,12 @@ async def portal_enable(client_id: str, request: Request,
     client = await _fetch_client(client_id)
     if not client.get("user_id"):
         raise HTTPException(status_code=400, detail="No portal user to enable")
-    result = await db.users.update_one(
-        {"id": client["user_id"]}, {"$set": {"is_active": True}},
-    )
+    result = await update_user(client["user_id"], {"is_active": True})
     await log_audit(db, user["id"], user["email"], "portal.enable",
                     resource_type="client", resource_id=client_id,
                     metadata={"user_id": client["user_id"]},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    return {"ok": True, "enabled": bool(result.modified_count)}
+    return {"ok": True, "enabled": bool(result)}
 
 
 # --------------------------------------------------------------------------- #
@@ -615,7 +605,7 @@ async def dev_portal_test_patient(payload: TestPatientSeedIn, request: Request,
     email = (payload.email or "portal.test@natmedsol.local").strip().lower()
     now = datetime.now(timezone.utc)
 
-    client = await db.clients.find_one({"email": email})
+    client = await find_client(email=email)
     if not client:
         client = {
             "id": new_id(),
@@ -624,7 +614,7 @@ async def dev_portal_test_patient(payload: TestPatientSeedIn, request: Request,
             "phone": "(555) 010-0001",
             "dob": "1985-01-15",
             "sex": "prefer_not_to_say",
-            "address": "1 Test Way, Sample City, GA",
+            "address": {"raw": "1 Test Way, Sample City, GA"},
             "mrn": "NMS-TEST01",
             "primary_concern": "Manual portal usability testing",
             "consent_marketing": False,
@@ -639,14 +629,15 @@ async def dev_portal_test_patient(payload: TestPatientSeedIn, request: Request,
                 "collections."
             ),
         }
-        await db.clients.insert_one(client)
+        await insert_client(client)
     else:
         # Ensure tag/notes stay in place.
-        await db.clients.update_one(
-            {"id": client["id"]},
-            {"$set": {"tags": list(set((client.get("tags") or []) + [TEST_PATIENT_TAG])),
-                       "consent_marketing": False}},
-        )
+        new_tags = list(set((client.get("tags") or []) + [TEST_PATIENT_TAG]))
+        await _pg_update_client(client["id"], {
+            "tags": new_tags,
+            "consent_marketing": False,
+        })
+        client["tags"] = new_tags
 
     linked_user, created = await _get_or_create_portal_user(client, email)
     raw, url = await _issue_portal_link(linked_user, request, ttl_min=RESET_TTL_MIN * 24)
@@ -675,9 +666,9 @@ async def dev_delete_test_patient(client_id: str, request: Request,
     if TEST_PATIENT_TAG not in (client.get("tags") or []):
         raise HTTPException(status_code=400, detail="Not a flagged test patient")
     uid = client.get("user_id")
-    await db.clients.delete_one({"id": client_id})
+    await _pg_delete_client(client_id)
     if uid:
-        await db.users.delete_one({"id": uid})
+        await delete_user(uid)
     await log_audit(db, user["id"], user["email"], "portal.test_patient_delete",
                     resource_type="client", resource_id=client_id,
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))

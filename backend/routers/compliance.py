@@ -15,6 +15,16 @@ from deps import (
     get_current_user, require_roles,
 )
 from models import new_id
+from pg_shims import list_all_assignments_for_client
+from postgres_db import AsyncSessionLocal
+from repositories import scheduling as sched_repo
+
+
+async def _pg_visit_notes_for_client(cid):
+    from repositories import clinical_and_messaging as _cm
+    from postgres_db import AsyncSessionLocal as _ASL
+    async with _ASL() as pg:
+        return await _cm.list_notes_for_client(pg, cid, limit=1000)
 
 
 @api.get("/compliance/baa-checklist")
@@ -24,9 +34,7 @@ async def get_baa_checklist(user=Depends(require_roles("admin"))):
         {"key": "mongodb_atlas",    "vendor": "MongoDB Atlas",         "purpose": "Primary PHI database (patients, notes, appointments)", "required": True,  "docs_url": "https://www.mongodb.com/legal/hipaa-security-info"},
         {"key": "aws",              "vendor": "AWS",                    "purpose": "Application hosting after go-live (Elastic Beanstalk / ECS)", "required": True, "docs_url": "https://aws.amazon.com/compliance/hipaa-compliance/"},
         {"key": "aws_bedrock",      "vendor": "AWS (Amazon Bedrock)",   "purpose": "AI SOAP drafting, form transcription, protocol AI (BAA-covered under the AWS BAA)",     "required": True,  "docs_url": "https://aws.amazon.com/compliance/hipaa-compliance/"},
-        {"key": "twilio",           "vendor": "Twilio",                 "purpose": "Appointment reminder SMS + patient link delivery",       "required": True,  "docs_url": "https://www.twilio.com/legal/baa"},
         {"key": "sendgrid",         "vendor": "SendGrid (Twilio)",      "purpose": "Transactional email — form links, receipts",              "required": True,  "docs_url": "https://sendgrid.com/en-us/policies/legal/hipaa"},
-        {"key": "google_workspace", "vendor": "Google Workspace + OAuth","purpose": "Direct Google SSO replacing Emergent-managed SSO",       "required": True,  "docs_url": "https://support.google.com/a/answer/3407054"},
         {"key": "stripe",           "vendor": "Stripe",                 "purpose": "Card processing (Stripe does NOT sign BAAs — safe if no PHI in metadata)", "required": False, "docs_url": "https://support.stripe.com/questions/hipaa-compliance-and-stripe"},
         {"key": "emergent_migration","vendor": "Emergent (hosting)",    "purpose": "Application has migrated to AWS EC2 with an instance IAM role for Bedrock. Mark this row as not_applicable once the AWS environment is confirmed.", "required": False, "docs_url": None},
     ]
@@ -75,15 +83,17 @@ async def patient_data_export(request: Request, user=Depends(get_current_user)):
     if not self_c:
         raise HTTPException(status_code=404, detail="No client record linked")
     cid = self_c["id"]
+    async with AsyncSessionLocal() as pg:
+        client_appts = await sched_repo.list_appointments(pg, client_id=cid, limit=1000)
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "patient": _strip_id(self_c),
         "user_account": {k: user.get(k) for k in ("id", "email", "full_name", "role", "created_at")},
-        "appointments": [_strip_id(a) async for a in db.appointments.find({"client_id": cid})],
-        "visit_notes": [_strip_id(n) async for n in db.visit_notes.find({"client_id": cid})],
+        "appointments": client_appts,
+        "visit_notes": await _pg_visit_notes_for_client(cid),
         "treatment_plans": [_strip_id(t) async for t in db.treatment_plans.find({"client_id": cid})],
         "protocol_enrollments": [_strip_id(p) async for p in db.protocol_enrollments.find({"client_id": cid})],
-        "supplement_assignments": [_strip_id(s) async for s in db.client_supplement_assignments.find({"client_id": cid})],
+        "supplement_assignments": await list_all_assignments_for_client(cid),
         "form_submissions": [_strip_id(f) async for f in db.form_submissions.find({"client_id": cid})],
         "files": [_strip_id(f) async for f in db.files.find({"client_id": cid})],
         "billing": [_strip_id(b) async for b in db.pos_sales.find({"client_id": cid})],
@@ -99,19 +109,38 @@ async def patient_data_export(request: Request, user=Depends(get_current_user)):
 async def accounting_of_disclosures(client_id: str, request: Request,
                                     user=Depends(get_current_user)):
     """§164.528 — patient right to an accounting of disclosures.
-    Returns every audit log row that references this client, filtered to the read/access events."""
+    Returns every audit log row that references this client, filtered to the read/access events.
+
+    Session 3.0b: reads from PostgreSQL `auth_audit_logs` (the Mongo mirror
+    was dropped)."""
     if user["role"] == "client":
         sc = await _resolve_self_client(user)
         if not sc or sc["id"] != client_id:
             raise HTTPException(status_code=403, detail="Forbidden")
-    q = {
-        "$or": [
-            {"resource_type": "client", "resource_id": client_id},
-            {"metadata.client_id": client_id},
-        ]
-    }
-    rows = await db.audit_logs.find(q).sort("ts", -1).to_list(2000)
-    hits = [_strip_id(r) for r in rows]
+    from postgres_db import AsyncSessionLocal
+    from postgres_models import AuditLog
+    from sqlalchemy import or_, select
+    async with AsyncSessionLocal() as pg:
+        stmt = (
+            select(AuditLog)
+            .where(or_(
+                (AuditLog.resource_type == "client") & (AuditLog.resource_id == client_id),
+                AuditLog.audit_metadata["client_id"].astext == client_id,
+            ))
+            .order_by(AuditLog.ts.desc())
+            .limit(2000)
+        )
+        rows = (await pg.execute(stmt)).scalars().all()
+    def _row(r):
+        return {
+            "id": r.id, "ts": r.ts.isoformat() if r.ts else None,
+            "user_id": r.user_id, "user_email": r.user_email,
+            "action": r.action, "resource_type": r.resource_type,
+            "resource_id": r.resource_id, "severity": r.severity,
+            "outcome": r.outcome, "ip": r.ip, "user_agent": r.user_agent,
+            "metadata": r.audit_metadata,
+        }
+    hits = [_row(r) for r in rows]
     await log_audit(db, user["id"], user["email"], "patient.accounting_view",
                     resource_type="client", resource_id=client_id,
                     metadata={"count": len(hits)},

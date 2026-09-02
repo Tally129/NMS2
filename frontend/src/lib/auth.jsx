@@ -28,32 +28,93 @@ export function AuthProvider({ children }) {
     broadcastAuth("logout-all");
   }, []);
 
-  const refreshMe = useCallback(async () => {
-    if (!getAccessToken()) { setLoading(false); return; }
+  const refreshMe = useCallback(async ({ allowRefresh = true } = {}) => {
     try {
+      if (!getAccessToken()) {
+        if (!allowRefresh) {
+          setUser(null);
+          return null;
+        }
+        await doRefresh();
+      }
+
+      if (!getAccessToken()) {
+        setUser(null);
+        return null;
+      }
+
       const { data } = await api.get("/auth/me");
       setUser(data);
       localStorage.setItem(LS.user, JSON.stringify(data));
-    } catch {
-      setUser(null);
-      clearAccessToken();
-      localStorage.removeItem(LS.user);
+      return data;
+    } catch (error) {
+      const status = error?.response?.status;
+
+      // Only destroy the local session when authentication is definitively
+      // rejected. Temporary network/server failures should not log users out.
+      if (status === 401 || status === 403) {
+        clearAccessToken();
+        localStorage.removeItem(LS.user);
+        setUser(null);
+      }
+
+      throw error;
     } finally {
       setLoading(false);
     }
   }, []);
 
   // Sprint 2 bootstrap: on app-start, try the refresh cookie for a new access token.
+  // Public auth routes (`/login`, `/staff-login`, `/forgot-password`,
+  // `/reset-password`, `/patient-login`, `/register`) MUST NOT depend on a
+  // refresh cookie. When the user lands on one of them directly (e.g. from
+  // an emailed reset link), we do not call `/auth/refresh` at all — a 401
+  // there is expected but can still confuse users if a downstream layer
+  // ever surfaces the response body.
+  const _isPublicAuthPath = () => {
+    try {
+      const p = (typeof window !== "undefined" && window.location.pathname) || "";
+      return /^\/(reset-password|forgot-password|login|staff-login|patient-login|register|change-password|bootstrap-mfa)(\/|$)/.test(p);
+    } catch { return false; }
+  };
   useEffect(() => {
     let mounted = true;
+    if (_isPublicAuthPath()) {
+      // Public routes must work without a refresh cookie. If this tab already
+      // has a valid in-memory token, resolve the current user without forcing
+      // another refresh-token rotation.
+      if (getAccessToken()) {
+        refreshMe({ allowRefresh: false }).catch(() => {});
+      } else {
+        setLoading(false);
+      }
+      return () => { mounted = false; };
+    }
     (async () => {
       try {
-        await doRefresh();
-        const cached = localStorage.getItem(LS.user);
-        if (mounted && cached) setUser(JSON.parse(cached));
-        await refreshMe();
-      } catch {
-        if (mounted) { clearAccessToken(); setUser(null); setLoading(false); }
+        const restoredUser = await refreshMe();
+        if (mounted && restoredUser) {
+          setUser(restoredUser);
+        }
+      } catch (error) {
+        if (!mounted) return;
+
+        const status = error?.response?.status;
+
+        if (status === 401 || status === 403) {
+          clearAccessToken();
+          localStorage.removeItem(LS.user);
+          setUser(null);
+        } else {
+          // Keep any cached user only as a temporary UI hint during a
+          // network outage. It never grants API access without a token.
+          const cached = localStorage.getItem(LS.user);
+          if (cached) {
+            try { setUser(JSON.parse(cached)); } catch {}
+          }
+        }
+
+        setLoading(false);
       }
     })();
     const off = onAuthBroadcast((msg) => {
@@ -73,12 +134,47 @@ export function AuthProvider({ children }) {
   }, [refreshMe]);
 
   async function loginWithPassword(email, password, mfa_token) {
-    const { data } = await api.post("/auth/login", { email, password, mfa_token: mfa_token || null });
-    if (data.mfa_required) return { mfa_required: true };
+    const { data } = await api.post("/auth/login", {
+      email,
+      password,
+      mfa_token: mfa_token || null,
+    });
+
+    // Workforce first-login onboarding uses a short-lived bootstrap JWT.
+    // The backend intentionally does not issue an access token or refresh
+    // cookie until password change and MFA enrollment are complete.
+    if (data.bootstrap_token && data.bootstrap_stage) {
+      sessionStorage.setItem("nms_bootstrap_token", data.bootstrap_token);
+      sessionStorage.setItem("nms_bootstrap_stage", data.bootstrap_stage);
+      sessionStorage.setItem("nms_bootstrap_user", JSON.stringify(data.user || {}));
+      sessionStorage.setItem("nms_bootstrap_email", email);
+
+      return {
+        bootstrap_required: true,
+        bootstrap_stage: data.bootstrap_stage,
+        user: data.user,
+      };
+    }
+
+    if (data.mfa_required) {
+      return { mfa_required: true };
+    }
+
+    if (!data.access_token || !data.user) {
+      throw new Error("Login did not return a completed authenticated session.");
+    }
+
     setAccessToken(data.access_token);
     localStorage.setItem(LS.user, JSON.stringify(data.user));
     touchActivity();
     setUser(data.user);
+
+    // Bootstrap state must never survive a completed normal login.
+    sessionStorage.removeItem("nms_bootstrap_token");
+    sessionStorage.removeItem("nms_bootstrap_stage");
+    sessionStorage.removeItem("nms_bootstrap_user");
+    sessionStorage.removeItem("nms_bootstrap_email");
+
     return { user: data.user, notice: data.notice };
   }
 
@@ -100,37 +196,10 @@ export function AuthProvider({ children }) {
     return { user: data.user };
   }
 
-  async function loginWithGoogleSession(sessionId) {
-    const { data } = await api.post("/auth/google/session", null, { headers: { "X-Session-ID": sessionId } });
-    setAccessToken(data.access_token);
-    localStorage.setItem(LS.user, JSON.stringify(data.user));
-    touchActivity();
-    setUser(data.user);
-    return { user: data.user };
-  }
-
-  async function beginGoogleOAuthDirect() {
-    const { data } = await api.get("/auth/google/oauth/authorize");
-    window.location.href = data.authorize_url;
-  }
-
-  async function completeOAuthFromTokens(accessToken, user) {
-    // Sprint 2: refresh token is delivered via the `nms_rt` HttpOnly cookie
-    // by the /auth/google/oauth/exchange response. We only receive the
-    // memory-bound access token and the user profile here.
-    if (!accessToken || !user) throw new Error("OAuth exchange returned no token");
-    setAccessToken(accessToken);
-    localStorage.setItem(LS.user, JSON.stringify(user));
-    touchActivity();
-    setUser(user);
-    return { user };
-  }
-
   return (
     <AuthContext.Provider
       value={{
         user, loading, logout, logoutAll, loginWithPassword, loginContinue, registerNew, refreshMe, setUser,
-        loginWithGoogleSession, beginGoogleOAuthDirect, completeOAuthFromTokens,
       }}
     >
       {children}

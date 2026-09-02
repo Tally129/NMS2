@@ -1,7 +1,7 @@
 """
 Phase 8 tests for NatMedSol EMR.
 Covers:
-  - POST /api/auth/google/session (X-Session-ID header validation, upstream error handling)
+  - Google SSO routes have been REMOVED (Session 2a) — must return 404
   - REMOVED commission endpoints return 404
   - GET /api/push/public-key returns configured VAPID_PUBLIC_KEY
   - POST /api/push/subscribe / unsubscribe (idempotent + (user_id, endpoint) unique upsert)
@@ -45,22 +45,19 @@ def practitioner_headers(practitioner_token):
     return {"Authorization": f"Bearer {practitioner_token}"}
 
 
-# ---------- 1. Google SSO session exchange ----------
-class TestGoogleSession:
-    def test_missing_header_400(self):
+# ---------- 1. Google SSO removed (Session 2a) ----------
+class TestGoogleSsoRemoved:
+    def test_session_exchange_route_gone(self):
         r = requests.post(f"{API}/auth/google/session", timeout=15)
-        assert r.status_code == 400, r.text
-        assert "X-Session-ID" in r.text or "Missing" in r.text
+        assert r.status_code == 404, r.text
 
-    def test_invalid_session_returns_401_or_502(self):
-        # Bogus session_id -> upstream returns non-200 -> our endpoint maps to 401
+    def test_session_exchange_with_header_still_404(self):
         r = requests.post(
             f"{API}/auth/google/session",
             headers={"X-Session-ID": "bogus-fake-session-id-zzz"},
             timeout=20,
         )
-        # 401 expected when upstream rejects, 502 if upstream unreachable
-        assert r.status_code in (401, 502), r.text
+        assert r.status_code == 404, r.text
 
 
 # ---------- 2. Commission endpoints removed ----------

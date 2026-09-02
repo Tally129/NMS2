@@ -22,6 +22,7 @@ from audit import get_client_ip, log_audit
 from delegations import has_active_delegation
 from deps import _strip_id, api, db, require_roles
 from models import new_id
+from pg_shims import find_client, find_user_by_id
 
 REVIEW_STATUSES = (
     "new", "waiting_for_review", "reviewed",
@@ -88,8 +89,7 @@ async def review_queue(
     out = []
     for r in rows:
         r["review_status"] = _default_status(r)
-        client = await db.clients.find_one({"id": r.get("client_id")},
-                                            {"full_name": 1, "email": 1})
+        client = await find_client(client_id=r.get("client_id"))
         out.append({
             **_strip_id(r),
             "client_name": (client or {}).get("full_name") or (client or {}).get("email"),
@@ -126,8 +126,7 @@ async def patch_review_status(lab_id: str, payload: ReviewPatch, request: Reques
     if payload.review_notes:
         updates["review_notes"] = payload.review_notes.strip()
     if payload.ordering_provider_id and not lab.get("ordering_provider_id"):
-        prov = await db.users.find_one({"id": payload.ordering_provider_id},
-                                        {"full_name": 1})
+        prov = await find_user_by_id(payload.ordering_provider_id)
         updates["ordering_provider_id"] = payload.ordering_provider_id
         updates["ordering_provider_name"] = (prov or {}).get("full_name")
     if payload.review_status == "reviewed":
@@ -229,8 +228,7 @@ async def create_task_from_lab(lab_id: str, payload: LabTaskShortcut, request: R
     if payload.priority not in TASK_PRIORITIES:
         raise HTTPException(status_code=400, detail="Invalid priority")
 
-    client = await db.clients.find_one({"id": lab.get("client_id")},
-                                        {"full_name": 1, "email": 1})
+    client = await find_client(client_id=lab.get("client_id"))
     now = datetime.now(timezone.utc)
     default_title = (
         payload.title or
@@ -266,7 +264,7 @@ async def create_task_from_lab(lab_id: str, payload: LabTaskShortcut, request: R
                                     ("assigned_provider", "assigned_provider_id", "assigned_provider_name")]:
         uid = task.get(id_key)
         if uid:
-            u = await db.users.find_one({"id": uid}, {"full_name": 1, "email": 1})
+            u = await find_user_by_id(uid)
             if u:
                 task[name_key] = u.get("full_name") or u.get("email")
     await db.internal_tasks.insert_one(task)
@@ -514,12 +512,14 @@ async def ai_lab_review_draft(lab_id: str, request: Request,
     if not lab:
         raise HTTPException(status_code=404, detail="Lab not found")
 
-    client = await db.clients.find_one(
-        {"id": lab.get("client_id")},
+    client = await find_client(client_id=lab.get("client_id"))
+    if client:
         # Minimum-necessary projection — no name, phone, email, address,
         # insurance, notes, or unrelated chart data.
-        {"id": 1, "dob": 1, "sex": 1, "allergies": 1, "current_supplements": 1},
-    ) or {"id": lab.get("client_id")}
+        client = {k: v for k, v in client.items() if k in
+                  {"id", "dob", "sex", "allergies", "current_supplements"}}
+    else:
+        client = {"id": lab.get("client_id")}
 
     # Up to five prior values for the SAME test only.
     history_cursor = db.lab_values.find(

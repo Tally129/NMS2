@@ -19,9 +19,9 @@ import {
 
 /**
  * Phase 11 — clinic-wide SOAP Notes hub.
- *  • Notes tab: filter by client + provider; click row to open per-client chart.
+ *  • Notes tab: filter by patient + provider; click row to open the patient chart.
  *  • Templates tab: provider/admin can manage SOAP starter templates.
- *  • New SOAP: pre-fills from a chosen template + chosen client → saves to that client.
+ *  • New SOAP: pre-fills from a chosen template + chosen patient → saves to that patient.
  */
 export default function SoapNotes() {
   const { user } = useAuth();
@@ -99,7 +99,7 @@ export default function SoapNotes() {
             <div className="relative flex-1 min-w-[240px] max-w-md">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8a6a3c]" />
               <Input
-                placeholder="Search by client name…"
+                placeholder="Search by patient name…"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="pl-9 bg-[#f6f1e6] border-[#e0d6bc]"
@@ -108,10 +108,10 @@ export default function SoapNotes() {
             </div>
             <Select value={clientFilter} onValueChange={setClientFilter}>
               <SelectTrigger className="w-56 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="soap-client-filter">
-                <SelectValue placeholder="All clients" />
+                <SelectValue placeholder="All patients" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">All clients</SelectItem>
+                <SelectItem value="all">All patients</SelectItem>
                 {clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}
               </SelectContent>
             </Select>
@@ -131,7 +131,7 @@ export default function SoapNotes() {
               <thead className="bg-[#f1ead8] text-[#8a6a3c] uppercase text-[11px] tracking-widest">
                 <tr>
                   <th className="text-left py-3 px-4">Date</th>
-                  <th className="text-left py-3 px-4">Client</th>
+                  <th className="text-left py-3 px-4">Patient</th>
                   <th className="text-left py-3 px-4">Provider</th>
                   <th className="text-left py-3 px-4">Subjective preview</th>
                   <th className="text-right py-3 px-4">Open</th>
@@ -235,13 +235,16 @@ function NoteEditorDialog({ state, templates, clients, onOpenChange, onSaved }) 
   const [draft, setDraft] = React.useState(null);
   const [clientId, setClientId] = React.useState("");
   const [templateId, setTemplateId] = React.useState("");
+  const [encounterText, setEncounterText] = React.useState("");
   const [saving, setSaving] = React.useState(false);
+  const [generating, setGenerating] = React.useState(false);
 
   React.useEffect(() => {
     if (state) {
       setDraft(state.draft);
       setClientId(state.client_id || "");
       setTemplateId(state.template_id || "");
+      setEncounterText(state.encounter_text || "");
     }
   }, [state]);
   if (!state || !draft) return null;
@@ -254,8 +257,57 @@ function NoteEditorDialog({ state, templates, clients, onOpenChange, onSaved }) 
     setDraft({ subjective: t.subjective || "", objective: t.objective || "", assessment: t.assessment || "", plan: t.plan || "" });
   };
 
+  const generateWithAi = async () => {
+    if (!clientId) {
+      toast({ title: "Select a patient first" });
+      return;
+    }
+
+    if (encounterText.trim().length < 10) {
+      toast({
+        title: "Add encounter notes",
+        description: "Enter a visit summary, transcript, or clinician notes.",
+      });
+      return;
+    }
+
+    setGenerating(true);
+
+    try {
+      const response = await api.post("/notes/ai-draft", {
+        client_id: clientId,
+        template_id:
+          templateId && templateId !== "blank"
+            ? templateId
+            : null,
+        encounter_text: encounterText.trim(),
+      });
+
+      setDraft({
+        subjective: response.data?.subjective || "",
+        objective: response.data?.objective || "",
+        assessment: response.data?.assessment || "",
+        plan: response.data?.plan || "",
+      });
+
+      toast({
+        title: "SOAP draft generated",
+        description: "Review and edit every section before saving.",
+      });
+    } catch (error) {
+      toast({
+        title: "AI draft failed",
+        description:
+          getErrorMessage(error) ||
+          "The SOAP draft could not be generated.",
+      });
+    } finally {
+      setGenerating(false);
+    }
+  };
+
   const save = async () => {
-    if (!clientId) { toast({ title: "Select a client" }); return; }
+    if (!clientId) { toast({ title: "Select a patient" }); return; }
     setSaving(true);
     try {
       await api.post("/notes", { client_id: clientId, ...draft });
@@ -270,14 +322,14 @@ function NoteEditorDialog({ state, templates, clients, onOpenChange, onSaved }) 
       <DialogContent className="bg-[#fbf7ee] border-[#e7dfc9] max-w-3xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="font-display text-2xl">New SOAP note</DialogTitle>
-          <DialogDescription>Choose a client and (optionally) a template, then edit the SOAP sections.</DialogDescription>
+          <DialogDescription>Choose a patient and (optionally) a template, then edit the SOAP sections.</DialogDescription>
         </DialogHeader>
         <div className="space-y-5">
           <div className="grid md:grid-cols-2 gap-3">
             <div>
-              <Label>Client</Label>
+              <Label>Patient</Label>
               <Select value={clientId} onValueChange={setClientId}>
-                <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="soap-editor-client"><SelectValue placeholder="Select client…" /></SelectTrigger>
+                <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="soap-editor-client"><SelectValue placeholder="Select patient…" /></SelectTrigger>
                 <SelectContent>{clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}</SelectContent>
               </Select>
             </div>
@@ -292,6 +344,59 @@ function NoteEditorDialog({ state, templates, clients, onOpenChange, onSaved }) 
               </Select>
             </div>
           </div>
+          <div className="rounded-xl border border-[#d8c89f] bg-[#f6f1e6] p-4">
+            <div className="mb-2 flex items-start justify-between gap-3">
+              <div>
+                <Label>Encounter notes or transcript</Label>
+                <p className="mt-1 text-xs text-[#6a6a6a]">
+                  Paste the visit summary, dictation, transcript, or rough
+                  clinician notes. AI creates an editable draft only.
+                </p>
+              </div>
+
+              <span className="rounded-full border border-[#e0d6bc] bg-[#fbf7ee] px-2 py-1 text-[10px] uppercase tracking-wider text-[#8a6a3c]">
+                Clinician review required
+              </span>
+            </div>
+
+            <Textarea
+              value={encounterText}
+              onChange={(event) => setEncounterText(event.target.value)}
+              rows={6}
+              maxLength={12000}
+              placeholder="Example: Patient reports improved energy since the last visit but continues to experience..."
+              className="mt-2 bg-white border-[#e0d6bc]"
+              data-testid="soap-ai-encounter"
+            />
+
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+              <span className="text-xs text-[#6a6a6a]">
+                {encounterText.length.toLocaleString()} / 12,000 characters
+              </span>
+
+              <Button
+                type="button"
+                onClick={generateWithAi}
+                disabled={generating}
+                className="rounded-full bg-[#8a6a3c] text-white hover:bg-[#725630]"
+                data-testid="soap-ai-generate"
+              >
+                {generating ? (
+                  <Loader2 size={14} className="mr-2 animate-spin" />
+                ) : (
+                  <Sparkles size={14} className="mr-2" />
+                )}
+                {generating ? "Generating…" : "Generate SOAP with AI"}
+              </Button>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">
+            AI-generated content may contain errors or omissions. Verify all
+            patient statements, findings, assessments, and plans before saving
+            or finalizing the note.
+          </div>
+
           <SoapSection label="Subjective" value={draft.subjective} onChange={(v) => setDraft({ ...draft, subjective: v })} testid="soap-s" />
           <SoapSection label="Objective" value={draft.objective} onChange={(v) => setDraft({ ...draft, objective: v })} testid="soap-o" />
           <SoapSection label="Assessment" value={draft.assessment} onChange={(v) => setDraft({ ...draft, assessment: v })} testid="soap-a" />

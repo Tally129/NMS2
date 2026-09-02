@@ -33,13 +33,13 @@ export default function AdminNotesList() {
     <PortalLayout>
       <PortalHeader
         title="Visit notes"
-        subtitle="Clinic-wide SOAP note index. Click a row to open the client chart."
+        subtitle="Clinic-wide SOAP note index. Click a row to open the patient chart."
       />
       <div className="flex flex-col md:flex-row gap-3 mb-5">
         <div className="relative flex-1 max-w-md">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8a6a3c]" />
           <Input
-            placeholder="Search by client name…"
+            placeholder="Search by patient name…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="pl-9 bg-[#f6f1e6] border-[#e0d6bc]"
@@ -62,7 +62,7 @@ export default function AdminNotesList() {
           <thead className="bg-[#f1ead8] text-[#8a6a3c] uppercase text-[11px] tracking-widest">
             <tr>
               <th className="text-left py-3 px-4">Date</th>
-              <th className="text-left py-3 px-4">Client</th>
+              <th className="text-left py-3 px-4">Patient</th>
               <th className="text-left py-3 px-4">Provider</th>
               <th className="text-left py-3 px-4">Subjective preview</th>
             </tr>

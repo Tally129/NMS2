@@ -9,7 +9,6 @@ export default function Login() {
         variant="patient"
         title="Patient Portal"
         subtitle="Access your appointments, chart, labs, and secure messages."
-        redirectPath="/login"
         crossPortalTo="/staff-login"
         crossPortalLabel="Staff & providers:"
         crossPortalLinkText="sign in here"

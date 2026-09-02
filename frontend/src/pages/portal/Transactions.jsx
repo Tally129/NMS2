@@ -120,7 +120,7 @@ export default function Transactions() {
 
       <div className="flex flex-col md:flex-row gap-3 mb-4">
         <Input
-          placeholder="Search by client or transaction id…"
+          placeholder="Search by patient or transaction id…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="max-w-sm bg-[#f6f1e6] border-[#e0d6bc]"
@@ -140,7 +140,7 @@ export default function Transactions() {
           <thead className="bg-[#f1ead8] text-[#8a6a3c] uppercase text-[11px] tracking-widest">
             <tr>
               <th className="text-left py-3 px-4">Date</th>
-              <th className="text-left py-3 px-4">Client</th>
+              <th className="text-left py-3 px-4">Patient</th>
               <th className="text-left py-3 px-4">Items</th>
               <th className="text-left py-3 px-4">Method</th>
               <th className="text-left py-3 px-4">Status</th>

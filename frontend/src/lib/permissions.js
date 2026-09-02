@@ -3,7 +3,7 @@
  *
  * Mirrors the backend ROLE_PERMISSIONS map so components can gate their
  * data fetches BEFORE issuing a request the current role would only be
- * denied for. This is the client-side echo of `permissions.py`.
+ * denied for. This is the patient-side echo of `permissions.py`.
  *
  * Contract:
  *   const { role } = useAuth().user || {};

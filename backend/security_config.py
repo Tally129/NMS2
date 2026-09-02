@@ -71,11 +71,9 @@ def enforce_production_config():
     if hipaa and not (os.environ.get("MFA_ENC_KEY_B64") or "").strip():
         problems.append("MFA_ENC_KEY_B64 must be set in HIPAA_MODE.")
 
-    # -- Warn (non-fatal) on stub email/SMS in HIPAA mode ---------------- #
+    # -- Warn (non-fatal) on stub email in HIPAA mode -------------------- #
     if hipaa and not (os.environ.get("SENDGRID_API_KEY") or "").strip():
         logger.warning("HIPAA_MODE: SendGrid not configured — email notifications will fall back to sent_stub")
-    if hipaa and not (os.environ.get("TWILIO_ACCOUNT_SID") or "").strip():
-        logger.warning("HIPAA_MODE: Twilio not configured — SMS notifications will fall back to sent_stub")
 
     if problems:
         for p in problems:

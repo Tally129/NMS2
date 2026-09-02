@@ -101,10 +101,10 @@ class TestMustEnrollMFA:
     @pytest.fixture(scope="class", autouse=True)
     def _seed_user(self):
         import bcrypt
-        c, dbh = _mongo()
+        from tests.pg_test_helpers import pg_users_insert, pg_users_delete
         uid = uuid.uuid4().hex
         pw_hash = bcrypt.hashpw(self.password.encode(), bcrypt.gensalt(rounds=12)).decode()
-        dbh.users.insert_one({
+        pg_users_insert({
             "id": uid,
             "email": self.email,
             "password_hash": pw_hash,
@@ -117,10 +117,7 @@ class TestMustEnrollMFA:
             "created_at": datetime.now(timezone.utc),
         })
         yield uid
-        dbh.users.delete_one({"id": uid})
-        dbh.user_sessions.delete_many({"user_id": uid})
-        dbh.refresh_tokens.delete_many({"user_id": uid})
-        c.close()
+        pg_users_delete({"id": uid})
 
     def test_fresh_workforce_login_returns_token_but_phi_blocked(self):
         r = requests.post(f"{API}/auth/login",

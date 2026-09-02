@@ -1,4 +1,5 @@
 import axios from "axios";
+import { normalizeApiList } from "./collections";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API_BASE = `${BACKEND_URL}/api`;
@@ -44,6 +45,7 @@ export function broadcastAuth(event) { try { bc && bc.postMessage({ event, ts: D
 
 const api = axios.create({
   baseURL: API_BASE,
+  withCredentials: true,
   // CRITICAL: treat 403 as a NON-error status so axios' internal `settle()`
   // resolves the promise instead of constructing an AxiosError. This is the
   // only way to prevent CRA's react-error-overlay from ever seeing the
@@ -56,10 +58,6 @@ const api = axios.create({
 api.interceptors.request.use((config) => {
   const token = _access_token;
   if (token) config.headers.Authorization = `Bearer ${token}`;
-  // /auth/refresh MUST send + receive the HttpOnly cookie
-  if (config.url && config.url.includes("/auth/refresh")) {
-    config.withCredentials = true;
-  }
   return config;
 });
 
@@ -184,15 +182,29 @@ api.interceptors.response.use(
         if (newToken) original.headers.Authorization = `Bearer ${newToken}`;
         return api(original);
       } catch (e) {
-        // Only escalate to logout when the refresh really failed
-        // (session revoked / cookie missing) — never on the concurrency
-        // retry path (that's swallowed inside _refreshOnce).
-        _access_token = null;
-        localStorage.removeItem(LS.user);
-        broadcastAuth("session-expired");
-        if (!window.location.pathname.startsWith("/login")) {
-          window.location.href = "/login";
+        const refreshStatus = e?.response?.status;
+
+        // Only end the session when refresh is definitively rejected.
+        // Network failures and backend 5xx responses must not erase a
+        // potentially valid session.
+        if (refreshStatus === 401 || refreshStatus === 403) {
+          clearAccessToken();
+          localStorage.removeItem(LS.user);
+          broadcastAuth("session-expired");
+
+          const path = window.location.pathname;
+          const alreadyPublic =
+            path.startsWith("/login") ||
+            path.startsWith("/staff-login") ||
+            path.startsWith("/forgot-password") ||
+            path.startsWith("/reset-password");
+
+          if (!alreadyPublic) {
+            window.location.replace("/login");
+          }
         }
+
+        return Promise.reject(e);
       }
     }
     return Promise.reject(error);
@@ -233,6 +245,31 @@ if (typeof window !== "undefined" && !window.__nms_rejection_installed) {
 }
 
 export { api };
+
+/**
+ * Fetch an endpoint whose primary result is a collection.
+ *
+ * response.data is guaranteed to be an array.
+ * response.rawData preserves pagination and other metadata.
+ */
+api.getList = async function getList(
+  url,
+  config = {},
+  preferredKeys = []
+) {
+  const response = await api.get(url, config);
+  const rawData = response.data;
+
+  return {
+    ...response,
+    rawData,
+    data: normalizeApiList(rawData, {
+      endpoint: url,
+      preferredKeys,
+    }),
+  };
+};
+
 export default api;
 
 /**
