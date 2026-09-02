@@ -34,6 +34,7 @@ from marketing_os.services.journey import (
     compute_funnel,
     compute_revenue,
 )
+from marketing_os.services.lead_pipeline import setter_metrics
 from marketing_os.policy import DEFAULT_POLICY
 
 
@@ -1080,6 +1081,20 @@ async def marketing_director_brief(
             for row in conversion_result
         ]
 
+        lead_rows = [
+            serialize_row(row)
+            for row in await pg.execute(
+                text("SELECT * FROM marketing_leads")
+            )
+        ]
+
+        lead_task_rows = [
+            serialize_row(row)
+            for row in await pg.execute(
+                text("SELECT * FROM marketing_lead_tasks")
+            )
+        ]
+
     # Aggregate database rows by channel before
     # passing them into the deterministic Director.
 
@@ -1162,6 +1177,9 @@ async def marketing_director_brief(
             conversion_events, rows
         ),
         revenue=compute_revenue(conversion_events),
+
+        # Operational setter/lead-workspace insights (advisory only).
+        lead_operations=setter_metrics(lead_rows, lead_task_rows),
     )
 
     from marketing_os.services.recommendation_persistence import (
@@ -1213,3 +1231,6 @@ from marketing_os.routers import paid_media as _marketing_paid_media_routes  # n
 
 # Register Phase 5 lead->appointment->revenue attribution routes.
 from marketing_os.routers import attribution as _marketing_attribution_routes  # noqa: F401,E402
+
+# Register Phase 6 Lead CRM + setter workspace routes.
+from marketing_os.routers import leads as _marketing_leads_routes  # noqa: F401,E402

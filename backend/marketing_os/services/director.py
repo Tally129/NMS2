@@ -517,6 +517,104 @@ def recommend_from_outcomes(
     return recommendations
 
 
+def recommend_lead_operations(
+    metrics: Optional[Mapping[str, Any]] = None,
+) -> list[dict[str, Any]]:
+    """Advisory operational insights for the setter/lead workspace.
+
+    Recommendations only. The Director never assigns staff, changes lead
+    status, contacts leads, or books/changes appointments. Insights are
+    generated only where real data exists; unavailable (``None``) metrics
+    never trigger a recommendation.
+    """
+    metrics = metrics or {}
+    recs: list[dict[str, Any]] = []
+
+    total = metrics.get("total_leads") or 0
+    uncontacted = metrics.get("uncontacted_leads")
+    overdue = metrics.get("overdue_leads")
+    booking_rate = metrics.get("booking_rate")
+    show_rate = metrics.get("show_rate")
+    speed = metrics.get("speed_to_lead") or {}
+    within5 = speed.get("pct_contacted_within_5_min")
+
+    if isinstance(uncontacted, int) and total and uncontacted >= 5 and (
+        uncontacted / total >= 0.4
+    ):
+        recs.append(_recommendation(
+            recommendation_type="operations",
+            channel="lead_ops",
+            priority=90,
+            title="High volume of uncontacted leads",
+            reason=(
+                "A large share of leads have not yet been contacted."
+            ),
+            proposed_action=(
+                "Prioritize the New Leads and Needs Attention queues. "
+                "Advisory only — no automatic outreach."
+            ),
+        ))
+
+    if isinstance(overdue, int) and overdue >= 5:
+        recs.append(_recommendation(
+            recommendation_type="operations",
+            channel="lead_ops",
+            priority=86,
+            title="Lead follow-up backlog is increasing",
+            reason=f"{overdue} leads have overdue follow-up tasks.",
+            proposed_action=(
+                "Work the Follow Up Today queue to clear overdue tasks."
+            ),
+        ))
+
+    if within5 is not None and within5 < 0.5 and (
+        speed.get("measured_leads") or 0
+    ) >= 5:
+        recs.append(_recommendation(
+            recommendation_type="operations",
+            channel="lead_ops",
+            priority=82,
+            title="Speed-to-lead needs improvement",
+            reason=(
+                "Fewer than half of measured leads are contacted within "
+                "5 minutes."
+            ),
+            proposed_action=(
+                "Tighten first-response workflow for new leads."
+            ),
+        ))
+
+    if booking_rate is not None and booking_rate < 0.15 and total >= 10:
+        recs.append(_recommendation(
+            recommendation_type="operations",
+            channel="lead_ops",
+            priority=80,
+            title="Leads are converting to bookings at a low rate",
+            reason=(
+                "Booking rate across current leads is low relative to "
+                "lead volume."
+            ),
+            proposed_action=(
+                "Review qualification and scheduling assistance steps."
+            ),
+        ))
+
+    if show_rate is not None and show_rate < 0.6:
+        recs.append(_recommendation(
+            recommendation_type="operations",
+            channel="lead_ops",
+            priority=78,
+            title="High no-show volume requires follow-up",
+            reason="A low share of booked leads are showing.",
+            proposed_action=(
+                "Prioritize the No Show and Confirm Appointment queues."
+            ),
+        ))
+
+    return recs
+
+
+
 
 def build_marketing_brief(
     *,
@@ -528,6 +626,7 @@ def build_marketing_brief(
     funnel: Optional[Mapping[str, Any]] = None,
     channel_economics: Optional[Mapping[str, Any]] = None,
     revenue: Optional[Mapping[str, Any]] = None,
+    lead_operations: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Build an advisory cross-channel marketing brief.
 
@@ -562,6 +661,11 @@ def build_marketing_brief(
     # First-party lead -> appointment -> revenue outcome recommendations.
     recommendations.extend(
         recommend_from_outcomes(funnel, channel_economics)
+    )
+
+    # Operational setter/lead-workspace insights (advisory only).
+    recommendations.extend(
+        recommend_lead_operations(lead_operations)
     )
 
     recommendations.sort(
@@ -1206,6 +1310,9 @@ def build_marketing_brief(
             ),
             "revenue": dict(revenue) if revenue is not None else None,
         },
+        "lead_operations": (
+            dict(lead_operations) if lead_operations is not None else None
+        ),
         "safety": {
             "phi_required": False,
             "external_writes": False,

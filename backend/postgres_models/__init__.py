@@ -87,3 +87,10 @@ from .marketing_phase3 import (  # noqa: F401
     MarketingBacklinkSnapshot,
     MarketingLocalRankSnapshot,
 )
+
+from .marketing_leads import (  # noqa: F401
+    MarketingLead,
+    MarketingLeadTask,
+    MarketingLeadAssignment,
+    MarketingLeadActivity,
+)

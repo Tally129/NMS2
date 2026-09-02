@@ -1673,3 +1673,84 @@ no campaign/outreach/appointment mutation.
 - No migration added (event types are free-text; new stages ride existing schema).
 
 _Last updated: Jun 2026 (Marketing OS Phase 5 · Lead → Appointment → Revenue attribution)_
+
+---
+
+## Marketing OS Phase 6 — Lead CRM + Appointment Setter Workspace (Jun 2026)
+
+Branch: `emergent/lead-crm-setter-workspace-phase6` (based on approved Phase 5).
+Operational lead-management layer to move a marketing lead toward an appointment.
+Privacy-minimized: opaque `marketing_subject_id` only, NO PHI, NO automatic
+outreach, NO external provider writes. Deterministic pipeline (never AI-inferred).
+
+### Database (migration b4c5d6e7f8a9, applied)
+- `marketing_leads` (lead record: attribution, pipeline stage, opportunity/priority,
+  non-clinical qualification, owner, next action, appointment_status, speed-to-lead
+  timestamps, metadata) — unique on `marketing_subject_id`.
+- `marketing_lead_tasks` (follow-up tasks: type/owner/due/status/notes).
+- `marketing_lead_assignments` (owner assignment history).
+- `marketing_lead_activity` (marketing-safe timeline). Models in
+  `postgres_models/marketing_leads.py`; registered in `postgres_models/__init__.py`.
+
+### Backend
+- **Pipeline service** `services/lead_pipeline.py` (pure/deterministic):
+  `LEAD_STAGES` (new→…→won/lost), `ALLOWED_TRANSITIONS` + `validate_transition`
+  (explicit rules, terminal-stage lock), `priority_from_score`,
+  `lead_fields_from_opportunity` (PHI rejection), `speed_to_lead_metrics`
+  (avg/median + %within 5/15/60min, null when no timestamps),
+  `setter_metrics` (contact/qualification/booking/show/won rates + by-owner rollups;
+  distinguishes unavailable null from real zero; overdue via open past-due tasks /
+  next_action_at).
+- **Router** `routers/leads.py` (wired in `core.py`; require_roles admin/practitioner):
+  GET `/leads` (filters: status/view/owner/source/campaign/priority; 9 views;
+  overdue_task_count), POST `/leads` (PHI-forbidden via `extra="forbid"` → 422;
+  duplicate subject → 409), GET `/leads/{id}`, PATCH `/leads/{id}` (qualification),
+  PATCH `/leads/{id}/status` (deterministic transition, 409 on invalid; sets
+  first_contact_at/first_response_seconds/appointment_status/timestamps),
+  PATCH `/leads/{id}/owner` (validates owner in auth_users → 400; assignment history +
+  activity), GET `/leads/{id}/timeline`, GET/POST/PATCH `/leads/tasks`,
+  POST `/leads/sync` (deterministic lead creation from conversion opportunities,
+  idempotent by subject), GET `/leads/metrics`.
+- **Director** `services/director.py`: `recommend_lead_operations()` (advisory:
+  uncontacted backlog, overdue backlog, slow speed-to-lead, low booking rate,
+  high no-show). `build_marketing_brief()` accepts `lead_operations` and returns it.
+  `core.py::/director/brief` feeds `setter_metrics(...)`. All recs advisory-only,
+  human-approval-required, no execution.
+
+### Frontend
+- `pages/portal/LeadOperationsPanel.jsx` — one "Lead Operations" section inside the
+  existing Marketing Command Center (after Attribution). Setter metric tiles, 10
+  view tabs (New/Needs Attention/Follow Up Today/Appt Requested/Booked/No Show/
+  Nurture/Won/Lost/All), prioritized lead queue (label/source/campaign/age/score/
+  priority dot/status/appt/owner/overdue indicator), and a lead detail drawer
+  (Sheet) with attribution, stage transition, owner reassign, qualification, tasks
+  (create/complete), and activity timeline. Null → "—"; honest empty states;
+  read-only safety banner. No separate app.
+
+### Safety / privacy (verified)
+external provider writes disabled · auto budget/campaign/publish disabled · human
+approval required · PHI-free (opaque subject only; PHI rejected at API + service).
+Internal staff mutations only (stage/owner/tasks) — never clinical data, never
+external provider writes, no automatic outreach. No TikTok, no email/SMS/AI-calling,
+no automatic booking/routing.
+
+### Tests / results
+- `tests/test_marketing_lead_crm_phase6.py` — 23 unit tests (transitions/validation,
+  lead-from-opportunity + PHI rejection, speed-to-lead math, setter metrics null-vs-
+  zero, overdue calc, Director advisory, safety).
+- `tests/test_marketing_lead_crm_phase6_http.py` — 49 live MFA-authenticated HTTP
+  tests (CRUD, deterministic transitions, PHI 422, duplicate 409, owner history,
+  tasks, metrics, RBAC). Testing agent found & fixed 3 defects: CRITICAL `/leads/sync`
+  transaction error, HIGH PHI-not-422 (added `extra="forbid"`), MINOR owner FK 500
+  (owner existence check). All pass after fix.
+- Full marketing suite: **338 passed, 1 skipped, 1 pre-existing unrelated failure**
+  (`test_marketing_ingestion_api.py::test_http_rejected`).
+
+### Known limitations
+- Owner reassignment UI uses a staff-user-id input (no staff directory picker yet).
+- `/director/brief` and `/leads/metrics` load full lead/task tables per request;
+  fine at current scale, add pagination/date filters before high volume.
+- Speed-to-lead/appointment timestamps are populated by staff stage changes; leads
+  synced from events start without contact timestamps (metrics stay null until acted).
+
+_Last updated: Jun 2026 (Marketing OS Phase 6 · Lead CRM + Appointment Setter)_
