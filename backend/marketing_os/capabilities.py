@@ -98,6 +98,19 @@ CAPABILITIES = {
         },
     },
 
+    "google_search_console": {
+        "status": "read_integration_ready",
+        "mode": "read_only",
+        "scope": "https://www.googleapis.com/auth/webmasters.readonly",
+        "performance_sync_enabled": True,
+        "rank_tracking_enabled": True,
+        "recommendations_mode": "advisory",
+        "external_write_enabled": False,
+        "write_enabled": False,
+        "phi_stored": False,
+        "position_is_serp_rank": False,
+    },
+
     "backlinks": {
         "status": "planned",
         "write_enabled": False,

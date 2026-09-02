@@ -480,11 +480,67 @@ async def search_overview(
             pg, site["id"], tracked_only=True
         )
         latest = await _latest_audit(pg, site["id"])
+        gsc_summary = await _gsc_overview_summary(pg, site["id"])
     return build_search_overview(
         site=site,
         keywords=keywords,
         latest_audit=latest,
+        gsc_summary=gsc_summary,
     )
+
+
+async def _gsc_overview_summary(pg, site_id: str) -> dict:
+    """Aggregate Search Console totals for the overview (honest empty)."""
+    daily = await pg.execute(
+        text(
+            "SELECT COALESCE(SUM(clicks),0) AS clicks, "
+            "COALESCE(SUM(impressions),0) AS impressions, "
+            "SUM(position * impressions) AS wpos, "
+            "SUM(CASE WHEN position IS NULL THEN 0 ELSE impressions END) "
+            "AS pos_impr "
+            "FROM marketing_gsc_daily_metrics WHERE site_id = :sid"
+        ),
+        {"sid": site_id},
+    )
+    row = daily.first()
+    m = dict(row._mapping) if row else {}
+    clicks = int(m.get("clicks") or 0)
+    impressions = int(m.get("impressions") or 0)
+    wpos = float(m.get("wpos") or 0)
+    pos_impr = int(m.get("pos_impr") or 0)
+    if impressions == 0:
+        return {"connected": False}
+
+    captured = await pg.execute(
+        text(
+            "SELECT MAX(captured_date) AS c FROM marketing_gsc_query_metrics "
+            "WHERE site_id = :sid"
+        ),
+        {"sid": site_id},
+    )
+    cap = captured.first()._mapping.get("c")
+    organic_keywords = None
+    if cap is not None:
+        cnt = await pg.execute(
+            text(
+                "SELECT COUNT(DISTINCT normalized_query) AS n "
+                "FROM marketing_gsc_query_metrics "
+                "WHERE site_id = :sid AND captured_date = :c"
+            ),
+            {"sid": site_id, "c": cap},
+        )
+        organic_keywords = int(cnt.first()._mapping.get("n") or 0)
+
+    return {
+        "connected": True,
+        "clicks": clicks,
+        "impressions": impressions,
+        "ctr": round(clicks / impressions, 6) if impressions else 0.0,
+        "average_position": (
+            round(wpos / pos_impr, 2) if pos_impr else None
+        ),
+        "organic_keywords": organic_keywords,
+    }
 
 
 # --------------------------------------------------------------------------

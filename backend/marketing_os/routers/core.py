@@ -1159,3 +1159,6 @@ from marketing_os.routers import ingestion as _marketing_ingestion_routes  # noq
 
 # Register read-only Search Intelligence routes.
 from marketing_os.routers import search as _marketing_search_routes  # noqa: F401,E402
+
+# Register read-only Google Search Console + rank-tracking routes (Phase 2).
+from marketing_os.routers import search_console as _marketing_gsc_routes  # noqa: F401,E402

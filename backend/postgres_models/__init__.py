@@ -71,3 +71,11 @@ from .marketing_search import (  # noqa: F401
     MarketingSiteAuditRun,
     MarketingSiteAuditIssue,
 )
+
+# Marketing OS Google Search Console (read-only) PostgreSQL models.
+from .marketing_gsc import (  # noqa: F401
+    MarketingGscSyncRun,
+    MarketingGscDailyMetric,
+    MarketingGscQueryMetric,
+    MarketingGscPageMetric,
+)

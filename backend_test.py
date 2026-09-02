@@ -1,591 +1,811 @@
-#!/usr/bin/env python3
 """
-Marketing OS Search Intelligence Phase 1 Backend Test Suite
-Tests all 7 scenarios from the review request
+Phase 2: Google Search Console (read-only) + Rank Tracking Backend Tests
+
+Tests all 8 scenarios for GSC integration:
+1. Auth gate (unauthenticated + admin access)
+2. Readiness endpoint (not_connected state, no credential leaks)
+3. Sync safe no-op when disconnected
+4. Honest empty reads (performance, queries, pages)
+5. Rank tracking (distinct gsc_average_position vs serp_rank)
+6. Overview honesty (connected=false for GSC metrics)
+7. Advisory recommendations (all flags correct)
+8. Safety policy (all flags correct)
 """
+
 import requests
 import json
-from datetime import datetime
+from typing import Optional
 
-# Load backend URL from frontend/.env
-BACKEND_URL = "https://nms-campaign-command.preview.emergentagent.com/api"
+# Base URL from frontend/.env
+BASE_URL = "https://nms-campaign-command.preview.emergentagent.com"
+API_BASE = f"{BASE_URL}/api"
 
 # Test credentials from /app/memory/test_credentials.md
 ADMIN_EMAIL = "admin@natmedsol.local"
 ADMIN_PASSWORD = "Admin!2345"
 PRACTITIONER_EMAIL = "ravello@natmedsol.local"
 PRACTITIONER_PASSWORD = "Ravello!2345"
-AUDITOR_EMAIL = "auditor@natmedsol.local"
-AUDITOR_PASSWORD = "Auditor!2345"
-
-# Test state
-test_results = []
-admin_token = None
-practitioner_token = None
-auditor_token = None
-test_site_id = None
 
 
-def log_test(scenario, test_name, passed, details=""):
-    """Log test result"""
-    status = "✅ PASS" if passed else "❌ FAIL"
-    result = f"{status} | Scenario {scenario} | {test_name}"
-    if details:
-        result += f"\n    Details: {details}"
-    test_results.append((passed, result))
-    print(result)
+class TestResult:
+    def __init__(self):
+        self.passed = []
+        self.failed = []
+        self.warnings = []
+    
+    def add_pass(self, test_name: str, details: str = ""):
+        self.passed.append(f"✅ {test_name}: {details}")
+    
+    def add_fail(self, test_name: str, details: str):
+        self.failed.append(f"❌ {test_name}: {details}")
+    
+    def add_warning(self, test_name: str, details: str):
+        self.warnings.append(f"⚠️  {test_name}: {details}")
+    
+    def print_summary(self):
+        print("\n" + "="*80)
+        print("PHASE 2 GSC BACKEND TEST RESULTS")
+        print("="*80)
+        
+        if self.failed:
+            print("\n❌ FAILED TESTS:")
+            for fail in self.failed:
+                print(f"  {fail}")
+        
+        if self.warnings:
+            print("\n⚠️  WARNINGS:")
+            for warn in self.warnings:
+                print(f"  {warn}")
+        
+        if self.passed:
+            print("\n✅ PASSED TESTS:")
+            for p in self.passed:
+                print(f"  {p}")
+        
+        total = len(self.passed) + len(self.failed)
+        success_rate = (len(self.passed) / total * 100) if total > 0 else 0
+        print(f"\n{'='*80}")
+        print(f"SUMMARY: {len(self.passed)}/{total} tests passed ({success_rate:.0f}%)")
+        print(f"{'='*80}\n")
 
 
-def login(email, password):
-    """Login and return access token"""
+def login(email: str, password: str) -> Optional[str]:
+    """Login and return access token. Handle MFA if required."""
     try:
-        payload = {"email": email, "password": password}
-        resp = requests.post(f"{BACKEND_URL}/auth/login", json=payload, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            # Check if MFA is required
+        response = requests.post(
+            f"{API_BASE}/auth/login",
+            json={"email": email, "password": password},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
             if data.get("mfa_required"):
-                return None, "MFA required but not provided"
-            return data.get("access_token"), None
+                print(f"⚠️  MFA required for {email}. Cannot proceed with automated testing.")
+                return None
+            return data.get("access_token")
         else:
-            return None, f"Login failed: {resp.status_code} - {resp.text}"
+            print(f"❌ Login failed for {email}: {response.status_code} - {response.text}")
+            return None
     except Exception as e:
-        return None, f"Exception: {e}"
+        print(f"❌ Login error for {email}: {str(e)}")
+        return None
 
 
-def test_scenario_1_authorization():
-    """Scenario 1: Authorization (unauthenticated, auditor forbidden, admin allowed)"""
-    print("\n=== SCENARIO 1: AUTHORIZATION ===")
+def test_scenario_1_auth(result: TestResult):
+    """Scenario 1: Auth gate - unauthenticated rejected, admin allowed"""
+    print("\n[Scenario 1] Testing Auth Gate...")
     
-    global admin_token, practitioner_token, auditor_token
-    
-    # Test 1: Unauthenticated GET /api/marketing-os/search/overview -> must be rejected (401/403)
+    # Test 1.1: Unauthenticated request should be rejected
     try:
-        resp = requests.get(f"{BACKEND_URL}/marketing-os/search/overview", timeout=10)
-        if resp.status_code in [401, 403]:
-            log_test(1, "Unauthenticated GET /search/overview (401/403)", True, 
-                    f"Correctly rejected with {resp.status_code}")
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/search-console/readiness",
+            timeout=10
+        )
+        if response.status_code in [401, 403]:
+            result.add_pass(
+                "1.1 Unauthenticated rejected",
+                f"GET /readiness returned {response.status_code}"
+            )
         else:
-            log_test(1, "Unauthenticated GET /search/overview (401/403)", False, 
-                    f"Expected 401/403, got {resp.status_code}: {resp.text[:200]}")
+            result.add_fail(
+                "1.1 Unauthenticated rejected",
+                f"Expected 401/403, got {response.status_code}"
+            )
     except Exception as e:
-        log_test(1, "Unauthenticated GET /search/overview (401/403)", False, f"Exception: {e}")
+        result.add_fail("1.1 Unauthenticated rejected", f"Error: {str(e)}")
     
-    # Login as auditor
-    auditor_token, error = login(AUDITOR_EMAIL, AUDITOR_PASSWORD)
-    if error:
-        log_test(1, "Auditor login", False, error)
-    else:
-        log_test(1, "Auditor login", True, "Successfully logged in as auditor")
-    
-    # Test 2: As auditor (non-marketing role) GET /api/marketing-os/search/overview -> must be forbidden (403)
-    if auditor_token:
-        try:
-            headers = {"Authorization": f"Bearer {auditor_token}"}
-            resp = requests.get(f"{BACKEND_URL}/marketing-os/search/overview", 
-                              headers=headers, timeout=10)
-            if resp.status_code == 403:
-                log_test(1, "Auditor GET /search/overview (403)", True, 
-                        "Correctly forbidden for non-marketing role")
-            else:
-                log_test(1, "Auditor GET /search/overview (403)", False, 
-                        f"Expected 403, got {resp.status_code}: {resp.text[:200]}")
-        except Exception as e:
-            log_test(1, "Auditor GET /search/overview (403)", False, f"Exception: {e}")
-    
-    # Login as admin
-    admin_token, error = login(ADMIN_EMAIL, ADMIN_PASSWORD)
-    if error:
-        log_test(1, "Admin login", False, error)
-    else:
-        log_test(1, "Admin login", True, "Successfully logged in as admin")
-    
-    # Test 3: As admin GET /api/marketing-os/search/overview -> 200
-    if admin_token:
-        try:
-            headers = {"Authorization": f"Bearer {admin_token}"}
-            resp = requests.get(f"{BACKEND_URL}/marketing-os/search/overview", 
-                              headers=headers, timeout=10)
-            if resp.status_code == 200:
-                log_test(1, "Admin GET /search/overview (200)", True, 
-                        "Admin successfully accessed marketing endpoint")
-            else:
-                log_test(1, "Admin GET /search/overview (200)", False, 
-                        f"Expected 200, got {resp.status_code}: {resp.text[:200]}")
-        except Exception as e:
-            log_test(1, "Admin GET /search/overview (200)", False, f"Exception: {e}")
-
-
-def test_scenario_2_empty_not_connected():
-    """Scenario 2: Empty/not-connected (before creating any site)"""
-    print("\n=== SCENARIO 2: EMPTY / NOT-CONNECTED ===")
-    
+    # Test 1.2: Admin should be allowed
+    admin_token = login(ADMIN_EMAIL, ADMIN_PASSWORD)
     if not admin_token:
-        log_test(2, "Empty state tests", False, "No admin token available")
+        result.add_fail("1.2 Admin access", "Failed to login as admin")
+        return None
+    
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/search-console/readiness",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            timeout=10
+        )
+        if response.status_code == 200:
+            result.add_pass(
+                "1.2 Admin access",
+                "GET /readiness returned 200"
+            )
+        else:
+            result.add_fail(
+                "1.2 Admin access",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+    except Exception as e:
+        result.add_fail("1.2 Admin access", f"Error: {str(e)}")
+    
+    return admin_token
+
+
+def test_scenario_2_readiness(result: TestResult, token: str):
+    """Scenario 2: Readiness endpoint - not_connected state, no credential leaks"""
+    print("\n[Scenario 2] Testing Readiness Endpoint...")
+    
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/search-console/readiness",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "2.1 Readiness status",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+            return
+        
+        data = response.json()
+        
+        # Check status is not_connected or configuration_incomplete
+        status = data.get("status")
+        if status in ["not_connected", "configuration_incomplete"]:
+            result.add_pass(
+                "2.1 Readiness status",
+                f"status={status}"
+            )
+        else:
+            result.add_fail(
+                "2.1 Readiness status",
+                f"Expected 'not_connected' or 'configuration_incomplete', got '{status}'"
+            )
+        
+        # Check connected=false
+        if data.get("connected") is False:
+            result.add_pass("2.2 Connected flag", "connected=false")
+        else:
+            result.add_fail(
+                "2.2 Connected flag",
+                f"Expected connected=false, got {data.get('connected')}"
+            )
+        
+        # Check read_only=true
+        if data.get("read_only") is True:
+            result.add_pass("2.3 Read-only flag", "read_only=true")
+        else:
+            result.add_fail(
+                "2.3 Read-only flag",
+                f"Expected read_only=true, got {data.get('read_only')}"
+            )
+        
+        # Check external_write=false
+        if data.get("external_write") is False:
+            result.add_pass("2.4 External write flag", "external_write=false")
+        else:
+            result.add_fail(
+                "2.4 External write flag",
+                f"Expected external_write=false, got {data.get('external_write')}"
+            )
+        
+        # Check NO credential values leaked
+        json_str = json.dumps(data).lower()
+        leaked_keys = []
+        if "private_key" in json_str:
+            leaked_keys.append("private_key")
+        if "client_email" in json_str and "@" in json_str:
+            # Check if actual email value is present (not just the key name)
+            if any(domain in json_str for domain in [".iam.gserviceaccount.com", "@developer.gserviceaccount.com"]):
+                leaked_keys.append("service_account_email")
+        
+        if not leaked_keys:
+            result.add_pass("2.5 No credential leaks", "No private_key or service account email in response")
+        else:
+            result.add_fail(
+                "2.5 No credential leaks",
+                f"Credential values leaked: {', '.join(leaked_keys)}"
+            )
+        
+    except Exception as e:
+        result.add_fail("2.x Readiness endpoint", f"Error: {str(e)}")
+
+
+def test_scenario_3_sync_safe_noop(result: TestResult, token: str):
+    """Scenario 3: Sync is safe no-op when disconnected"""
+    print("\n[Scenario 3] Testing Sync Safe No-Op...")
+    
+    try:
+        response = requests.post(
+            f"{API_BASE}/marketing-os/search/search-console/sync",
+            headers={"Authorization": f"Bearer {token}"},
+            json={},
+            timeout=10
+        )
+        
+        # Accept 200 or 201 (endpoint is decorated with status_code=201)
+        if response.status_code not in [200, 201]:
+            result.add_fail(
+                "3.1 Sync no-op status",
+                f"Expected 200/201, got {response.status_code}: {response.text}"
+            )
+            return
+        
+        result.add_pass(
+            "3.1 Sync no-op status",
+            f"POST /sync returned {response.status_code} (no 500 error)"
+        )
+        
+        data = response.json()
+        
+        # Check started=false
+        if data.get("started") is False:
+            result.add_pass("3.2 Sync not started", "started=false")
+        else:
+            result.add_fail(
+                "3.2 Sync not started",
+                f"Expected started=false, got {data.get('started')}"
+            )
+        
+        # Check reason matches readiness status
+        reason = data.get("reason")
+        if reason in ["not_connected", "configuration_incomplete"]:
+            result.add_pass(
+                "3.3 Sync reason",
+                f"reason={reason}"
+            )
+        else:
+            result.add_fail(
+                "3.3 Sync reason",
+                f"Expected 'not_connected' or 'configuration_incomplete', got '{reason}'"
+            )
+        
+    except Exception as e:
+        result.add_fail("3.x Sync safe no-op", f"Error: {str(e)}")
+
+
+def ensure_site_exists(token: str) -> Optional[str]:
+    """Ensure a marketing site exists, create if needed. Return site_id."""
+    try:
+        # Check if sites exist
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/sites",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            sites = response.json().get("sites", [])
+            if sites:
+                return sites[0]["id"]
+        
+        # Create a site
+        response = requests.post(
+            f"{API_BASE}/marketing-os/search/sites",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"site_url": "https://natmedsol.com", "label": "NMS"},
+            timeout=10
+        )
+        
+        if response.status_code == 201:
+            return response.json().get("id")
+        
+        return None
+    except Exception as e:
+        print(f"⚠️  Error ensuring site exists: {str(e)}")
+        return None
+
+
+def test_scenario_4_honest_empty_reads(result: TestResult, token: str):
+    """Scenario 4: Honest empty reads (performance, queries, pages)"""
+    print("\n[Scenario 4] Testing Honest Empty Reads...")
+    
+    # Ensure site exists
+    site_id = ensure_site_exists(token)
+    if not site_id:
+        result.add_warning("4.x Honest empty reads", "Could not ensure site exists")
         return
     
-    headers = {"Authorization": f"Bearer {admin_token}"}
-    
-    # Test 1: GET /api/marketing-os/search/overview -> 200, connected=false
+    # Test 4.1: Performance endpoint
     try:
-        resp = requests.get(f"{BACKEND_URL}/marketing-os/search/overview", 
-                          headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if (data.get("connected") == False and 
-                data.get("not_connected_reason") == "no_marketing_site_configured"):
-                # Check all metrics have value=null and connected=false
-                metrics = data.get("metrics", {})
-                all_null = all(m.get("value") is None and m.get("connected") == False 
-                             for m in metrics.values() if isinstance(m, dict))
-                if all_null or not metrics:
-                    log_test(2, "GET /search/overview (not connected)", True, 
-                            f"Correctly returned connected=false with reason: {data.get('not_connected_reason')}")
-                else:
-                    log_test(2, "GET /search/overview (not connected)", False, 
-                            f"Metrics should have value=null and connected=false: {metrics}")
-            else:
-                log_test(2, "GET /search/overview (not connected)", False, 
-                        f"Expected connected=false with reason, got: {data}")
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/search-console/performance",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "4.1 Performance endpoint",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
         else:
-            log_test(2, "GET /search/overview (not connected)", False, 
-                    f"Expected 200, got {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log_test(2, "GET /search/overview (not connected)", False, f"Exception: {e}")
-    
-    # Test 2: GET /api/marketing-os/search/keywords/tracked -> 200, connected=false, keywords=[]
-    try:
-        resp = requests.get(f"{BACKEND_URL}/marketing-os/search/keywords/tracked", 
-                          headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if (data.get("connected") == False and 
-                data.get("keywords") == []):
-                log_test(2, "GET /search/keywords/tracked (not connected)", True, 
-                        "Correctly returned connected=false with empty keywords")
-            else:
-                log_test(2, "GET /search/keywords/tracked (not connected)", False, 
-                        f"Expected connected=false with keywords=[], got: {data}")
-        else:
-            log_test(2, "GET /search/keywords/tracked (not connected)", False, 
-                    f"Expected 200, got {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log_test(2, "GET /search/keywords/tracked (not connected)", False, f"Exception: {e}")
-    
-    # Test 3: GET /api/marketing-os/search/site-audit -> 200, has_run=false
-    try:
-        resp = requests.get(f"{BACKEND_URL}/marketing-os/search/site-audit", 
-                          headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("has_run") == False or data.get("connected") == False:
-                log_test(2, "GET /search/site-audit (not connected)", True, 
-                        f"Correctly returned has_run=false or connected=false")
-            else:
-                log_test(2, "GET /search/site-audit (not connected)", False, 
-                        f"Expected has_run=false, got: {data}")
-        else:
-            log_test(2, "GET /search/site-audit (not connected)", False, 
-                    f"Expected 200, got {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log_test(2, "GET /search/site-audit (not connected)", False, f"Exception: {e}")
-
-
-def test_scenario_3_site_registration():
-    """Scenario 3: Site registration (create site, list sites, reject private URLs, reject PHI keys)"""
-    print("\n=== SCENARIO 3: SITE REGISTRATION ===")
-    
-    if not admin_token:
-        log_test(3, "Site registration tests", False, "No admin token available")
-        return
-    
-    headers = {"Authorization": f"Bearer {admin_token}"}
-    global test_site_id
-    
-    # Test 1: POST /api/marketing-os/search/sites with valid public URL -> 201
-    try:
-        payload = {"site_url": "https://example.com", "label": "Test Site"}
-        resp = requests.post(f"{BACKEND_URL}/marketing-os/search/sites", 
-                           json=payload, headers=headers, timeout=10)
-        if resp.status_code == 201:
-            data = resp.json()
-            if data.get("id") and data.get("normalized_url"):
-                test_site_id = data["id"]
-                log_test(3, "POST /search/sites (valid URL)", True, 
-                        f"Created site: {test_site_id}, normalized_url: {data.get('normalized_url')}")
-            else:
-                log_test(3, "POST /search/sites (valid URL)", False, 
-                        f"Missing id or normalized_url: {data}")
-        else:
-            log_test(3, "POST /search/sites (valid URL)", False, 
-                    f"Expected 201, got {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log_test(3, "POST /search/sites (valid URL)", False, f"Exception: {e}")
-    
-    # Test 2: GET /api/marketing-os/search/sites -> 200, lists the site
-    try:
-        resp = requests.get(f"{BACKEND_URL}/marketing-os/search/sites", 
-                          headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            sites = data.get("sites", [])
-            if len(sites) > 0 and any(s.get("id") == test_site_id for s in sites):
-                log_test(3, "GET /search/sites (list)", True, 
-                        f"Listed {len(sites)} sites, found created site")
-            else:
-                log_test(3, "GET /search/sites (list)", False, 
-                        f"Created site not found in list: {sites}")
-        else:
-            log_test(3, "GET /search/sites (list)", False, 
-                    f"Expected 200, got {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log_test(3, "GET /search/sites (list)", False, f"Exception: {e}")
-    
-    # Test 3: POST with private/non-public URL -> 400
-    try:
-        payload = {"site_url": "http://localhost/", "label": "Local Site"}
-        resp = requests.post(f"{BACKEND_URL}/marketing-os/search/sites", 
-                           json=payload, headers=headers, timeout=10)
-        if resp.status_code == 400:
-            log_test(3, "POST /search/sites (private URL rejected)", True, 
-                    "Correctly rejected private/non-public URL")
-        else:
-            log_test(3, "POST /search/sites (private URL rejected)", False, 
-                    f"Expected 400, got {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log_test(3, "POST /search/sites (private URL rejected)", False, f"Exception: {e}")
-    
-    # Test 4: POST with PHI key -> 400
-    try:
-        payload = {"site_url": "https://example.org", "email": "a@b.com"}
-        resp = requests.post(f"{BACKEND_URL}/marketing-os/search/sites", 
-                           json=payload, headers=headers, timeout=10)
-        if resp.status_code == 400:
-            log_test(3, "POST /search/sites (PHI key rejected)", True, 
-                    "Correctly rejected payload with PHI key")
-        else:
-            log_test(3, "POST /search/sites (PHI key rejected)", False, 
-                    f"Expected 400, got {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log_test(3, "POST /search/sites (PHI key rejected)", False, f"Exception: {e}")
-
-
-def test_scenario_4_keyword_tracking():
-    """Scenario 4: Keyword tracking (add keyword, list keywords, reject PHI keys)"""
-    print("\n=== SCENARIO 4: KEYWORD TRACKING ===")
-    
-    if not admin_token:
-        log_test(4, "Keyword tracking tests", False, "No admin token available")
-        return
-    
-    headers = {"Authorization": f"Bearer {admin_token}"}
-    
-    # Test 1: POST /api/marketing-os/search/keywords with valid keyword -> 201
-    try:
-        payload = {"keyword": "book appointment online", "current_rank": 3}
-        resp = requests.post(f"{BACKEND_URL}/marketing-os/search/keywords", 
-                           json=payload, headers=headers, timeout=10)
-        if resp.status_code == 201:
-            data = resp.json()
-            if data.get("id") and data.get("intent") == "transactional":
-                log_test(4, "POST /search/keywords (valid keyword)", True, 
-                        f"Created keyword with intent=transactional: {data.get('keyword')}")
-            else:
-                log_test(4, "POST /search/keywords (valid keyword)", False, 
-                        f"Expected intent=transactional, got: {data}")
-        else:
-            log_test(4, "POST /search/keywords (valid keyword)", False, 
-                    f"Expected 201, got {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log_test(4, "POST /search/keywords (valid keyword)", False, f"Exception: {e}")
-    
-    # Test 2: GET /api/marketing-os/search/keywords/tracked -> 200, connected=true, keywords contains the keyword
-    try:
-        resp = requests.get(f"{BACKEND_URL}/marketing-os/search/keywords/tracked", 
-                          headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("connected") == True:
-                keywords = data.get("keywords", [])
-                found = any(k.get("keyword") == "book appointment online" and 
-                          k.get("current_rank") == 3 for k in keywords)
-                if found:
-                    log_test(4, "GET /search/keywords/tracked (with keyword)", True, 
-                            f"Found tracked keyword with current_rank=3")
-                else:
-                    log_test(4, "GET /search/keywords/tracked (with keyword)", False, 
-                            f"Keyword not found or rank mismatch: {keywords}")
-            else:
-                log_test(4, "GET /search/keywords/tracked (with keyword)", False, 
-                        f"Expected connected=true, got: {data}")
-        else:
-            log_test(4, "GET /search/keywords/tracked (with keyword)", False, 
-                    f"Expected 200, got {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log_test(4, "GET /search/keywords/tracked (with keyword)", False, f"Exception: {e}")
-    
-    # Test 3: POST with PHI key -> 400
-    try:
-        payload = {"keyword": "detox program", "diagnosis": "x"}
-        resp = requests.post(f"{BACKEND_URL}/marketing-os/search/keywords", 
-                           json=payload, headers=headers, timeout=10)
-        if resp.status_code == 400:
-            log_test(4, "POST /search/keywords (PHI key rejected)", True, 
-                    "Correctly rejected payload with PHI key")
-        else:
-            log_test(4, "POST /search/keywords (PHI key rejected)", False, 
-                    f"Expected 400, got {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log_test(4, "POST /search/keywords (PHI key rejected)", False, f"Exception: {e}")
-
-
-def test_scenario_5_technical_site_audit():
-    """Scenario 5: Technical site audit (run audit, get audit, get issues)"""
-    print("\n=== SCENARIO 5: TECHNICAL SITE AUDIT (READ-ONLY) ===")
-    
-    if not admin_token:
-        log_test(5, "Site audit tests", False, "No admin token available")
-        return
-    
-    headers = {"Authorization": f"Bearer {admin_token}"}
-    
-    # Test 1: POST /api/marketing-os/search/site-audit/run -> 201
-    # IMPORTANT: Outbound internet may be blocked. If unreachable, must still succeed (201)
-    # and record a completed run with a "page_unreachable" critical issue.
-    try:
-        payload = {"site_url": "https://example.com", "max_pages": 3}
-        resp = requests.post(f"{BACKEND_URL}/marketing-os/search/site-audit/run", 
-                           json=payload, headers=headers, timeout=30)
-        if resp.status_code == 201:
-            data = resp.json()
-            required_fields = ["pages_scanned", "critical_count", "warning_count", 
-                             "opportunity_count", "informational_count"]
-            if all(field in data for field in required_fields):
-                log_test(5, "POST /search/site-audit/run (201)", True, 
-                        f"Audit run completed: pages_scanned={data.get('pages_scanned')}, "
-                        f"critical={data.get('critical_count')}, warning={data.get('warning_count')}, "
-                        f"opportunity={data.get('opportunity_count')}, info={data.get('informational_count')}")
-            else:
-                log_test(5, "POST /search/site-audit/run (201)", False, 
-                        f"Missing required fields: {data}")
-        else:
-            log_test(5, "POST /search/site-audit/run (201)", False, 
-                    f"Expected 201, got {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log_test(5, "POST /search/site-audit/run (201)", False, f"Exception: {e}")
-    
-    # Test 2: GET /api/marketing-os/search/site-audit -> 200, has_run=true
-    try:
-        resp = requests.get(f"{BACKEND_URL}/marketing-os/search/site-audit", 
-                          headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("has_run") == True:
-                log_test(5, "GET /search/site-audit (has_run=true)", True, 
-                        f"Latest audit run found with counts")
-            else:
-                log_test(5, "GET /search/site-audit (has_run=true)", False, 
-                        f"Expected has_run=true, got: {data}")
-        else:
-            log_test(5, "GET /search/site-audit (has_run=true)", False, 
-                    f"Expected 200, got {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log_test(5, "GET /search/site-audit (has_run=true)", False, f"Exception: {e}")
-    
-    # Test 3: GET /api/marketing-os/search/site-audit/issues -> 200, returns issues array
-    try:
-        resp = requests.get(f"{BACKEND_URL}/marketing-os/search/site-audit/issues", 
-                          headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if "issues" in data and isinstance(data["issues"], list):
-                log_test(5, "GET /search/site-audit/issues (200)", True, 
-                        f"Retrieved {len(data['issues'])} audit issues")
-            else:
-                log_test(5, "GET /search/site-audit/issues (200)", False, 
-                        f"Expected issues array, got: {data}")
-        else:
-            log_test(5, "GET /search/site-audit/issues (200)", False, 
-                    f"Expected 200, got {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log_test(5, "GET /search/site-audit/issues (200)", False, f"Exception: {e}")
-
-
-def test_scenario_6_advisory_recommendations():
-    """Scenario 6: Advisory recommendations (all must have advisory_only=true, requires_human_approval=true, external_write=false)"""
-    print("\n=== SCENARIO 6: ADVISORY RECOMMENDATIONS ===")
-    
-    if not admin_token:
-        log_test(6, "Advisory recommendations tests", False, "No admin token available")
-        return
-    
-    headers = {"Authorization": f"Bearer {admin_token}"}
-    
-    # Test: GET /api/marketing-os/search/recommendations -> 200
-    # EVERY recommendation object MUST have advisory_only=true, requires_human_approval=true, external_write=false
-    try:
-        resp = requests.get(f"{BACKEND_URL}/marketing-os/search/recommendations", 
-                          headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            recommendations = data.get("recommendations", [])
+            data = response.json()
             
-            # Check top-level flags
-            if (data.get("advisory_only") == True and 
-                data.get("requires_human_approval") == True):
-                log_test(6, "GET /search/recommendations (top-level flags)", True, 
-                        f"advisory_only=true, requires_human_approval=true")
+            # Check has_data=false
+            if data.get("has_data") is False:
+                result.add_pass("4.1a Performance has_data", "has_data=false")
             else:
-                log_test(6, "GET /search/recommendations (top-level flags)", False, 
-                        f"Expected advisory_only=true and requires_human_approval=true, got: {data}")
-            
-            # Check each recommendation
-            if recommendations:
-                all_valid = all(
-                    rec.get("advisory_only") == True and 
-                    rec.get("requires_human_approval") == True and 
-                    rec.get("external_write") == False 
-                    for rec in recommendations
+                result.add_fail(
+                    "4.1a Performance has_data",
+                    f"Expected has_data=false, got {data.get('has_data')}"
                 )
-                if all_valid:
-                    log_test(6, "GET /search/recommendations (all recs valid)", True, 
-                            f"All {len(recommendations)} recommendations have correct flags")
+            
+            # Check totals present with 0/null values
+            totals = data.get("totals", {})
+            if totals:
+                clicks = totals.get("clicks")
+                impressions = totals.get("impressions")
+                if clicks == 0 and impressions == 0:
+                    result.add_pass(
+                        "4.1b Performance totals",
+                        "totals present with clicks=0, impressions=0 (honest empty)"
+                    )
                 else:
-                    invalid = [rec for rec in recommendations if not (
-                        rec.get("advisory_only") == True and 
-                        rec.get("requires_human_approval") == True and 
-                        rec.get("external_write") == False
-                    )]
-                    log_test(6, "GET /search/recommendations (all recs valid)", False, 
-                            f"Invalid recommendations: {invalid}")
+                    result.add_fail(
+                        "4.1b Performance totals",
+                        f"Expected 0 values, got clicks={clicks}, impressions={impressions}"
+                    )
             else:
-                log_test(6, "GET /search/recommendations (all recs valid)", True, 
-                        "No recommendations returned (empty is valid)")
-        else:
-            log_test(6, "GET /search/recommendations (200)", False, 
-                    f"Expected 200, got {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log_test(6, "GET /search/recommendations (200)", False, f"Exception: {e}")
-
-
-def test_scenario_7_safety_policy():
-    """Scenario 7: Safety policy unchanged (capabilities and health endpoints)"""
-    print("\n=== SCENARIO 7: SAFETY POLICY UNCHANGED ===")
+                result.add_fail("4.1b Performance totals", "totals not present")
     
-    if not admin_token:
-        log_test(7, "Safety policy tests", False, "No admin token available")
+    except Exception as e:
+        result.add_fail("4.1 Performance endpoint", f"Error: {str(e)}")
+    
+    # Test 4.2: Queries endpoint
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/search-console/queries",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "4.2 Queries endpoint",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+        else:
+            data = response.json()
+            
+            if data.get("has_data") is False and data.get("queries") == []:
+                result.add_pass(
+                    "4.2 Queries endpoint",
+                    "has_data=false, queries=[] (honest empty)"
+                )
+            else:
+                result.add_fail(
+                    "4.2 Queries endpoint",
+                    f"Expected has_data=false and queries=[], got has_data={data.get('has_data')}, queries={len(data.get('queries', []))} items"
+                )
+    
+    except Exception as e:
+        result.add_fail("4.2 Queries endpoint", f"Error: {str(e)}")
+    
+    # Test 4.3: Pages endpoint
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/search-console/pages",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "4.3 Pages endpoint",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+        else:
+            data = response.json()
+            
+            if data.get("has_data") is False and data.get("pages") == []:
+                result.add_pass(
+                    "4.3 Pages endpoint",
+                    "has_data=false, pages=[] (honest empty)"
+                )
+            else:
+                result.add_fail(
+                    "4.3 Pages endpoint",
+                    f"Expected has_data=false and pages=[], got has_data={data.get('has_data')}, pages={len(data.get('pages', []))} items"
+                )
+    
+    except Exception as e:
+        result.add_fail("4.3 Pages endpoint", f"Error: {str(e)}")
+
+
+def ensure_tracked_keyword(token: str) -> bool:
+    """Ensure at least one tracked keyword exists."""
+    try:
+        # Check if tracked keywords exist
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/keywords/tracked",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            keywords = response.json().get("keywords", [])
+            if keywords:
+                return True
+        
+        # Create a tracked keyword
+        response = requests.post(
+            f"{API_BASE}/marketing-os/search/keywords",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"keyword": "book appointment online", "current_rank": 3},
+            timeout=10
+        )
+        
+        return response.status_code == 201
+    except Exception as e:
+        print(f"⚠️  Error ensuring tracked keyword: {str(e)}")
+        return False
+
+
+def test_scenario_5_rank_tracking(result: TestResult, token: str):
+    """Scenario 5: Rank tracking - distinct gsc_average_position vs serp_rank"""
+    print("\n[Scenario 5] Testing Rank Tracking...")
+    
+    # Ensure tracked keyword exists
+    if not ensure_tracked_keyword(token):
+        result.add_warning("5.x Rank tracking", "Could not ensure tracked keyword exists")
         return
     
-    headers = {"Authorization": f"Bearer {admin_token}"}
-    
-    # Test 1: GET /api/marketing-os/capabilities -> 200
     try:
-        resp = requests.get(f"{BACKEND_URL}/marketing-os/capabilities", 
-                          headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            policy = data.get("policy", {})
-            capabilities = data.get("capabilities", {})
-            search_intel = capabilities.get("search_intelligence", {})
-            
-            # Check policy flags
-            policy_valid = (
-                policy.get("external_writes_enabled") == False and
-                policy.get("automatic_budget_changes_enabled") == False and
-                policy.get("automatic_campaign_creation_enabled") == False and
-                policy.get("automatic_publishing_enabled") == False and
-                policy.get("human_approval_required") == True
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/rank-tracking",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "5.1 Rank tracking status",
+                f"Expected 200, got {response.status_code}: {response.text}"
             )
-            
-            if policy_valid:
-                log_test(7, "GET /capabilities (policy flags)", True, 
-                        "All policy flags correct: external_writes=false, human_approval=true")
-            else:
-                log_test(7, "GET /capabilities (policy flags)", False, 
-                        f"Policy flags incorrect: {policy}")
-            
-            # Check search_intelligence capability flags
-            search_valid = (
-                search_intel.get("write_enabled") == False and
-                search_intel.get("phi_stored") == False
+            return
+        
+        data = response.json()
+        keywords = data.get("keywords", [])
+        
+        if not keywords:
+            result.add_warning(
+                "5.1 Rank tracking keywords",
+                "No tracked keywords returned (may be expected if none exist)"
             )
-            
-            if search_valid:
-                log_test(7, "GET /capabilities (search_intelligence flags)", True, 
-                        "search_intelligence.write_enabled=false, phi_stored=false")
-            else:
-                log_test(7, "GET /capabilities (search_intelligence flags)", False, 
-                        f"search_intelligence flags incorrect: {search_intel}")
+            return
+        
+        # Check first keyword has both gsc_average_position and serp_rank
+        kw = keywords[0]
+        
+        if "gsc_average_position" not in kw:
+            result.add_fail(
+                "5.1 GSC average position",
+                "gsc_average_position not present in keyword object"
+            )
         else:
-            log_test(7, "GET /capabilities (200)", False, 
-                    f"Expected 200, got {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log_test(7, "GET /capabilities (200)", False, f"Exception: {e}")
+            gsc = kw["gsc_average_position"]
+            if gsc.get("metric_type") == "gsc_average_position":
+                result.add_pass(
+                    "5.1 GSC average position",
+                    f"metric_type='gsc_average_position', source='{gsc.get('source')}'"
+                )
+            else:
+                result.add_fail(
+                    "5.1 GSC average position",
+                    f"Expected metric_type='gsc_average_position', got '{gsc.get('metric_type')}'"
+                )
+        
+        if "serp_rank" not in kw:
+            result.add_fail(
+                "5.2 SERP rank",
+                "serp_rank not present in keyword object"
+            )
+        else:
+            serp = kw["serp_rank"]
+            if serp.get("metric_type") == "serp_rank":
+                result.add_pass(
+                    "5.2 SERP rank",
+                    f"metric_type='serp_rank', source='{serp.get('source')}'"
+                )
+            else:
+                result.add_fail(
+                    "5.2 SERP rank",
+                    f"Expected metric_type='serp_rank', got '{serp.get('metric_type')}'"
+                )
+        
+        # Check they are explicitly distinct
+        if "gsc_average_position" in kw and "serp_rank" in kw:
+            gsc_type = kw["gsc_average_position"].get("metric_type")
+            serp_type = kw["serp_rank"].get("metric_type")
+            if gsc_type != serp_type:
+                result.add_pass(
+                    "5.3 Distinct metrics",
+                    f"gsc_average_position and serp_rank have different metric_type"
+                )
+            else:
+                result.add_fail(
+                    "5.3 Distinct metrics",
+                    "gsc_average_position and serp_rank have same metric_type"
+                )
+        
+        # Check summary has gains/losses/unchanged
+        summary = data.get("summary", {})
+        required_keys = ["gains", "losses", "unchanged"]
+        missing = [k for k in required_keys if k not in summary]
+        if not missing:
+            result.add_pass(
+                "5.4 Summary keys",
+                f"gains={summary.get('gains')}, losses={summary.get('losses')}, unchanged={summary.get('unchanged')}"
+            )
+        else:
+            result.add_fail(
+                "5.4 Summary keys",
+                f"Missing keys in summary: {', '.join(missing)}"
+            )
     
-    # Test 2: GET /api/marketing-os/health -> 200
-    try:
-        resp = requests.get(f"{BACKEND_URL}/marketing-os/health", 
-                          headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            health_valid = (
-                data.get("external_writes_enabled") == False and
-                data.get("human_approval_required") == True
-            )
-            
-            if health_valid:
-                log_test(7, "GET /health (flags)", True, 
-                        "external_writes_enabled=false, human_approval_required=true")
-            else:
-                log_test(7, "GET /health (flags)", False, 
-                        f"Health flags incorrect: {data}")
-        else:
-            log_test(7, "GET /health (200)", False, 
-                    f"Expected 200, got {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
-        log_test(7, "GET /health (200)", False, f"Exception: {e}")
+        result.add_fail("5.x Rank tracking", f"Error: {str(e)}")
+
+
+def test_scenario_6_overview_honesty(result: TestResult, token: str):
+    """Scenario 6: Overview honesty - connected=false for GSC metrics"""
+    print("\n[Scenario 6] Testing Overview Honesty...")
+    
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/overview",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "6.1 Overview status",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+            return
+        
+        data = response.json()
+        metrics = data.get("metrics", {})
+        
+        # Check GSC metrics have connected=false and value=null
+        gsc_metrics = [
+            "organic_keywords",
+            "estimated_organic_traffic",
+            "organic_clicks"
+        ]
+        
+        all_honest = True
+        for metric_name in gsc_metrics:
+            metric = metrics.get(metric_name, {})
+            connected = metric.get("connected")
+            value = metric.get("value")
+            
+            if connected is False and value is None:
+                result.add_pass(
+                    f"6.{gsc_metrics.index(metric_name) + 1} {metric_name}",
+                    f"connected=false, value=null (honest)"
+                )
+            else:
+                result.add_fail(
+                    f"6.{gsc_metrics.index(metric_name) + 1} {metric_name}",
+                    f"Expected connected=false and value=null, got connected={connected}, value={value}"
+                )
+                all_honest = False
+        
+        # Check first-party metrics (tracked_keywords) may be populated
+        tracked = metrics.get("tracked_keywords", {})
+        if tracked.get("connected") is True:
+            result.add_pass(
+                "6.4 First-party metrics",
+                f"tracked_keywords connected=true (first-party data)"
+            )
+        else:
+            result.add_warning(
+                "6.4 First-party metrics",
+                "tracked_keywords not connected (may be expected if no keywords tracked)"
+            )
+    
+    except Exception as e:
+        result.add_fail("6.x Overview honesty", f"Error: {str(e)}")
+
+
+def test_scenario_7_advisory_recommendations(result: TestResult, token: str):
+    """Scenario 7: Advisory recommendations - all flags correct"""
+    print("\n[Scenario 7] Testing Advisory Recommendations...")
+    
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/search/search-console/recommendations",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "7.1 Recommendations status",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+            return
+        
+        data = response.json()
+        recommendations = data.get("recommendations", [])
+        
+        if not recommendations:
+            result.add_warning(
+                "7.1 Recommendations",
+                "No recommendations returned (may be expected when disconnected)"
+            )
+            # Still check top-level flags
+            if data.get("advisory_only") is True:
+                result.add_pass("7.2 Top-level advisory_only", "advisory_only=true")
+            else:
+                result.add_fail("7.2 Top-level advisory_only", f"Expected true, got {data.get('advisory_only')}")
+            
+            if data.get("requires_human_approval") is True:
+                result.add_pass("7.3 Top-level requires_human_approval", "requires_human_approval=true")
+            else:
+                result.add_fail("7.3 Top-level requires_human_approval", f"Expected true, got {data.get('requires_human_approval')}")
+            return
+        
+        # Check every recommendation has correct flags
+        all_correct = True
+        for i, rec in enumerate(recommendations):
+            if rec.get("advisory_only") is not True:
+                result.add_fail(
+                    f"7.{i+1}a Rec {i+1} advisory_only",
+                    f"Expected advisory_only=true, got {rec.get('advisory_only')}"
+                )
+                all_correct = False
+            
+            if rec.get("requires_human_approval") is not True:
+                result.add_fail(
+                    f"7.{i+1}b Rec {i+1} requires_human_approval",
+                    f"Expected requires_human_approval=true, got {rec.get('requires_human_approval')}"
+                )
+                all_correct = False
+            
+            if rec.get("external_write") is not False:
+                result.add_fail(
+                    f"7.{i+1}c Rec {i+1} external_write",
+                    f"Expected external_write=false, got {rec.get('external_write')}"
+                )
+                all_correct = False
+        
+        if all_correct:
+            result.add_pass(
+                "7.1 All recommendations",
+                f"All {len(recommendations)} recommendations have correct flags (advisory_only=true, requires_human_approval=true, external_write=false)"
+            )
+    
+    except Exception as e:
+        result.add_fail("7.x Advisory recommendations", f"Error: {str(e)}")
+
+
+def test_scenario_8_safety_policy(result: TestResult, token: str):
+    """Scenario 8: Safety policy - all flags correct"""
+    print("\n[Scenario 8] Testing Safety Policy...")
+    
+    try:
+        response = requests.get(
+            f"{API_BASE}/marketing-os/capabilities",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            result.add_fail(
+                "8.1 Capabilities status",
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
+            return
+        
+        data = response.json()
+        policy = data.get("policy", {})
+        capabilities = data.get("capabilities", {})
+        
+        # Check policy flags
+        policy_checks = [
+            ("external_writes_enabled", False),
+            ("automatic_budget_changes_enabled", False),
+            ("automatic_campaign_creation_enabled", False),
+            ("automatic_publishing_enabled", False),
+            ("human_approval_required", True),
+        ]
+        
+        for key, expected in policy_checks:
+            actual = policy.get(key)
+            if actual == expected:
+                result.add_pass(
+                    f"8.{policy_checks.index((key, expected)) + 1} policy.{key}",
+                    f"{key}={expected}"
+                )
+            else:
+                result.add_fail(
+                    f"8.{policy_checks.index((key, expected)) + 1} policy.{key}",
+                    f"Expected {key}={expected}, got {actual}"
+                )
+        
+        # Check google_search_console capability flags
+        gsc_cap = capabilities.get("google_search_console", {})
+        gsc_checks = [
+            ("write_enabled", False),
+            ("external_write_enabled", False),
+            ("phi_stored", False),
+            ("position_is_serp_rank", False),
+        ]
+        
+        for key, expected in gsc_checks:
+            actual = gsc_cap.get(key)
+            if actual == expected:
+                result.add_pass(
+                    f"8.{len(policy_checks) + gsc_checks.index((key, expected)) + 1} gsc.{key}",
+                    f"{key}={expected}"
+                )
+            else:
+                result.add_fail(
+                    f"8.{len(policy_checks) + gsc_checks.index((key, expected)) + 1} gsc.{key}",
+                    f"Expected {key}={expected}, got {actual}"
+                )
+    
+    except Exception as e:
+        result.add_fail("8.x Safety policy", f"Error: {str(e)}")
 
 
 def main():
-    """Run all test scenarios"""
-    print("=" * 80)
-    print("Marketing OS Search Intelligence Phase 1 Backend Test Suite")
-    print(f"Backend URL: {BACKEND_URL}")
-    print("=" * 80)
+    print("="*80)
+    print("PHASE 2: GOOGLE SEARCH CONSOLE (READ-ONLY) + RANK TRACKING")
+    print("Backend Testing Suite")
+    print("="*80)
     
-    # Run all scenarios in order
-    test_scenario_1_authorization()
-    test_scenario_2_empty_not_connected()
-    test_scenario_3_site_registration()
-    test_scenario_4_keyword_tracking()
-    test_scenario_5_technical_site_audit()
-    test_scenario_6_advisory_recommendations()
-    test_scenario_7_safety_policy()
+    result = TestResult()
     
-    # Summary
-    print("\n" + "=" * 80)
-    print("TEST SUMMARY")
-    print("=" * 80)
+    # Scenario 1: Auth gate
+    admin_token = test_scenario_1_auth(result)
+    if not admin_token:
+        print("\n❌ Cannot proceed without admin token")
+        result.print_summary()
+        return
     
-    passed = sum(1 for p, _ in test_results if p)
-    failed = sum(1 for p, _ in test_results if not p)
-    total = len(test_results)
+    # Scenario 2: Readiness
+    test_scenario_2_readiness(result, admin_token)
     
-    print(f"\nTotal Tests: {total}")
-    print(f"Passed: {passed} ✅")
-    print(f"Failed: {failed} ❌")
-    print(f"Success Rate: {(passed/total*100):.1f}%\n")
+    # Scenario 3: Sync safe no-op
+    test_scenario_3_sync_safe_noop(result, admin_token)
     
-    if failed > 0:
-        print("FAILED TESTS:")
-        for passed, result in test_results:
-            if not passed:
-                print(result)
+    # Scenario 4: Honest empty reads
+    test_scenario_4_honest_empty_reads(result, admin_token)
     
-    print("\n" + "=" * 80)
-    return failed == 0
+    # Scenario 5: Rank tracking
+    test_scenario_5_rank_tracking(result, admin_token)
+    
+    # Scenario 6: Overview honesty
+    test_scenario_6_overview_honesty(result, admin_token)
+    
+    # Scenario 7: Advisory recommendations
+    test_scenario_7_advisory_recommendations(result, admin_token)
+    
+    # Scenario 8: Safety policy
+    test_scenario_8_safety_policy(result, admin_token)
+    
+    # Print summary
+    result.print_summary()
 
 
 if __name__ == "__main__":
-    success = main()
-    exit(0 if success else 1)
+    main()

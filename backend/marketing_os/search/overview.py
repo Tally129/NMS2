@@ -33,6 +33,7 @@ def build_search_overview(
     keywords: Optional[list[NormalizedKeyword]] = None,
     latest_audit: Optional[dict] = None,
     backlink_summary: Optional[dict] = None,
+    gsc_summary: Optional[dict] = None,
     connections: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Aggregate a deterministic, honest SEO overview.
@@ -41,12 +42,15 @@ def build_search_overview(
     - `keywords`: first-party tracked NormalizedKeyword list.
     - `latest_audit`: latest audit run summary (or None).
     - `backlink_summary`: reserved for a future backlink provider.
+    - `gsc_summary`: normalized Google Search Console totals (or None).
     - `connections`: which external data sources are connected.
     """
     keywords = keywords or []
+    gsc = gsc_summary or {}
+    gsc_connected = bool(gsc.get("connected"))
     conn = {
         "rank_provider": False,
-        "search_console": False,
+        "search_console": gsc_connected,
         "backlink_provider": False,
         "site_audit": bool(latest_audit),
         "tracked_keywords": bool(keywords),
@@ -76,12 +80,30 @@ def build_search_overview(
     backlinks = backlink_summary or {}
 
     metrics = {
-        # Provider-only (not connected this phase) -> honest nulls.
+        # Search Console (real values when connected; else honest null).
         "organic_keywords": _metric(
-            None, conn["search_console"], "search_console"
+            gsc.get("organic_keywords"), conn["search_console"],
+            "google_search_console"
         ),
         "estimated_organic_traffic": _metric(
-            None, conn["search_console"], "search_console"
+            gsc.get("clicks"), conn["search_console"],
+            "google_search_console"
+        ),
+        "organic_clicks": _metric(
+            gsc.get("clicks"), conn["search_console"],
+            "google_search_console"
+        ),
+        "organic_impressions": _metric(
+            gsc.get("impressions"), conn["search_console"],
+            "google_search_console"
+        ),
+        "organic_ctr": _metric(
+            gsc.get("ctr"), conn["search_console"],
+            "google_search_console"
+        ),
+        "average_organic_position": _metric(
+            gsc.get("average_position"), conn["search_console"],
+            "google_search_console"
         ),
         "backlink_count": _metric(
             backlinks.get("backlink_count"),
@@ -146,6 +168,10 @@ def _empty_metrics(conn: dict) -> dict[str, Any]:
     keys = [
         "organic_keywords",
         "estimated_organic_traffic",
+        "organic_clicks",
+        "organic_impressions",
+        "organic_ctr",
+        "average_organic_position",
         "backlink_count",
         "referring_domain_count",
         "indexed_pages",
