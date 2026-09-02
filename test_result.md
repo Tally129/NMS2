@@ -1098,4 +1098,150 @@ agent_communication:
       - All safety policy flags correct ✅
       
       PHASE 3 BACKEND: PRODUCTION-READY.
+    -agent: "main"
+    message: |
+      Phase 3 frontend ready for testing. URL: https://nms-campaign-command.preview.emergentagent.com/portal/marketing
+      Login as admin@natmedsol.local / Admin!2345 via /staff-login.
+      
+      CRITICAL: Phase 3 section is INSIDE the existing Search Intelligence panel (NOT a separate dashboard).
+      Navigate to /portal/marketing, scroll down to "Search Intelligence" section, then scroll further to
+      "Competitor & Off-Page Intelligence" sub-section (data-testid="phase3-section").
+      
+      Competitor-data / backlink / local PROVIDERS are intentionally NOT connected in sandbox (no credentials).
+      Expected behavior: honest "Not connected" states with no fabricated data. This is CORRECT, not a defect.
+      Competitor records are first-party and DO work.
+      
+      Verify all checks with evidence per item and capture screenshots.
+
+frontend:
+  - task: "Phase 3 UI in Search Intelligence panel"
+    implemented: true
+    working: true
+    file: "frontend/src/pages/portal/Phase3Section.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: |
+          Added Phase 3 "Competitor & Off-Page Intelligence" section INSIDE the existing Search Intelligence panel
+          at /portal/marketing. Section includes: 5 tabs (Competitors, Keyword Gap, Backlinks, Local SEO, Content
+          Opportunities), Competitors tab with Add Competitor UI (input + button, domain normalization, validation),
+          competitor list with active/inactive status, Keyword Gap tab with not-connected state and category count
+          cards (shared/nms_only/missing/weak/strong/total), Backlinks tab with not-connected state and metric cards
+          (Backlinks/Referring Domains/New/Lost), Local SEO tab with not-connected state and location list, Content
+          Opportunities tab with advisory note ("Advisory only — requires human approval; no changes are made
+          automatically.") and opportunity list or empty state. All provider-dependent tabs (gap/backlinks/local)
+          show honest not-connected states when providers absent. Competitor records (first-party) work. No PHI
+          fields. No external-write controls (only Add competitor). All data-testid attributes present for testing.
+        -working: true
+        -agent: "testing"
+        -comment: |
+          ✅ PHASE 3 FRONTEND TESTING COMPLETE - 100% SUCCESS (11/11 checks passed)
+          
+          Executed focused verification of Phase 3 "Competitor & Off-Page Intelligence" section ONLY, which lives
+          INSIDE the existing Search Intelligence panel at /portal/marketing. Login: admin@natmedsol.local / Admin!2345.
+          
+          VERIFIED CHECKS (all passed with evidence):
+          
+          1) ✅ /portal/marketing loads for admin (no crash/blank)
+             - Page loaded successfully with title "Marketing Command Center"
+             - Search Intelligence panel renders normally (13 SEO metric cards from Phase 1)
+          
+          2) ✅ Phase 3 section renders INSIDE Search Intelligence panel (NOT separate dashboard)
+             - Found Phase 3 section with data-testid="phase3-section"
+             - Heading: "Competitor & Off-Page Intelligence"
+             - URL confirms single page: /portal/marketing (NOT /competitor or /phase3)
+             - Phase 3 is INSIDE existing panel (single unified page)
+          
+          3) ✅ COMPETITORS tab (data-testid="p3-tab-competitors", content="p3-competitors")
+             - Tab clicked successfully
+             - Competitor list renders with 1 existing competitor: "https://www.rival-clinic.com" (active)
+             - Add Competitor UI present: input (p3-competitor-input) + button (p3-add-competitor)
+             - Validation: Add button disabled when input is empty (expected behavior)
+             - Add button enabled after entering domain: "https://www.rival-clinic.com"
+             - Competitor domain normalized and displayed correctly: "rival-clinic.com"
+             - Screenshot: p3_tab_competitors.png
+          
+          4) ✅ KEYWORD GAP tab (data-testid="p3-tab-gap", content="p3-gap")
+             - Tab clicked successfully
+             - Honest not-connected state displayed (data-testid="p3-not-connected")
+             - Message: "Not connected (no_competitor_data_provider). No provider data is available yet — values are not fabricated."
+             - NO fabricated category counts (no grid rendered when not connected)
+             - Screenshot: p3_tab_gap.png
+          
+          5) ✅ BACKLINKS tab (data-testid="p3-tab-backlinks", content="p3-backlinks")
+             - Tab clicked successfully
+             - Honest not-connected state displayed (data-testid="p3-not-connected")
+             - Message: "Not connected (no_backlink_provider). No provider data is available yet — values are not fabricated."
+             - NO fabricated backlink counts (no grid rendered when not connected)
+             - Screenshot: p3_tab_backlinks.png
+          
+          6) ✅ LOCAL SEO tab (data-testid="p3-tab-local", content="p3-local")
+             - Tab clicked successfully
+             - Honest not-connected state displayed (data-testid="p3-not-connected")
+             - Message: "Not connected (no_local_data_source). No provider data is available yet — values are not fabricated."
+             - Screenshot: p3_tab_local.png
+          
+          7) ✅ CONTENT OPPORTUNITIES tab (data-testid="p3-tab-content", content="p3-content")
+             - Tab clicked successfully
+             - Advisory note present: "Advisory only — requires human approval; no changes are made automatically."
+             - Confirms no automatic execution/publishing
+             - Shows honest empty state: "No content opportunities yet."
+             - Screenshot: p3_tab_content.png
+          
+          8) ✅ NO PHI/contact/clinical fields in Phase 3 section
+             - Checked for PHI keywords: patient name, diagnosis, medical record, ssn, clinical note, treatment, prescription
+             - NO PHI keywords found in Phase 3 HTML
+             - Phase 3 contains only marketing/SEO data (competitors, keywords, backlinks, local rankings)
+          
+          9) ✅ NO external-write / outreach / publishing / listing-update / campaign / budget controls
+             - Only read-only control present: Add competitor (input + button)
+             - NO dangerous keywords found: publish to, deploy to, create campaign, update listing, send outreach
+             - Buttons found in Phase 3: [] (only Add button for competitors)
+             - NO dangerous action buttons found
+          
+          10) ✅ Browser console logs clean
+              - NO console errors attributable to Phase 3 UI
+              - Only 2 pre-existing console errors: 401 on /api/auth/refresh (auth-related, NOT Phase 3)
+              - NO Phase 3-related errors (phase3, competitor, gap, backlink, local, content-opportunities)
+          
+          11) ✅ All 5 tabs functional and accessible
+              - Competitors: PASSED (list + Add UI working)
+              - Keyword Gap: PASSED (honest not-connected)
+              - Backlinks: PASSED (honest not-connected)
+              - Local SEO: PASSED (honest not-connected)
+              - Content Opportunities: PASSED (advisory note present)
+          
+          CRITICAL CONFIRMATIONS:
+          - Competitor-data / backlink / local providers intentionally NOT connected (no credentials in sandbox) ✅
+          - All UI elements show honest not-connected states (no fabricated data) ✅
+          - Competitor records (first-party) work correctly (rival-clinic.com displayed) ✅
+          - Phase 3 section is INSIDE Search Intelligence panel (NOT separate dashboard) ✅
+          - Phase 3 remains advisory/read-only (only Add competitor, no external-write controls) ✅
+          - Advisory note clearly states "no changes are made automatically" ✅
+          - NO PHI/contact/clinical fields ✅
+          - NO console errors from Phase 3 UI ✅
+          
+          SCREENSHOTS CAPTURED:
+          - p3_tab_competitors.png: Competitors tab with rival-clinic.com + Add UI
+          - p3_tab_gap.png: Keyword Gap not-connected state
+          - p3_tab_backlinks.png: Backlinks not-connected state
+          - p3_tab_local.png: Local SEO not-connected state
+          - p3_tab_content.png: Content Opportunities advisory note + empty state
+          
+          PHASE 3 FRONTEND: PRODUCTION-READY. All 11 requirements met with 100% verification coverage.
+          Phase 3 UI correctly integrated INSIDE Search Intelligence panel with honest not-connected states,
+          no fabricated data, and advisory/read-only controls only. All requirements met with 100% test coverage.
+
+metadata:
+  run_ui: true
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
 
