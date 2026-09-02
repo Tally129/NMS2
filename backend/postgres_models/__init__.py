@@ -48,3 +48,17 @@ from .payment_methods import (  # noqa: F401
 )
 
 from postgres_models.terminals import PaymentTerminal, TerminalPaymentAttempt
+
+# Marketing OS PostgreSQL models.
+# Imported here so SQLAlchemy metadata registers the Marketing OS tables.
+from .marketing_os import (  # noqa: F401
+    MarketingGoal,
+    MarketingBudget,
+    MarketingChannelAccount,
+    MarketingDailyMetric,
+    MarketingConversionEvent,
+    MarketingAttribution,
+    MarketingRecommendation,
+    MarketingApproval,
+    MarketingAction,
+)

@@ -27,6 +27,7 @@ from postgres_db import AsyncSessionLocal
 
 from marketing_os.capabilities import CAPABILITIES
 from marketing_os.services.director import build_marketing_brief
+from marketing_os.services.lead_opportunities import derive_lead_opportunities
 from marketing_os.policy import DEFAULT_POLICY
 
 
@@ -582,6 +583,67 @@ async def delete_marketing_budget(
 # ---------------------------------------------------------------------------
 # Read-only campaign inventory
 # ---------------------------------------------------------------------------
+
+
+
+@api.get("/marketing-os/lead-opportunities")
+async def list_marketing_lead_opportunities(
+    user=Depends(
+        require_roles(*MARKETING_ROLES)
+    ),
+):
+    """
+    Return privacy-minimized lead opportunities derived
+    from existing Marketing OS conversion events.
+
+    Safety:
+    - read-only;
+    - no provider calls;
+    - no campaign or budget changes;
+    - no outreach;
+    - no direct-contact identifiers;
+    - no clinical or patient fields.
+    """
+
+    del user
+
+    async with AsyncSessionLocal() as pg:
+        result = await pg.execute(
+            text(
+                """
+                SELECT
+                    event_type,
+                    occurred_at,
+                    marketing_subject_id,
+                    session_id,
+                    external_click_id,
+                    source,
+                    medium,
+                    campaign,
+                    content,
+                    term,
+                    value,
+                    currency,
+                    properties
+                FROM marketing_conversion_events
+                WHERE marketing_subject_id IS NOT NULL
+                  AND BTRIM(marketing_subject_id) <> ''
+                ORDER BY
+                    marketing_subject_id,
+                    occurred_at
+                """
+            )
+        )
+
+        events = [
+            dict(row)
+            for row
+            in result.mappings().all()
+        ]
+
+    return derive_lead_opportunities(
+        events
+    )
 
 
 @api.get("/marketing-os/campaigns")

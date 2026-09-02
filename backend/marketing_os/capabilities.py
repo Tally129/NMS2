@@ -1,57 +1,107 @@
 """Marketing OS capability registry.
 
-This module is deliberately dependency-free and performs no external actions.
+This registry describes the current implementation state of each
+Marketing OS subsystem.
+
+A capability being ready does NOT imply permission to perform external
+writes. External advertising, publishing, campaign creation, and budget
+mutation remain governed by marketing_os.policy.DEFAULT_POLICY.
 """
 
 CAPABILITIES = {
+    "concierge": {
+        "status": "foundation_ready",
+        "write_enabled": False,
+        "public_enabled": False,
+    },
+
     "marketing_director": {
-        "status": "planned",
+        "status": "ready",
+        "mode": "advisory",
+        "recommendations_persisted": True,
         "write_enabled": False,
     },
+
     "goals": {
-        "status": "planned",
-        "write_enabled": False,
+        "status": "ready",
+        "internal_write_enabled": True,
+        "external_write_enabled": False,
     },
+
     "budgets": {
-        "status": "planned",
-        "write_enabled": False,
+        "status": "ready",
+        "internal_write_enabled": True,
+        "automatic_budget_changes": False,
+        "external_write_enabled": False,
     },
+
     "analytics": {
-        "status": "planned",
-        "write_enabled": False,
+        "status": "foundation_ready",
+        "daily_metrics_enabled": True,
+        "fractional_conversions_enabled": True,
+        "external_write_enabled": False,
     },
+
     "attribution": {
-        "status": "planned",
-        "write_enabled": False,
+        "status": "ready",
+        "model": "last_touch",
+        "non_phi_required": True,
+        "external_write_enabled": False,
     },
+
     "recommendations": {
-        "status": "planned",
-        "write_enabled": False,
+        "status": "ready",
+        "persistent": True,
+        "human_approval_required": True,
+        "external_write_enabled": False,
     },
+
     "approvals": {
-        "status": "planned",
-        "write_enabled": False,
+        "status": "ready",
+        "decisions": [
+            "approved",
+            "rejected",
+        ],
+        "approved_action_status": "blocked",
+        "approved_action_dry_run": True,
+        "external_write_enabled": False,
     },
+
+    "action_ledger": {
+        "status": "ready",
+        "execution_enabled": False,
+        "default_status": "blocked",
+        "dry_run": True,
+        "external_write_enabled": False,
+    },
+
     "seo": {
         "status": "planned",
         "write_enabled": False,
     },
+
     "backlinks": {
         "status": "planned",
         "write_enabled": False,
     },
+
     "competitors": {
         "status": "planned",
         "write_enabled": False,
     },
+
     "google_ads": {
-        "status": "not_connected",
+        "status": "read_integration_ready",
+        "account_registration_enabled": True,
+        "performance_sync_enabled": True,
         "write_enabled": False,
     },
+
     "meta_ads": {
         "status": "not_connected",
         "write_enabled": False,
     },
+
     "tiktok_ads": {
         "status": "not_connected",
         "write_enabled": False,

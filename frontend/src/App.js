@@ -54,6 +54,7 @@ import Tasks from "./pages/portal/Tasks";
 import LabReviewQueue from "./pages/portal/LabReviewQueue";
 import CampaignCenter from "./pages/portal/CampaignCenter";
 import ContentStrategist from "./pages/portal/ContentStrategist";
+import MarketingCommandCenter from "./pages/portal/MarketingCommandCenter";
 import Accounting from "./pages/portal/Accounting";
 import StaffLogin from "./pages/StaffLogin";
 import MfaChallenge from "./pages/MfaChallenge";
@@ -118,6 +119,7 @@ function App() {
             <Route path="/portal/staff/tasks" element={<Protected roles={CLINICAL_STAFF_ROLES}><Tasks /></Protected>} />
             <Route path="/portal/staff/lab-review" element={<Protected roles={CLINICAL_STAFF_ROLES}><LabReviewQueue /></Protected>} />
             <Route path="/portal/staff/campaigns" element={<Protected roles={["staff", "admin", "practitioner", "front_desk", "frontdesk"]}><CampaignCenter /></Protected>} />
+            <Route path="/portal/marketing" element={<Protected roles={["admin", "practitioner"]}><MarketingCommandCenter /></Protected>} />
             <Route path="/portal/staff/content-strategist" element={<Protected roles={["staff", "admin", "practitioner", "medical_assistant", "front_desk", "frontdesk", "auditor"]}><ContentStrategist /></Protected>} />
             <Route path="/portal/admin/accounting" element={<Protected roles={["admin", "auditor"]}><Accounting /></Protected>} />
             <Route path="/portal/admin/telehealth" element={<Protected roles={["admin"]}><TelehealthHub /></Protected>} />

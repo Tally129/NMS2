@@ -304,6 +304,61 @@ class GoogleAdsIntegration(MarketingIntegration):
             "read_only": True,
         }
 
+    async def verify_access(self) -> dict:
+        """Verify read access to the configured Google Ads customer.
+
+        This performs one minimal Google Ads API read and never
+        mutates campaigns, budgets, bids, ads, or account settings.
+        """
+
+        def _verify():
+            client = self._get_client()
+
+            service = client.get_service(
+                "GoogleAdsService"
+            )
+
+            query = """
+                SELECT
+                    customer.id
+                FROM customer
+                LIMIT 1
+            """
+
+            rows = service.search(
+                customer_id=self.customer_id,
+                query=query,
+            )
+
+            # Force evaluation so authentication/authorization
+            # failures surface during verification.
+            iterator = iter(rows)
+
+            try:
+                next(iterator)
+            except StopIteration:
+                pass
+
+        try:
+            await asyncio.to_thread(_verify)
+        except Exception as exc:
+            return {
+                "status": "unavailable",
+                "provider": self.provider,
+                "customer_id": self.customer_id,
+                "read_only": True,
+                "verified": False,
+                "reason": str(exc),
+            }
+
+        return {
+            "status": "verified",
+            "provider": self.provider,
+            "customer_id": self.customer_id,
+            "read_only": True,
+            "verified": True,
+        }
+
     async def fetch_performance(
         self,
         *,
