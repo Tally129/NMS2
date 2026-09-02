@@ -1,0 +1,7 @@
+# Ruff configuration for the NMS backend.
+# The auth_impl package intentionally re-exports a shared namespace via
+# `from ._common import *` (see routers/auth_impl/_common.py __all__), so the
+# star-import diagnostics F403/F405 are expected and suppressed for that
+# package only.
+[lint.per-file-ignores]
+"**/routers/auth_impl/*.py" = ["F403", "F405"]

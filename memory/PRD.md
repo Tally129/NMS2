@@ -1529,3 +1529,71 @@ recovery codes, bootstrap secret, refresh tokens, access tokens.
 
 _Last updated: 2026-07-30 (Session 2c · Admin Bootstrap)_
 
+
+---
+
+## Marketing OS Phase 4 — Meta Ads + Microsoft Advertising READ-ONLY Providers (Jun 2026)
+
+Branch: `emergent/meta-microsoft-ads-phase4`. Extends the provider-neutral
+Marketing OS with read-only Meta + Microsoft ad adapters alongside Google Ads,
+a unified paid-media overview, and advisory Director integration.
+
+### Backend
+- **Adapters** (read-only, lazy SDK import, env-only creds, no network at
+  construction): `integrations/meta_ads.py`, `integrations/microsoft_ads.py`.
+  `execute_action()` inherits the base contract that raises (writes disabled).
+- **Normalizer**: `integrations/paid_normalize.py` — provider-neutral canonical
+  campaign row; unavailable metrics stay `None` (never fabricated as zero);
+  derived rates (ctr/cpc/cpl/cpa/roas) computed only when inputs exist.
+- **Bootstrap**: `integrations/bootstrap.py` — idempotent, local-only
+  registration of google_ads/meta_ads/microsoft_ads. Registration now happens
+  on demand inside the `/paid/providers` endpoint (NOT at module import) so
+  importing the router never mutates the global registry.
+- **Service**: `services/paid_media.py` — `provider_readiness()` (normalized,
+  no network), `build_paid_media_overview(rows)` (per-provider readiness +
+  aggregated metrics with honest null empty states), `paid_performance_signals()`
+  (emits Director signals ONLY for channels that actually have data).
+- **Router**: `routers/paid_media.py` wired into `routers/core.py`. Endpoints
+  (GET, `require_roles(admin, practitioner)`):
+  - `/api/marketing-os/paid/providers`
+  - `/api/marketing-os/paid/{provider}/readiness`
+  - `/api/marketing-os/paid/performance` (unified cross-channel overview)
+- **Director**: `services/director.py::build_marketing_brief()` gained an
+  optional `paid_media` block echoed under `brief.paid_media`. Disconnected
+  providers surface honestly as informational entries and generate NO
+  performance/budget recommendations. `core.py::/director/brief` now passes
+  `build_paid_media_overview(rows)`.
+
+### Frontend
+- `pages/portal/PaidMediaPanel.jsx` — self-contained read-only "Paid Media
+  Channels" section rendered inside the existing Marketing Command Center
+  (after Search Intelligence). Google/Meta/Microsoft cards show readiness +
+  spend/impressions/clicks/CTR/conversions/CPA/ROAS. Null metrics render as
+  "—" (unknown, never zero); disconnected channels show an honest empty state.
+  Includes a read-only safety banner. No separate dashboard.
+
+### Safety (unchanged)
+external writes disabled · automatic budget changes disabled · automatic
+campaign creation disabled · automatic publishing disabled · human approval
+required. No TikTok/LinkedIn/etc. No campaign/budget/bid/audience editing.
+
+### Tests
+- `tests/test_marketing_paid_media_phase4.py` — 15 unit tests (normalization,
+  bootstrap idempotency, no-network registration, readiness states, honest
+  null metrics, unified overview, Director with real vs disconnected data,
+  read-only enforcement, safety flags). Autouse fixture restores the global
+  registry so exact-equality assertions in other modules stay green.
+- `tests/test_marketing_paid_media_phase4_http.py` — 10 live HTTP tests
+  (MFA-authenticated admin/practitioner/staff) validating all endpoints + the
+  Director brief paid_media block + RBAC. 10/10 pass.
+- Full marketing pytest suite: **194 passed, 1 pre-existing unrelated failure**
+  (`test_marketing_ingestion_api.py::test_http_rejected` — insecure-scheme
+  rejection on the ingestion endpoint; fails in isolation, NOT Phase 4).
+
+### Infra note (non-code)
+- Added `backend/ruff.toml` per-file-ignore for the intentional
+  `from ._common import *` re-export pattern in `routers/auth_impl/*` to clear
+  pre-existing F405 lint errors that were blocking job completion. This is a
+  lint-config-only change — it touches NO auth logic/behavior.
+
+_Last updated: Jun 2026 (Marketing OS Phase 4 · Meta + Microsoft read-only providers)_

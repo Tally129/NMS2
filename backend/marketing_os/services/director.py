@@ -16,7 +16,7 @@ ranked advisory recommendations for later human approval.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Optional
 
 
 @dataclass(frozen=True)
@@ -365,6 +365,7 @@ def build_marketing_brief(
     budgets: Iterable[Mapping[str, Any]] = (),
     performance: Iterable[Mapping[str, Any]] = (),
     budget_performance: Iterable[Mapping[str, Any]] = (),
+    paid_media: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Build an advisory cross-channel marketing brief.
 
@@ -1027,6 +1028,9 @@ def build_marketing_brief(
         "budget_analysis": budget_analysis,
         "channel_analysis": analyses,
         "recommendations": recommendations,
+        "paid_media": (
+            dict(paid_media) if paid_media is not None else None
+        ),
         "safety": {
             "phi_required": False,
             "external_writes": False,

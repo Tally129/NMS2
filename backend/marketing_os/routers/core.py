@@ -28,6 +28,7 @@ from postgres_db import AsyncSessionLocal
 from marketing_os.capabilities import CAPABILITIES
 from marketing_os.services.director import build_marketing_brief
 from marketing_os.services.lead_opportunities import derive_lead_opportunities
+from marketing_os.services.paid_media import build_paid_media_overview
 from marketing_os.policy import DEFAULT_POLICY
 
 
@@ -1120,6 +1121,11 @@ async def marketing_director_brief(
         # exact budget allocation matching. Channel
         # analysis continues to use aggregates above.
         budget_performance=rows,
+
+        # Read-only paid-media readiness + normalized metrics for
+        # google_ads / meta_ads / microsoft_ads. Disconnected channels
+        # surface honestly (null metrics) and never drive recommendations.
+        paid_media=build_paid_media_overview(rows),
     )
 
     from marketing_os.services.recommendation_persistence import (
@@ -1165,3 +1171,6 @@ from marketing_os.routers import search_console as _marketing_gsc_routes  # noqa
 
 # Register Phase 3 competitor/keyword-gap/backlink/local routes.
 from marketing_os.routers import search_phase3 as _marketing_phase3_routes  # noqa: F401,E402
+
+# Register Phase 4 read-only paid-media (Google/Meta/Microsoft) routes.
+from marketing_os.routers import paid_media as _marketing_paid_media_routes  # noqa: F401,E402

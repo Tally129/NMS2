@@ -10,6 +10,7 @@ import api from "../../lib/api";
 import MarketingGoalsPanel from "./MarketingGoalsPanel";
 import MarketingBudgetsPanel from "./MarketingBudgetsPanel";
 import SearchIntelligencePanel from "./SearchIntelligencePanel";
+import PaidMediaPanel from "./PaidMediaPanel";
 
 import { Button } from "../../components/ui/button";
 
@@ -880,6 +881,8 @@ export default function MarketingCommandCenter() {
         />
 
         <SearchIntelligencePanel />
+
+        <PaidMediaPanel />
       </div>
 
 
