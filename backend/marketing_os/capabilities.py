@@ -80,6 +80,24 @@ CAPABILITIES = {
         "write_enabled": False,
     },
 
+    "search_intelligence": {
+        "status": "foundation_ready",
+        "mode": "read_only",
+        "overview_enabled": True,
+        "keyword_tracking_enabled": True,
+        "site_audit_enabled": True,
+        "site_audit_read_only": True,
+        "recommendations_mode": "advisory",
+        "external_write_enabled": False,
+        "write_enabled": False,
+        "phi_stored": False,
+        "connected_providers": {
+            "rank_provider": False,
+            "search_console": False,
+            "backlink_provider": False,
+        },
+    },
+
     "backlinks": {
         "status": "planned",
         "write_enabled": False,

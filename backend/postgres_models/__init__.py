@@ -62,3 +62,12 @@ from .marketing_os import (  # noqa: F401
     MarketingApproval,
     MarketingAction,
 )
+
+# Marketing OS Search Intelligence PostgreSQL models.
+from .marketing_search import (  # noqa: F401
+    MarketingSearchSite,
+    MarketingSearchKeyword,
+    MarketingKeywordRankSnapshot,
+    MarketingSiteAuditRun,
+    MarketingSiteAuditIssue,
+)

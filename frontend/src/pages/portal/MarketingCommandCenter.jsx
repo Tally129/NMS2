@@ -9,6 +9,7 @@ import api from "../../lib/api";
 
 import MarketingGoalsPanel from "./MarketingGoalsPanel";
 import MarketingBudgetsPanel from "./MarketingBudgetsPanel";
+import SearchIntelligencePanel from "./SearchIntelligencePanel";
 
 import { Button } from "../../components/ui/button";
 
@@ -877,6 +878,8 @@ export default function MarketingCommandCenter() {
             })
           }
         />
+
+        <SearchIntelligencePanel />
       </div>
 
 

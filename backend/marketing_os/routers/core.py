@@ -1156,3 +1156,6 @@ async def marketing_director_brief(
 
 # Register secure first-party marketing event ingestion routes.
 from marketing_os.routers import ingestion as _marketing_ingestion_routes  # noqa: F401,E402
+
+# Register read-only Search Intelligence routes.
+from marketing_os.routers import search as _marketing_search_routes  # noqa: F401,E402
