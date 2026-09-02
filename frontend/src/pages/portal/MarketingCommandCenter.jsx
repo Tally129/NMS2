@@ -13,6 +13,7 @@ import SearchIntelligencePanel from "./SearchIntelligencePanel";
 import PaidMediaPanel from "./PaidMediaPanel";
 import AttributionFunnelPanel from "./AttributionFunnelPanel";
 import LeadOperationsPanel from "./LeadOperationsPanel";
+import FunnelBuilderPanel from "./FunnelBuilderPanel";
 
 import { Button } from "../../components/ui/button";
 
@@ -889,6 +890,7 @@ export default function MarketingCommandCenter() {
         <AttributionFunnelPanel />
 
         <LeadOperationsPanel />
+        <FunnelBuilderPanel />
       </div>
 
 

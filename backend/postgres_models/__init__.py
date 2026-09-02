@@ -94,3 +94,13 @@ from .marketing_leads import (  # noqa: F401
     MarketingLeadAssignment,
     MarketingLeadActivity,
 )
+
+# Marketing OS Phase 7 — funnels / qualification / offers.
+from .marketing_phase7 import (  # noqa: F401
+    MarketingOffer,
+    MarketingQualificationForm,
+    MarketingFunnel,
+    MarketingFunnelStep,
+    MarketingQualificationSubmission,
+)
+

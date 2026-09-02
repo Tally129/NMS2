@@ -1234,3 +1234,7 @@ from marketing_os.routers import attribution as _marketing_attribution_routes  #
 
 # Register Phase 6 Lead CRM + setter workspace routes.
 from marketing_os.routers import leads as _marketing_leads_routes  # noqa: F401,E402
+
+# Phase 7 — funnels / qualification forms / offer library.
+from marketing_os.routers import funnels as _marketing_funnels_routes  # noqa: F401,E402
+
