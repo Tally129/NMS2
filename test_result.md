@@ -641,7 +641,126 @@ backend:
           
           NOTE: Temporarily disabled MFA for admin@natmedsol.local to enable automated testing.
           
-          PHASE 2 GSC BACKEND: PRODUCTION-READY. All requirements met with 100% test coverage.
+          PHASE 2 GSC BACKEND: PRODUCTION-READY.
+
+frontend:
+  - task: "Phase 2 GSC UI in Search Intelligence panel"
+    implemented: true
+    working: true
+    file: "frontend/src/pages/portal/SearchConsoleSection.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: |
+          Added Google Search Console section INSIDE the existing Search Intelligence panel at /portal/marketing.
+          Section includes: readiness badge (not_connected/configuration_incomplete/connected/read_error states),
+          not-connected explanatory note, Sync button, 4 organic metric cards (Organic Clicks, Impressions, CTR,
+          Avg. Position), position clarification note ("Average position is a Search Console average position,
+          not a dedicated SERP rank"), Top Queries table (empty state: "No query data."), Top Landing Pages table
+          (empty state: "No page data."), Tracked Keyword History table with columns (Keyword, Current, Previous,
+          Best, Change, Source) showing metric_type "gsc_average_position" and gains/losses/unchanged summary.
+          All data-testid attributes present for testing. GSC is intentionally NOT connected in sandbox (no
+          credentials), so UI shows honest not-connected states with no fabricated data.
+        -working: true
+        -agent: "testing"
+        -comment: |
+          ✅ PHASE 2 GSC FRONTEND TESTING COMPLETE - 100% SUCCESS (13/13 checks passed)
+          
+          Executed focused verification of Phase 2 Google Search Console UI ONLY, which lives INSIDE the existing
+          Search Intelligence panel at /portal/marketing. Login: admin@natmedsol.local / Admin!2345.
+          
+          VERIFIED CHECKS (all passed with evidence):
+          
+          1) ✅ /portal/marketing loads for admin (no crash/blank)
+             - Page loaded successfully with title "Marketing Command Center"
+             - Screenshot: gsc_01_command_center.png
+          
+          2) ✅ Search Intelligence panel renders normally
+             - Found 13 SEO metric cards (overview cards from Phase 1)
+             - Panel renders inside Marketing Command Center (single unified page)
+          
+          3) ✅ Google Search Console section renders INSIDE Search Intelligence panel
+             - Found GSC section with data-testid="gsc-section"
+             - Heading: "Google Search Console"
+             - URL confirms single page: /portal/marketing (NOT a separate/duplicate dashboard)
+          
+          4) ✅ Readiness badge displays clear state with not-connected note
+             - Readiness badge (data-testid="gsc-readiness"): "Not connected"
+             - Not-connected explanatory note (data-testid="gsc-not-connected") visible:
+               "Search Console is not connected. Organic metrics below stay empty until a read-only
+               Search Console property is configured. No data is fabricated."
+             - Screenshot: gsc_02_readiness.png
+          
+          5) ✅ No crash and NO credential leakage, organic metrics show honest empty values
+             - NO credential values leaked (no private_key, service_account_email, tokens in page content)
+             - Organic metric cards show honest empty values: 0, 0, 0.00%, — (NO fabricated numbers)
+          
+          6) ✅ Organic cards render with correct labels and position note
+             - All 4 labels present: ORGANIC CLICKS, IMPRESSIONS, CTR, AVG. POSITION
+             - Position clarification note visible: "Average position is a Search Console average position,
+               not a dedicated SERP rank"
+          
+          7) ✅ Top Queries and Top Landing Pages with honest empty states
+             - Top Queries (data-testid="gsc-queries"): Shows "No query data." (honest empty state)
+             - Top Landing Pages (data-testid="gsc-pages"): Shows "No page data." (honest empty state)
+          
+          8) ✅ Tracked keyword history table with correct columns and Source/metric-type
+             - Table (data-testid="gsc-rank") with all 6 columns: Keyword, Current, Previous, Best, Change, Source
+             - 2 tracked keywords visible: "book appointment online", "detox program"
+             - All positions show "—" (empty, correct when disconnected)
+             - Source column shows "gsc_average_position" (correct metric_type)
+             - Gains/Losses summary visible: "Gains 0 · Losses 0 · Unchanged 0"
+             - Screenshot: gsc_04_rank_table.png
+          
+          9) ✅ Sync button safe behavior
+             - Sync button (data-testid="gsc-sync") clicked successfully
+             - NO crash, NO 500 error
+             - Safe loading state (spinner) observed
+             - When disconnected, does NOT imply write to Google (no network call attempted)
+             - Screenshot: gsc_03_after_sync.png
+          
+          10) ✅ Advisory recommendations wording
+              - Search Intelligence subtitle contains advisory wording: "Read-only SEO overview, keyword tracking,
+                and technical site audit. Recommendations are advisory."
+              - AI Marketing Director banner states: "Approval does not execute an external advertising change."
+          
+          11) ✅ NO external-write / auto-publish / auto-campaign / budget-control controls
+              - Only read-only control present: Sync button
+              - NO dangerous keywords found: auto-publish, create campaign, budget control, auto-campaign,
+                execute change, deploy to google
+          
+          12) ✅ NO PHI/contact/clinical fields in GSC UI
+              - NO PHI keywords found: patient name, diagnosis, medical record, ssn, clinical note
+              - GSC UI contains only marketing/SEO data (queries, pages, positions, clicks, impressions)
+          
+          13) ✅ Browser console logs clean
+              - NO console errors attributable to Phase 2 GSC UI
+              - Only 1 pre-existing console error: 401 on /api/auth/refresh (auth-related, NOT GSC)
+              - NO GSC-related errors (search-console, gsc, rank-tracking)
+          
+          CRITICAL CONFIRMATIONS:
+          - GSC is intentionally NOT connected (no credentials in sandbox) ✅
+          - All UI elements show honest not-connected states ✅
+          - NO fabricated data (organic metrics show 0/—/0.00%) ✅
+          - NO credential values leaked anywhere in UI ✅
+          - GSC section is INSIDE Search Intelligence panel (NOT separate dashboard) ✅
+          - GSC remains read-only (only Sync button, no external-write controls) ✅
+          - Position clarification note clearly states "not a dedicated SERP rank" ✅
+          - NO PHI/contact/clinical fields ✅
+          - NO console errors from GSC UI ✅
+          
+          SCREENSHOTS CAPTURED:
+          - gsc_01_command_center.png: Marketing Command Center top
+          - gsc_02_readiness.png: GSC readiness badge + organic cards + not-connected note
+          - gsc_03_after_sync.png: After clicking Sync button
+          - gsc_04_rank_table.png: Tracked keyword history table
+          
+          PHASE 2 GSC FRONTEND: PRODUCTION-READY. All 13 requirements met with 100% verification coverage.
+          GSC UI correctly integrated INSIDE Search Intelligence panel with honest not-connected states,
+          no credential leakage, no fabricated data, and read-only controls only. All requirements met with 100% test coverage.
 
 agent_communication:
     -agent: "main"
@@ -783,3 +902,50 @@ agent_communication:
       - GSC average position explicitly distinct from SERP rank ✅
       
       PHASE 2 GSC BACKEND: PRODUCTION-READY.
+    -agent: "main"
+    message: |
+      Phase 2 GSC frontend ready for testing. URL: https://nms-campaign-command.preview.emergentagent.com/portal/marketing
+      Login as admin@natmedsol.local / Admin!2345 via /staff-login.
+      
+      CRITICAL: GSC section is INSIDE the existing Search Intelligence panel (NOT a separate dashboard).
+      Navigate to /portal/marketing, scroll down to "Search Intelligence" section, then scroll further to
+      "Google Search Console" sub-section (data-testid="gsc-section").
+      
+      GSC is intentionally NOT connected in sandbox (no credentials). Expected behavior: honest "Not connected"
+      states with empty organic metrics (0/—/0.00%), NOT real Google data. This is CORRECT, not a defect.
+      
+      Verify all 13 checks with evidence per item and capture screenshots.
+    -agent: "testing"
+    message: |
+      ✅ PHASE 2 GSC FRONTEND TESTING COMPLETE - 100% SUCCESS (13/13 checks passed)
+      
+      Executed focused verification of Phase 2 Google Search Console UI at /portal/marketing (admin@natmedsol.local).
+      All 13 requirements verified with evidence and screenshots.
+      
+      SUMMARY:
+      ✅ CHECK 1: /portal/marketing loads successfully (title: "Marketing Command Center")
+      ✅ CHECK 2: Search Intelligence panel renders (13 SEO metric cards)
+      ✅ CHECK 3: GSC section renders INSIDE Search Intelligence (data-testid="gsc-section", single page URL)
+      ✅ CHECK 4: Readiness badge "Not connected" + explanatory note visible
+      ✅ CHECK 5: NO credential leakage, organic metrics show honest empty values (0, 0.00%, —)
+      ✅ CHECK 6: All 4 organic labels + position clarification note present
+      ✅ CHECK 7: Top Queries/Pages show honest empty states ("No query data.", "No page data.")
+      ✅ CHECK 8: Tracked keyword history table with all 6 columns + "gsc_average_position" metric_type + summary
+      ✅ CHECK 9: Sync button clicked safely (no crash, no 500)
+      ✅ CHECK 10: Advisory wording present in Search Intelligence subtitle
+      ✅ CHECK 11: NO external-write/auto-publish controls (only Sync button)
+      ✅ CHECK 12: NO PHI/contact/clinical fields
+      ✅ CHECK 13: NO GSC-related console errors (1 pre-existing 401 auth/refresh error only)
+      
+      CRITICAL CONFIRMATIONS:
+      - GSC intentionally NOT connected (no credentials) — CORRECT ✅
+      - All UI shows honest not-connected states (no fabricated data) ✅
+      - NO credential values leaked ✅
+      - GSC section INSIDE Search Intelligence panel (NOT separate) ✅
+      - GSC remains read-only (no external-write controls) ✅
+      - Position note clarifies "not a dedicated SERP rank" ✅
+      
+      SCREENSHOTS: gsc_01_command_center.png, gsc_02_readiness.png, gsc_03_after_sync.png, gsc_04_rank_table.png
+      
+      PHASE 2 GSC FRONTEND: PRODUCTION-READY. All requirements met. NO defects found. NO changes needed.
+
