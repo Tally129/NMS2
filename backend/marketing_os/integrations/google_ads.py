@@ -359,6 +359,499 @@ class GoogleAdsIntegration(MarketingIntegration):
             "verified": True,
         }
 
+
+    def _campaign_resource_name(
+        self,
+        campaign_id: Any,
+    ) -> str:
+        campaign_id = _clean_customer_id(campaign_id)
+
+        return (
+            f"customers/{self.customer_id}/"
+            f"campaigns/{campaign_id}"
+        )
+
+    def _campaign_budget_resource_name(
+        self,
+        budget_id: Any,
+    ) -> str:
+        budget_id = _clean_customer_id(budget_id)
+
+        return (
+            f"customers/{self.customer_id}/"
+            f"campaignBudgets/{budget_id}"
+        )
+
+    def _money_to_micros(
+        self,
+        value: Any,
+    ) -> int:
+        amount = Decimal(str(value))
+
+        if not amount.is_finite():
+            raise ValueError(
+                "budget amount must be finite"
+            )
+
+        if amount < 0:
+            raise ValueError(
+                "budget amount must be nonnegative"
+            )
+
+        return int(
+            amount * Decimal("1000000")
+        )
+
+    def _create_campaign_sync(
+        self,
+        *,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        client = self._get_client()
+
+        budget_amount = (
+            payload.get("daily_budget")
+            if payload.get("daily_budget") is not None
+            else payload.get("amount")
+        )
+
+        if budget_amount is None:
+            raise ValueError(
+                "daily_budget is required for campaign.create"
+            )
+
+        name = str(
+            payload.get("name") or ""
+        ).strip()
+
+        if not name:
+            raise ValueError(
+                "name is required for campaign.create"
+            )
+
+        budget_service = client.get_service(
+            "CampaignBudgetService"
+        )
+
+        campaign_service = client.get_service(
+            "CampaignService"
+        )
+
+        budget_operation = client.get_type(
+            "CampaignBudgetOperation"
+        )
+
+        budget = budget_operation.create
+
+        budget.name = f"{name} Budget"
+
+        budget.amount_micros = self._money_to_micros(
+            budget_amount
+        )
+
+        budget.delivery_method = (
+            client.enums.BudgetDeliveryMethodEnum.STANDARD
+        )
+
+        budget_response = (
+            budget_service.mutate_campaign_budgets(
+                customer_id=self.customer_id,
+                operations=[budget_operation],
+            )
+        )
+
+        budget_resource = (
+            budget_response.results[0].resource_name
+        )
+
+        campaign_operation = client.get_type(
+            "CampaignOperation"
+        )
+
+        campaign = campaign_operation.create
+
+        campaign.name = name
+        campaign.campaign_budget = budget_resource
+
+        # New campaigns are intentionally PAUSED.
+        campaign.status = (
+            client.enums.CampaignStatusEnum.PAUSED
+        )
+
+        # Initial live execution supports Search campaigns.
+        campaign.advertising_channel_type = (
+            client.enums.AdvertisingChannelTypeEnum.SEARCH
+        )
+
+        campaign.manual_cpc.enhanced_cpc_enabled = False
+
+        start_date = payload.get("start_date")
+        end_date = payload.get("end_date")
+
+        if start_date:
+            campaign.start_date = (
+                str(start_date).replace("-", "")
+            )
+
+        if end_date:
+            campaign.end_date = (
+                str(end_date).replace("-", "")
+            )
+
+        response = campaign_service.mutate_campaigns(
+            customer_id=self.customer_id,
+            operations=[campaign_operation],
+        )
+
+        campaign_resource = (
+            response.results[0].resource_name
+        )
+
+        return {
+            "provider": self.provider,
+            "action_type": "campaign.create",
+            "customer_id": self.customer_id,
+            "campaign_resource_name": campaign_resource,
+            "campaign_budget_resource_name": budget_resource,
+            "status": "paused",
+            "external_write_performed": True,
+        }
+
+    def _set_campaign_status_sync(
+        self,
+        *,
+        campaign_id: Any,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        client = self._get_client()
+
+        service = client.get_service(
+            "CampaignService"
+        )
+
+        operation = client.get_type(
+            "CampaignOperation"
+        )
+
+        campaign = operation.update
+
+        campaign.resource_name = (
+            self._campaign_resource_name(
+                campaign_id
+            )
+        )
+
+        campaign.status = (
+            client.enums.CampaignStatusEnum.ENABLED
+            if enabled
+            else client.enums.CampaignStatusEnum.PAUSED
+        )
+
+        client.copy_from(
+            operation.update_mask,
+            client.get_type("FieldMask")(
+                paths=["status"]
+            ),
+        )
+
+        response = service.mutate_campaigns(
+            customer_id=self.customer_id,
+            operations=[operation],
+        )
+
+        return {
+            "provider": self.provider,
+            "action_type": (
+                "campaign.resume"
+                if enabled
+                else "campaign.pause"
+            ),
+            "customer_id": self.customer_id,
+            "campaign_resource_name": (
+                response.results[0].resource_name
+            ),
+            "status": (
+                "enabled"
+                if enabled
+                else "paused"
+            ),
+            "external_write_performed": True,
+        }
+
+    def _resolve_campaign_budget_sync(
+        self,
+        *,
+        campaign_id: Any,
+    ) -> str:
+        client = self._get_client()
+
+        service = client.get_service(
+            "GoogleAdsService"
+        )
+
+        campaign_id = _clean_customer_id(
+            campaign_id
+        )
+
+        query = f"""
+            SELECT
+                campaign.id,
+                campaign.campaign_budget
+            FROM campaign
+            WHERE campaign.id = {campaign_id}
+            LIMIT 1
+        """
+
+        rows = service.search(
+            customer_id=self.customer_id,
+            query=query,
+        )
+
+        for row in rows:
+            return str(
+                row.campaign.campaign_budget
+            )
+
+        raise LookupError(
+            "campaign_not_found"
+        )
+
+    def _update_budget_sync(
+        self,
+        *,
+        campaign_id: Any,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        client = self._get_client()
+
+        amount = (
+            payload.get("daily_budget")
+            if payload.get("daily_budget") is not None
+            else payload.get("amount")
+        )
+
+        if amount is None:
+            raise ValueError(
+                "amount or daily_budget is required"
+            )
+
+        budget_resource = (
+            self._resolve_campaign_budget_sync(
+                campaign_id=campaign_id
+            )
+        )
+
+        service = client.get_service(
+            "CampaignBudgetService"
+        )
+
+        operation = client.get_type(
+            "CampaignBudgetOperation"
+        )
+
+        budget = operation.update
+
+        budget.resource_name = budget_resource
+        budget.amount_micros = self._money_to_micros(
+            amount
+        )
+
+        client.copy_from(
+            operation.update_mask,
+            client.get_type("FieldMask")(
+                paths=["amount_micros"]
+            ),
+        )
+
+        response = (
+            service.mutate_campaign_budgets(
+                customer_id=self.customer_id,
+                operations=[operation],
+            )
+        )
+
+        return {
+            "provider": self.provider,
+            "action_type": "budget.update",
+            "customer_id": self.customer_id,
+            "campaign_id": str(campaign_id),
+            "campaign_budget_resource_name": (
+                response.results[0].resource_name
+            ),
+            "amount": str(amount),
+            "external_write_performed": True,
+        }
+
+    def _verify_campaign_sync(
+        self,
+        *,
+        campaign_id: Any,
+    ) -> dict[str, Any]:
+        client = self._get_client()
+
+        service = client.get_service(
+            "GoogleAdsService"
+        )
+
+        campaign_id = _clean_customer_id(
+            campaign_id
+        )
+
+        query = f"""
+            SELECT
+                campaign.id,
+                campaign.name,
+                campaign.status,
+                campaign.campaign_budget,
+                campaign_budget.amount_micros
+            FROM campaign
+            WHERE campaign.id = {campaign_id}
+            LIMIT 1
+        """
+
+        rows = service.search(
+            customer_id=self.customer_id,
+            query=query,
+        )
+
+        for row in rows:
+            return {
+                "campaign_id":
+                    str(row.campaign.id),
+                "campaign_name":
+                    str(row.campaign.name or ""),
+                "campaign_status":
+                    row.campaign.status.name,
+                "campaign_budget_resource_name":
+                    str(
+                        row.campaign.campaign_budget
+                    ),
+                "daily_budget":
+                    str(
+                        _micros_to_decimal(
+                            row.campaign_budget.amount_micros
+                        )
+                    ),
+            }
+
+        raise LookupError(
+            "campaign_not_found"
+        )
+
+    async def execute_action(
+        self,
+        *,
+        action_type: str | None = None,
+        target_type: str | None = None,
+        target_id: str | None = None,
+        payload: Mapping[str, Any] | None = None,
+        action: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute one approved Google Ads mutation.
+
+        This method assumes the caller has already enforced:
+        - human approval;
+        - provider execution policy;
+        - allowed action contract;
+        - idempotency;
+        - PHI/credential payload restrictions.
+
+        Permanent deletion and billing/payment mutations are not
+        implemented.
+        """
+
+        if action is not None:
+            raise RuntimeError(
+                "legacy Google Ads execution action is not enabled"
+            )
+
+        payload = dict(payload or {})
+
+        action_type = str(
+            action_type or ""
+        ).strip().lower()
+
+        if action_type == "campaign.create":
+            result = await asyncio.to_thread(
+                self._create_campaign_sync,
+                payload=payload,
+            )
+
+            resource = result[
+                "campaign_resource_name"
+            ]
+
+            campaign_id = resource.rsplit(
+                "/",
+                1,
+            )[-1]
+
+            verification = await asyncio.to_thread(
+                self._verify_campaign_sync,
+                campaign_id=campaign_id,
+            )
+
+        elif action_type == "campaign.pause":
+            if not target_id:
+                raise ValueError(
+                    "campaign target_id is required"
+                )
+
+            result = await asyncio.to_thread(
+                self._set_campaign_status_sync,
+                campaign_id=target_id,
+                enabled=False,
+            )
+
+            verification = await asyncio.to_thread(
+                self._verify_campaign_sync,
+                campaign_id=target_id,
+            )
+
+        elif action_type == "campaign.resume":
+            if not target_id:
+                raise ValueError(
+                    "campaign target_id is required"
+                )
+
+            result = await asyncio.to_thread(
+                self._set_campaign_status_sync,
+                campaign_id=target_id,
+                enabled=True,
+            )
+
+            verification = await asyncio.to_thread(
+                self._verify_campaign_sync,
+                campaign_id=target_id,
+            )
+
+        elif action_type == "budget.update":
+            if not target_id:
+                raise ValueError(
+                    "campaign target_id is required"
+                )
+
+            result = await asyncio.to_thread(
+                self._update_budget_sync,
+                campaign_id=target_id,
+                payload=payload,
+            )
+
+            verification = await asyncio.to_thread(
+                self._verify_campaign_sync,
+                campaign_id=target_id,
+            )
+
+        else:
+            raise ValueError(
+                f"unsupported_live_action:{action_type}"
+            )
+
+        result["verification"] = verification
+        result["verified"] = True
+
+        return result
+
     async def fetch_performance(
         self,
         *,
