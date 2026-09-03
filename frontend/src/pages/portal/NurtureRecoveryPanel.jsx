@@ -130,16 +130,19 @@ export default function NurtureRecoveryPanel() {
     sequence_id: "",
     lead_id: "",
   });
+  const [leads, setLeads] = React.useState([]);
+  const [expandedSeqId, setExpandedSeqId] = React.useState("");
+  const [seqSteps, setSeqSteps] = React.useState({});
 
   const flash = (setter, value) => {
     setter(value);
-    window.setTimeout(() => setter(""), 4000);
+    window.setTimeout(() => setter(""), 12000);
   };
 
   const load = React.useCallback(async () => {
     setLoading(true);
     try {
-      const [ov, seq, act, enr] = await Promise.all([
+      const [ov, seq, act, enr, lds] = await Promise.all([
         api.get("/marketing-os/nurture/overview"),
         api.get("/marketing-os/nurture/sequences"),
         api.get("/marketing-os/nurture/actions", {
@@ -148,11 +151,13 @@ export default function NurtureRecoveryPanel() {
         api.get("/marketing-os/nurture/enrollments", {
           params: { limit: 100 },
         }),
+        api.get("/marketing-os/leads", { params: { limit: 50 } }),
       ]);
       setOverview(ov.data);
       setSequences(seq.data?.sequences || []);
       setActions(act.data?.actions || []);
       setEnrollments(enr.data?.enrollments || []);
+      setLeads(lds.data?.leads || []);
     } catch (err) {
       setError(err?.response?.data?.detail || "Failed to load nurture data");
     } finally {
@@ -166,6 +171,22 @@ export default function NurtureRecoveryPanel() {
 
   const sequenceName = (id) =>
     sequences.find((s) => s.id === id)?.name || id;
+
+  const toggleSteps = async (id) => {
+    if (expandedSeqId === id) {
+      setExpandedSeqId("");
+      return;
+    }
+    setExpandedSeqId(id);
+    if (!seqSteps[id]) {
+      try {
+        const r = await api.get(`/marketing-os/nurture/sequences/${id}`);
+        setSeqSteps((prev) => ({ ...prev, [id]: r.data?.steps || [] }));
+      } catch (err) {
+        setError(err?.response?.data?.detail || "Could not load steps");
+      }
+    }
+  };
 
   const createSequence = async () => {
     setBusy(true);
@@ -518,6 +539,7 @@ export default function NurtureRecoveryPanel() {
                         setNewStep({ ...newStep, step_key: e.target.value })
                       }
                       placeholder="day1_email"
+                      data-testid="nurture-step-key"
                     />
                   </div>
                   <div>
@@ -531,6 +553,7 @@ export default function NurtureRecoveryPanel() {
                           delay_minutes: e.target.value,
                         })
                       }
+                      data-testid="nurture-step-delay"
                     />
                   </div>
                 </div>
@@ -542,7 +565,7 @@ export default function NurtureRecoveryPanel() {
                     setNewStep({ ...newStep, action_type: v })
                   }
                 >
-                  <SelectTrigger>
+                  <SelectTrigger data-testid="nurture-step-action-type">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -561,7 +584,7 @@ export default function NurtureRecoveryPanel() {
                         setNewStep({ ...newStep, task_type: v })
                       }
                     >
-                      <SelectTrigger>
+                      <SelectTrigger data-testid="nurture-step-task-type">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -583,6 +606,7 @@ export default function NurtureRecoveryPanel() {
                       onChange={(e) =>
                         setNewStep({ ...newStep, subject: e.target.value })
                       }
+                      data-testid="nurture-step-subject"
                     />
                     <Label className="mt-2">Body (HTML, no PHI)</Label>
                     <Textarea
@@ -591,6 +615,7 @@ export default function NurtureRecoveryPanel() {
                         setNewStep({ ...newStep, body_html: e.target.value })
                       }
                       rows={3}
+                      data-testid="nurture-step-body"
                     />
                   </>
                 ) : null}
@@ -618,30 +643,80 @@ export default function NurtureRecoveryPanel() {
                   {sequences.map((s) => (
                     <div
                       key={s.id}
-                      className="flex items-center justify-between gap-2 rounded-lg border border-[#eee3ca] px-3 py-2"
+                      className="rounded-lg border border-[#eee3ca] px-3 py-2"
+                      data-testid="nurture-sequence-row"
                     >
-                      <div>
-                        <div className="text-sm font-medium text-[#3f3320]">
-                          {s.name}
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <div className="text-sm font-medium text-[#3f3320]">
+                            {s.name}
+                          </div>
+                          <div className="text-[11px] text-[#806837]">
+                            {s.slug} · {s.trigger_type}
+                          </div>
                         </div>
-                        <div className="text-[11px] text-[#806837]">
-                          {s.slug} · {s.trigger_type}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <StatusBadge status={s.status} />
-                        {s.status === "draft" ? (
+                        <div className="flex items-center gap-2">
+                          <StatusBadge status={s.status} />
                           <Button
                             type="button"
                             size="sm"
                             variant="outline"
-                            onClick={() => activateSequence(s.id)}
-                            disabled={busy}
+                            onClick={() => toggleSteps(s.id)}
+                            data-testid="nurture-view-steps"
                           >
-                            Activate
+                            {expandedSeqId === s.id ? "Hide" : "Steps"}
                           </Button>
-                        ) : null}
+                          {s.status === "draft" ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => activateSequence(s.id)}
+                              disabled={busy}
+                            >
+                              Activate
+                            </Button>
+                          ) : null}
+                        </div>
                       </div>
+                      {expandedSeqId === s.id ? (
+                        <div
+                          className="mt-2 border-t border-[#eee3ca] pt-2"
+                          data-testid="nurture-steps-list"
+                        >
+                          {(seqSteps[s.id] || []).length === 0 ? (
+                            <div className="text-[11px] text-[#806837]">
+                              No steps yet.
+                            </div>
+                          ) : (
+                            <ol className="grid gap-1">
+                              {(seqSteps[s.id] || []).map((st) => (
+                                <li
+                                  key={st.id}
+                                  className="flex items-center justify-between gap-2 text-[12px] text-[#3f3320]"
+                                  data-testid="nurture-step-item"
+                                >
+                                  <span>
+                                    <span className="font-medium">
+                                      #{st.position} {st.step_key}
+                                    </span>{" "}
+                                    <span className="text-[#806837]">
+                                      · {st.action_type}
+                                      {st.action_type === "send_email" &&
+                                      st.subject
+                                        ? ` · "${st.subject}"`
+                                        : ""}
+                                    </span>
+                                  </span>
+                                  <span className="text-[10px] text-[#806837]">
+                                    +{st.delay_minutes}m
+                                  </span>
+                                </li>
+                              ))}
+                            </ol>
+                          )}
+                        </div>
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -671,15 +746,24 @@ export default function NurtureRecoveryPanel() {
                       ))}
                   </SelectContent>
                 </Select>
-                <Label className="mt-2">Lead ID</Label>
-                <Input
+                <Label className="mt-2">Lead</Label>
+                <Select
                   value={enrollForm.lead_id}
-                  onChange={(e) =>
-                    setEnrollForm({ ...enrollForm, lead_id: e.target.value })
+                  onValueChange={(v) =>
+                    setEnrollForm({ ...enrollForm, lead_id: v })
                   }
-                  placeholder="marketing lead id"
-                  data-testid="nurture-enroll-lead"
-                />
+                >
+                  <SelectTrigger data-testid="nurture-enroll-lead">
+                    <SelectValue placeholder="Select a marketing lead" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {leads.map((l) => (
+                      <SelectItem key={l.id} value={l.id}>
+                        {l.marketing_subject_id} ({l.lead_status})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
                 <Button
                   type="button"
                   onClick={enroll}

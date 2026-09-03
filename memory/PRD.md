@@ -1790,4 +1790,20 @@ Tests: 32 unit + 5 HTTP (Phase 8A) green; Phase 6/7 regressions green
 (90 passed, 1 skipped). Phase 8B (`/events` appointment-recovery adapter) not
 yet started.
 
-_Last updated: Jul 2025 (Marketing OS Phase 8A · Nurture engine)_
+### Phase 8B — Appointment-recovery /events adapter
+- `POST /api/marketing-os/nurture/events` accepts a sanitized appointment
+  lifecycle signal (opaque `marketing_subject_id` + marketing dims only),
+  normalizes via `appointment_normalize` (reused, no duplication; rejects PHI
+  → 422), then deterministically (`services/nurture_events.classify_event`):
+  - `appointment_request` → enroll into active `appointment_requested` sequences
+  - `appointment_no_show` → enroll into active `no_show` sequences
+  - `appointment_cancelled` → enroll into active `appointment_cancelled` seqs
+  - `appointment_booked` / `appointment_completed` → SUPPRESS: stop active
+    recovery enrollments + cancel pending actions
+- Find-or-create marketing lead by opaque subject (marketing-safe fields only).
+- Idempotent: the active-enrollment partial-unique + action idempotency_key
+  mean duplicate event delivery creates no duplicate enrollment/actions.
+- No new tables/migration (reuses 8A). No new PHI/EMR FKs. No SMS. No AI.
+- Tests: full Phase 8A+8B + Phase 6/7 regression green (148 passed, 1 skipped).
+
+_Last updated: Jul 2025 (Marketing OS Phase 8A+8B · Nurture + Appointment Recovery)_

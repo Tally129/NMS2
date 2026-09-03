@@ -21,6 +21,10 @@ from deps import api, require_roles
 from postgres_db import AsyncSessionLocal
 from marketing_os.services.measurement import MarketingDataPolicyError
 from marketing_os.services import nurture as rules
+from marketing_os.services import nurture_events
+from marketing_os.services.appointment_normalize import (
+    normalize_appointment_signal,
+)
 from marketing_os.services.nurture import NurtureConfigError
 from marketing_os.services.nurture_dispatch import (
     email_hold_decision,
@@ -175,6 +179,27 @@ class TickRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     limit: Optional[int] = 100
+
+
+class AppointmentEventIngest(BaseModel):
+    """Marketing-safe appointment lifecycle signal (no PHI).
+
+    Only an opaque marketing_subject_id + non-clinical marketing dimensions
+    are accepted. Normalization + PHI screening happen server-side.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    marketing_subject_id: str
+    status: str
+    event_id: Optional[str] = None
+    service_category: Optional[str] = None
+    source: Optional[str] = None
+    medium: Optional[str] = None
+    campaign: Optional[str] = None
+    content: Optional[str] = None
+    term: Optional[str] = None
+    external_click_id: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -489,8 +514,93 @@ async def patch_step(sequence_id: str, step_id: str, payload: StepPatch,
 
 
 # --------------------------------------------------------------------------- #
-# Enrollment (manual)
+# Enrollment (manual + shared helper reused by /events)
 # --------------------------------------------------------------------------- #
+
+async def _enroll_lead_into_sequence(pg, *, sequence: dict, lead_map: dict,
+                                     actor_id, source: str,
+                                     event_meta: Optional[dict] = None
+                                     ) -> dict:
+    """Deterministic, idempotent enrollment of a lead into a sequence.
+
+    Reused by manual enroll and the appointment-recovery /events adapter.
+    Returns {"status": "enrolled"|"skipped", "reason": str|None,
+             "enrollment": dict|None}. Caller manages the transaction.
+    """
+    if sequence.get("status") != "active":
+        return {"status": "skipped", "reason": "sequence_not_active",
+                "enrollment": None}
+
+    if rules.should_stop(lead_map["lead_status"], sequence["stop_on_statuses"]):
+        return {"status": "skipped", "reason": "lead_non_nurturable",
+                "enrollment": None}
+
+    existing = await _fetch_one(
+        pg,
+        """SELECT * FROM marketing_nurture_enrollments
+           WHERE sequence_id = :sid AND lead_id = :lid AND status = 'active'""",
+        {"sid": sequence["id"], "lid": lead_map["id"]},
+    )
+    if existing:
+        # Idempotent: duplicate delivery must not create a second active
+        # enrollment.
+        return {"status": "skipped", "reason": "already_active",
+                "enrollment": _serialize(existing)}
+
+    step_rows = await pg.execute(
+        text("""
+            SELECT id, step_key, position, action_type, delay_minutes
+            FROM marketing_nurture_steps WHERE sequence_id = :sid
+        """),
+        {"sid": sequence["id"]},
+    )
+    steps = rules.ordered_steps(dict(r._mapping) for r in step_rows)
+    if not steps:
+        return {"status": "skipped", "reason": "no_steps", "enrollment": None}
+
+    enrolled_at = _now()
+    next_run_at = rules.scheduled_at_for(enrolled_at, steps[0])
+    enrollment_id = _new_id()
+    metadata = json.dumps({"source": source, **(event_meta or {})})
+
+    row = (await pg.execute(
+        text("""
+            INSERT INTO marketing_nurture_enrollments
+                (id, sequence_id, lead_id, marketing_subject_id, status,
+                 current_step_position, enrolled_at, next_run_at, enrolled_by,
+                 metadata, created_at, updated_at)
+            VALUES
+                (:id, :sid, :lid, :subject, 'active', 0, :enrolled_at,
+                 :next_run_at, :enrolled_by, CAST(:metadata AS jsonb),
+                 now(), now())
+            RETURNING *
+        """),
+        {
+            "id": enrollment_id,
+            "sid": sequence["id"],
+            "lid": lead_map["id"],
+            "subject": lead_map["marketing_subject_id"],
+            "enrolled_at": enrolled_at,
+            "next_run_at": next_run_at,
+            "enrolled_by": actor_id,
+            "metadata": metadata,
+        },
+    )).first()
+
+    await _log_activity(
+        pg,
+        lead_id=lead_map["id"],
+        activity_type="nurture_enrolled",
+        actor_id=actor_id,
+        summary=f"Enrolled in nurture sequence: {sequence['name']}",
+        details={
+            "sequence_id": sequence["id"],
+            "enrollment_id": enrollment_id,
+            "source": source,
+        },
+    )
+    return {"status": "enrolled", "reason": None, "enrollment": _serialize(row)}
+
 
 @api.post("/marketing-os/nurture/enroll", status_code=201)
 async def enroll_lead(payload: EnrollCreate,
@@ -520,88 +630,33 @@ async def enroll_lead(payload: EnrollCreate,
             )
             if not lead:
                 raise HTTPException(status_code=404, detail="lead not found")
-            lead_map = dict(lead._mapping)
 
-            if rules.should_stop(
-                lead_map["lead_status"], sequence["stop_on_statuses"]
-            ):
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "lead is in a non-nurturable status: "
-                        f"{lead_map['lead_status']}"
-                    ),
-                )
-
-            existing = await _fetch_one(
+            result = await _enroll_lead_into_sequence(
                 pg,
-                """SELECT id FROM marketing_nurture_enrollments
-                   WHERE sequence_id = :sid AND lead_id = :lid
-                     AND status = 'active'""",
-                {"sid": payload.sequence_id, "lid": payload.lead_id},
-            )
-            if existing:
-                raise HTTPException(
-                    status_code=409,
-                    detail="lead already actively enrolled in this sequence",
-                )
-
-            step_rows = await pg.execute(
-                text("""
-                    SELECT id, step_key, position, action_type, delay_minutes
-                    FROM marketing_nurture_steps
-                    WHERE sequence_id = :sid
-                """),
-                {"sid": payload.sequence_id},
-            )
-            steps = rules.ordered_steps(
-                dict(r._mapping) for r in step_rows
-            )
-            if not steps:
-                raise HTTPException(
-                    status_code=409, detail="sequence has no steps"
-                )
-
-            enrolled_at = _now()
-            next_run_at = rules.scheduled_at_for(enrolled_at, steps[0])
-            enrollment_id = _new_id()
-
-            row = (await pg.execute(
-                text("""
-                    INSERT INTO marketing_nurture_enrollments
-                        (id, sequence_id, lead_id, marketing_subject_id,
-                         status, current_step_position, enrolled_at,
-                         next_run_at, enrolled_by, metadata,
-                         created_at, updated_at)
-                    VALUES
-                        (:id, :sid, :lid, :subject, 'active', 0,
-                         :enrolled_at, :next_run_at, :enrolled_by,
-                         '{}'::jsonb, now(), now())
-                    RETURNING *
-                """),
-                {
-                    "id": enrollment_id,
-                    "sid": payload.sequence_id,
-                    "lid": payload.lead_id,
-                    "subject": lead_map["marketing_subject_id"],
-                    "enrolled_at": enrolled_at,
-                    "next_run_at": next_run_at,
-                    "enrolled_by": _uid(user),
-                },
-            )).first()
-
-            await _log_activity(
-                pg,
-                lead_id=payload.lead_id,
-                activity_type="nurture_enrolled",
+                sequence=sequence,
+                lead_map=dict(lead._mapping),
                 actor_id=_uid(user),
-                summary=f"Enrolled in nurture sequence: {sequence['name']}",
-                details={
-                    "sequence_id": payload.sequence_id,
-                    "enrollment_id": enrollment_id,
-                },
+                source="manual",
             )
-    return _serialize(row)
+            if result["status"] == "skipped":
+                reason_map = {
+                    "lead_non_nurturable": (
+                        409,
+                        "lead is in a non-nurturable status: "
+                        f"{dict(lead._mapping)['lead_status']}",
+                    ),
+                    "already_active": (
+                        409,
+                        "lead already actively enrolled in this sequence",
+                    ),
+                    "no_steps": (409, "sequence has no steps"),
+                    "sequence_not_active": (409, "sequence is not active"),
+                }
+                code, detail = reason_map.get(
+                    result["reason"], (409, result["reason"])
+                )
+                raise HTTPException(status_code=code, detail=detail)
+    return result["enrollment"]
 
 
 @api.get("/marketing-os/nurture/enrollments")
@@ -697,6 +752,193 @@ async def patch_enrollment(enrollment_id: str, payload: EnrollmentPatch,
                 details={"enrollment_id": enrollment_id, "reason": reason},
             )
     return _serialize(row)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8B — Appointment-recovery event adapter (/events)
+# --------------------------------------------------------------------------- #
+
+async def _find_or_create_lead(pg, *, normalized: dict, actor_id) -> dict:
+    """Find a marketing lead by opaque subject, or create a minimal one.
+
+    Uses only marketing-safe fields from the already-normalized signal.
+    Never stores PHI. Returns a lead map (id, marketing_subject_id,
+    lead_status).
+    """
+    subject_id = normalized["marketing_subject_id"]
+    existing = await _fetch_one(
+        pg,
+        """SELECT id, marketing_subject_id, lead_status
+           FROM marketing_leads WHERE marketing_subject_id = :s""",
+        {"s": subject_id},
+    )
+    if existing:
+        return dict(existing._mapping)
+
+    props = normalized.get("properties") or {}
+    lead_id = _new_id()
+    row = (await pg.execute(
+        text("""
+            INSERT INTO marketing_leads
+                (id, marketing_subject_id, source, medium, campaign_name,
+                 service_interest, lead_status, qualification_status,
+                 lead_created_at, last_activity_at)
+            VALUES
+                (:id, :s, :source, :medium, :campaign, :service_interest,
+                 'new', 'unqualified', now(), now())
+            RETURNING id, marketing_subject_id, lead_status
+        """),
+        {
+            "id": lead_id,
+            "s": subject_id,
+            "source": normalized.get("source"),
+            "medium": normalized.get("medium"),
+            "campaign": normalized.get("campaign"),
+            "service_interest": props.get("service_interest"),
+        },
+    )).first()
+    await _log_activity(
+        pg,
+        lead_id=lead_id,
+        activity_type="lead_created",
+        actor_id=actor_id,
+        summary="Lead created from appointment event",
+        details={"source": normalized.get("source")},
+    )
+    return dict(row._mapping)
+
+
+async def _suppress_active_recovery(pg, *, lead_id: str, reason: str,
+                                    actor_id) -> int:
+    """Stop active enrollments + cancel pending actions for a lead."""
+    rows = await pg.execute(
+        text("""
+            UPDATE marketing_nurture_enrollments
+            SET status = 'stopped', stop_reason = :reason,
+                next_run_at = NULL, completed_at = now(), updated_at = now()
+            WHERE lead_id = :lid AND status = 'active'
+            RETURNING id
+        """),
+        {"reason": reason, "lid": lead_id},
+    )
+    stopped = [r._mapping["id"] for r in rows]
+    if stopped:
+        await pg.execute(
+            text("""
+                UPDATE marketing_nurture_actions
+                SET status = 'cancelled', updated_at = now()
+                WHERE lead_id = :lid
+                  AND status IN ('pending_approval', 'scheduled')
+            """),
+            {"lid": lead_id},
+        )
+        await _log_activity(
+            pg,
+            lead_id=lead_id,
+            activity_type="nurture_recovery_suppressed",
+            actor_id=actor_id,
+            summary="Recovery suppressed by appointment event",
+            details={"reason": reason, "stopped_enrollments": len(stopped)},
+        )
+    return len(stopped)
+
+
+@api.post("/marketing-os/nurture/events")
+async def ingest_appointment_event(
+    payload: AppointmentEventIngest,
+    user=Depends(require_roles(*MARKETING_ROLES)),
+):
+    """Deterministic appointment-recovery adapter.
+
+    Accepts a sanitized appointment lifecycle signal, normalizes it (rejecting
+    PHI), then deterministically enrolls into eligible recovery sequences or
+    suppresses active recovery. Idempotent: duplicate delivery never creates a
+    duplicate active enrollment or duplicate actions. Never sends email.
+    """
+    actor_id = _uid(user)
+
+    # Normalize + PHI screen (reuses appointment_normalize; no duplication).
+    signal = payload.model_dump(exclude_none=True)
+    signal.pop("event_id", None)
+    try:
+        normalized = normalize_appointment_signal(signal)
+    except MarketingDataPolicyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    event_type = normalized["event_type"]
+    decision, trigger_type = nurture_events.classify_event(event_type)
+
+    result: dict[str, Any] = {
+        "event_type": event_type,
+        "decision": decision,
+        "marketing_subject_id": normalized["marketing_subject_id"],
+        "enrollments": [],
+        "skipped": [],
+        "stopped_enrollments": 0,
+        "safety": SAFETY_STATE,
+    }
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            lead_map = await _find_or_create_lead(
+                pg, normalized=normalized, actor_id=actor_id
+            )
+            result["lead_id"] = lead_map["id"]
+
+            if decision == nurture_events.DECISION_SUPPRESS:
+                result["stopped_enrollments"] = await _suppress_active_recovery(
+                    pg,
+                    lead_id=lead_map["id"],
+                    reason=f"event:{event_type}",
+                    actor_id=actor_id,
+                )
+                return result
+
+            if decision == nurture_events.DECISION_IGNORE:
+                return result
+
+            # decision == enroll: find active sequences for this trigger.
+            seq_rows = await pg.execute(
+                text("""
+                    SELECT * FROM marketing_nurture_sequences
+                    WHERE status = 'active' AND trigger_type = :tt
+                    ORDER BY created_at ASC
+                """),
+                {"tt": trigger_type},
+            )
+            sequences = [_serialize(r) for r in seq_rows]
+            if not sequences:
+                result["skipped"].append(
+                    {"reason": "no_active_sequence_for_trigger",
+                     "trigger_type": trigger_type}
+                )
+                return result
+
+            event_meta = {
+                "trigger_type": trigger_type,
+                "event_type": event_type,
+            }
+            if payload.event_id:
+                event_meta["event_id"] = str(payload.event_id)[:120]
+
+            for sequence in sequences:
+                outcome = await _enroll_lead_into_sequence(
+                    pg,
+                    sequence=sequence,
+                    lead_map=lead_map,
+                    actor_id=actor_id,
+                    source=f"appointment_event:{event_type}",
+                    event_meta=event_meta,
+                )
+                if outcome["status"] == "enrolled":
+                    result["enrollments"].append(outcome["enrollment"])
+                else:
+                    result["skipped"].append(
+                        {"sequence_id": sequence["id"],
+                         "reason": outcome["reason"]}
+                    )
+    return result
+
 
 
 # --------------------------------------------------------------------------- #
