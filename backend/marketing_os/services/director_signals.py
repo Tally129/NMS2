@@ -126,11 +126,17 @@ def paid_media_signals(
         ).lower()
 
         spend = _number(row.get("spend"))
-        conversions = (
-            _number(row.get("conversions"))
-            or _number(row.get("leads"))
-            or 0.0
+        conversions = _number(
+            row.get("conversions")
         )
+
+        if conversions is None:
+            conversions = _number(
+                row.get("leads")
+            )
+
+        if conversions is None:
+            conversions = 0.0
         roas = _number(row.get("roas"))
         ctr = _number(row.get("ctr"))
 
@@ -299,8 +305,12 @@ def funnel_signals(
     request_rate = _number(funnel.get("appointment_request_rate"))
     booking_rate = _number(
         funnel.get("booking_rate")
-        or funnel.get("appointment_booking_rate")
     )
+
+    if booking_rate is None:
+        booking_rate = _number(
+            funnel.get("appointment_booking_rate")
+        )
     no_show_rate = _number(funnel.get("no_show_rate"))
 
     if request_rate is not None and request_rate < 0.10:

@@ -328,7 +328,7 @@ export default function ExecutiveMarketingCommandCenter() {
             />
 
             <KpiCard
-              label="CAC / CPA"
+              label="CPA"
               value={money(kpis.cac_cpa)}
               icon={Target}
             />

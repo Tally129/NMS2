@@ -173,3 +173,49 @@ def test_director_safety_envelope():
         "human_approval_required": True,
         "phi_used": False,
     }
+
+
+def test_paid_zero_conversion_is_not_replaced_by_leads():
+    from marketing_os.services.director_signals import (
+        paid_media_signals,
+    )
+
+    signals = paid_media_signals([
+        {
+            "provider": "google_ads",
+            "spend": 100,
+            "conversions": 0,
+            "leads": 10,
+        }
+    ])
+
+    signal = next(
+        item
+        for item in signals
+        if item["signal_key"]
+        == "paid_no_conversion:google_ads"
+    )
+
+    assert signal["evidence"]["conversions"] == 0
+    assert signal["evidence"]["spend"] == 100
+
+
+def test_zero_booking_rate_is_not_replaced_by_secondary_rate():
+    from marketing_os.services.director_signals import (
+        funnel_signals,
+    )
+
+    signals = funnel_signals({
+        "booking_rate": 0,
+        "appointment_booking_rate": 0.8,
+    })
+
+    signal = next(
+        item
+        for item in signals
+        if item["signal_key"]
+        == "conversion:low_booking_rate"
+    )
+
+    assert signal["evidence"]["booking_rate"] == 0
+    assert signal["evidence"]["threshold"] == 0.50

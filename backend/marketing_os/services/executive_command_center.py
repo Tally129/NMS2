@@ -365,18 +365,30 @@ def build_channel_health(
 def build_pipeline_health(
     lead_operations: Mapping[str, Any],
 ) -> dict[str, Any]:
+    overdue = _integer(
+        lead_operations.get("overdue_leads")
+    )
+
+    if overdue is None:
+        overdue = _integer(
+            lead_operations.get("overdue")
+        )
+
+    no_show = _integer(
+        lead_operations.get("no_show")
+    )
+
+    if no_show is None:
+        no_show = _integer(
+            lead_operations.get("no_shows")
+        )
+
     return {
         "needs_attention": _integer(
             lead_operations.get("needs_attention")
         ),
-        "overdue_followups": _integer(
-            lead_operations.get("overdue_leads")
-            or lead_operations.get("overdue")
-        ),
-        "no_show_recovery": _integer(
-            lead_operations.get("no_show")
-            or lead_operations.get("no_shows")
-        ),
+        "overdue_followups": overdue,
+        "no_show_recovery": no_show,
     }
 
 

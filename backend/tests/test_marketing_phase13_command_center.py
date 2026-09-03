@@ -159,3 +159,17 @@ def test_command_center_is_read_only_and_advisory():
         "external_execution_allowed": False,
         "phi_used": False,
     }
+
+
+def test_pipeline_explicit_zero_does_not_fallback():
+    result = build_pipeline_health({
+        "needs_attention": 0,
+        "overdue_leads": 0,
+        "overdue": 9,
+        "no_show": 0,
+        "no_shows": 8,
+    })
+
+    assert result["needs_attention"] == 0
+    assert result["overdue_followups"] == 0
+    assert result["no_show_recovery"] == 0

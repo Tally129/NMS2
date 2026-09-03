@@ -13,7 +13,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
-from postgres_db import Base
+from .base import Base
 
 
 class MarketingExecutionRequest(Base):
@@ -30,7 +30,6 @@ class MarketingExecutionRequest(Base):
     idempotency_key = Column(
         String(255),
         nullable=False,
-        unique=True,
     )
 
     request_payload = Column(
