@@ -122,4 +122,11 @@ from .marketing_phase10 import (  # noqa: F401
     MarketingLocalListingSnapshot,
     MarketingLocalOpportunity,
 )
+from .marketing_phase11 import (  # noqa: F401
+    MarketingContentTopic,
+    MarketingContentBrief,
+    MarketingContentDraft,
+    MarketingSocialPlan,
+    MarketingContentCalendarItem,
+)
 

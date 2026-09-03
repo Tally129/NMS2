@@ -3,6 +3,17 @@
 ## Original Problem Statement
 HIPAA-aligned wellness EMR for `natmedsol.com` (Natural Medical Solutions Wellness Center). Wellness office, **not** a medical practice. Single-tenant private app, not SaaS. Aesthetic adapted from medspa-concierge to NatMedSol's deep-green / parchment / gold palette.
 
+## Marketing OS Phase 11 — Content + Social Intelligence (2026-06 · draft/planning only) ⭐ NEW
+- **Scope**: SEO topic prioritization, content briefs, deterministic draft scaffolds, social plans, and a planning-only content calendar. Advisory only — NO autonomous publishing, NO social/blog/email/SMS writes, NO LLM (deterministic scaffolds), NO PHI, NO patient/client/clinical FKs. Human approval required for any future publish capability.
+- **Migration**: new Alembic head `b1c2d3e4f5a6` (down_revision `a0b1c2d3e4f5`) creates 5 tables: `marketing_content_topics`, `marketing_content_briefs`, `marketing_content_drafts`, `marketing_social_plans`, `marketing_content_calendar_items`. FKs only to `auth_users`, `marketing_offers`, `marketing_funnels`, `marketing_content_topics/briefs/social_plans` (self).
+- **Models**: `postgres_models/marketing_phase11.py` (registered in barrel `__init__.py`).
+- **Service (pure/deterministic)**: `marketing_os/services/content_intelligence.py` — SEO opportunity scoring, funnel/conversion relevance, freshness, composite topic priority, and template draft scaffolds (blog vs short-form vs social). No DB/network/LLM.
+- **Router**: `marketing_os/routers/content.py` (registered in `core.py`). Endpoints under `/api/marketing-os/content/`: `GET/POST topics`, `PATCH topics/{id}`, `GET/POST briefs`, `GET/POST briefs/{id}/drafts`, `GET/POST social-plans`, `GET/POST calendar`, `GET overview`. Every response carries a `safety` block (planning_only, automatic_publishing=false, ai_llm_used=false, phi_used=false, human_approval_required=true). `planned_publish_at` is planning metadata only — no scheduler/dispatcher.
+- **Frontend**: `pages/portal/ContentSocialPanel.jsx` mounted in `MarketingCommandCenter.jsx` (mirrors ReputationLocalPanel styling; data-testids present). Create topics/briefs, generate deterministic drafts, view calendar + counts.
+- **Tests (focused, all pass)**: `tests/test_marketing_content_phase11.py` (7 unit) + `tests/test_marketing_content_phase11_http.py` (5 HTTP) = 12/12. Backend healthy; frontend compiles clean. No external writes, no PHI, no deploy.
+- **Roles**: admin/practitioner only (`require_roles`). Test admin: `admin@natmedsol.local / Admin!2345`.
+
+
 ## Phase 3.3 / 3.4 — Clinical + Messaging Runtime Cutover (2026-07-31) ⭐ NEW
 - **Foundation shipped in commit `0965f23`** (see below); this iteration completes the highest-impact runtime cutovers.
 - **Hash chain preserved**: `emr_visit_notes.prev_hash` + `note_hash` now populated on every `POST /notes/{id}/finalize`. `repositories/clinical_and_messaging.py::finalize_note()` computes SHA-256 over canonical JSON, references the previous finalized note's hash for the same practitioner (or `GENESIS` for first-ever). Verified end-to-end by `test_session3_3_clinical.py::test_note_hash_chain_lands_in_pg` (14/14 smoke tests pass overall).
