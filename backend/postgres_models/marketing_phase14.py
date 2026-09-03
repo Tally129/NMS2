@@ -156,6 +156,14 @@ class MarketingExecutionApproval(Base):
 class MarketingExecutionAttempt(Base):
     __tablename__ = "marketing_execution_attempts"
 
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_request_id",
+            "attempt_number",
+            name="uq_marketing_execution_attempt_request_number",
+        ),
+    )
+
     id = Column(String, primary_key=True)
 
     execution_request_id = Column(

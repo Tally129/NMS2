@@ -145,7 +145,9 @@ def evaluate_execution_policy(
     if provider_dry_run_only and not dry_run:
         reasons.append("provider_dry_run_only")
 
-    if provider_human_approval_required and not approved:
+    # Global Marketing OS invariant:
+    # provider policy may never bypass human approval.
+    if not approved:
         reasons.append("human_approval_required")
 
     allowed_actions = {

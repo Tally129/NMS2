@@ -213,3 +213,23 @@ def test_adapter_execute_is_hard_disabled():
         match="live_execution_not_enabled",
     ):
         asyncio.run(call())
+
+
+def test_provider_policy_cannot_bypass_human_approval():
+    policy = evaluate_execution_policy(
+        provider="google_ads",
+        action_type="campaign.pause",
+        request_status="pending_approval",
+        dry_run=True,
+        provider_enabled=True,
+        provider_dry_run_only=True,
+        provider_human_approval_required=False,
+        approved=False,
+        provider_allowed_actions=[
+            "campaign.pause",
+        ],
+    )
+
+    assert policy["allowed"] is False
+    assert "human_approval_required" in policy["reasons"]
+    assert policy["human_approval_required"] is True

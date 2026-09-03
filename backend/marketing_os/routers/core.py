@@ -13,6 +13,7 @@ External advertising writes remain disabled.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
@@ -2151,6 +2152,8 @@ async def marketing_execution_request_dry_run(
 ):
     _execution_actor_id(user)
 
+    dry_run_exception = None
+
     async with AsyncSessionLocal() as pg:
         async with pg.begin():
             row = await _get_execution_request(
@@ -2196,6 +2199,21 @@ async def marketing_execution_request_dry_run(
                     "human_approval_required": True,
                     "allowed_actions": [],
                 }
+
+            # Serialize attempt-number allocation for this request.
+            # The parent-row lock prevents concurrent dry runs from
+            # selecting the same next attempt number.
+            await pg.execute(
+                text("""
+                    SELECT id
+                    FROM marketing_execution_requests
+                    WHERE id = :request_id
+                    FOR UPDATE
+                """),
+                {
+                    "request_id": request_id,
+                },
+            )
 
             attempt_count = await pg.execute(
                 text("""
@@ -2316,10 +2334,15 @@ async def marketing_execution_request_dry_run(
                     },
                 )
 
-                raise HTTPException(
-                    status_code=500,
-                    detail="Dry-run validation failed",
-                ) from exc
+                # Do not raise inside pg.begin(); doing so would roll
+                # back the failed-attempt audit update above.
+                dry_run_exception = exc
+
+    if dry_run_exception is not None:
+        raise HTTPException(
+            status_code=500,
+            detail="Dry-run validation failed",
+        ) from dry_run_exception
 
     return {
         "request_id": request_id,
