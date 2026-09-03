@@ -20,6 +20,7 @@ import ReputationLocalPanel from "./ReputationLocalPanel";
 import ContentSocialPanel from "./ContentSocialPanel";
 import AIMarketingDirectorPanel from "./AIMarketingDirectorPanel";
 import ExecutiveMarketingCommandCenter from "./ExecutiveMarketingCommandCenter";
+import MarketingExecutionQueue from "./MarketingExecutionQueue";
 
 import { Button } from "../../components/ui/button";
 
@@ -902,6 +903,7 @@ export default function MarketingCommandCenter() {
         <ReputationLocalPanel />
         <ContentSocialPanel />
         <ExecutiveMarketingCommandCenter />
+        <MarketingExecutionQueue />
         <AIMarketingDirectorPanel />
       </div>
 
