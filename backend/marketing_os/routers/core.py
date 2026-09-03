@@ -31,6 +31,17 @@ from marketing_os.services.director_signals import build_cross_phase_signals
 from marketing_os.services.director_persistence import persist_director_snapshot
 from marketing_os.services.director_ai import build_director_summary
 from marketing_os.services.executive_command_center import build_executive_command_center
+from marketing_os.services.execution_policy import (
+    ALLOWED_ACTIONS,
+    SUPPORTED_PROVIDERS,
+    canonical_provider,
+)
+from marketing_os.services.execution_queue import (
+    decide_request,
+    perform_dry_run,
+    prepare_execution_request,
+    submit_for_approval,
+)
 from marketing_os.services.lead_opportunities import derive_lead_opportunities
 from marketing_os.services.paid_media import build_paid_media_overview
 from marketing_os.services.journey import (
@@ -76,6 +87,25 @@ def serialize_row(row) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
+
+class ExecutionRequestCreate(BaseModel):
+    provider: str = Field(..., min_length=2, max_length=64)
+    action_type: str = Field(..., min_length=3, max_length=100)
+    target_type: str = Field(..., min_length=1, max_length=100)
+    target_id: Optional[str] = Field(default=None, max_length=255)
+    payload: dict = Field(default_factory=dict)
+    dry_run: bool = True
+
+
+class ExecutionDecision(BaseModel):
+    decision: str = Field(..., min_length=6, max_length=10)
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+class ExecutionPolicyUpdate(BaseModel):
+    enabled: bool
+    allowed_actions: list[str] = Field(default_factory=list)
+
 
 class GoalCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=200)
@@ -1379,3 +1409,923 @@ from marketing_os.routers import local_growth as _marketing_local_growth_routes 
 # Phase 11 — content + social intelligence (draft/planning only).
 from marketing_os.routers import content as _marketing_content_routes  # noqa: F401,E402
 
+
+
+
+# ---------------------------------------------------------------------------
+# Phase 14 — Controlled provider execution
+#
+# IMPORTANT:
+# - all provider adapters remain dry-run only
+# - no external provider writes occur here
+# - human approval is mandatory
+# - provider policy must explicitly enable dry runs + action type
+# ---------------------------------------------------------------------------
+
+
+def _execution_actor_id(user: dict) -> str:
+    value = user_id(user)
+
+    if not value:
+        raise HTTPException(
+            status_code=403,
+            detail="Authenticated user id required",
+        )
+
+    return value
+
+
+def _phase14_payload_safe(value: Any) -> bool:
+    """Conservative recursive PHI/credential guard."""
+
+    prohibited = {
+        "patient",
+        "patient_id",
+        "patient_name",
+        "medical_record",
+        "medical_record_number",
+        "mrn",
+        "diagnosis",
+        "diagnoses",
+        "medication",
+        "medications",
+        "prescription",
+        "dob",
+        "date_of_birth",
+        "ssn",
+        "social_security_number",
+        "insurance_id",
+        "insurance_member_id",
+        "clinical",
+        "clinical_note",
+        "soap_note",
+        "password",
+        "secret",
+        "access_token",
+        "refresh_token",
+        "api_key",
+        "private_key",
+    }
+
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized = str(key or "").strip().lower()
+
+            if normalized in prohibited:
+                return False
+
+            if not _phase14_payload_safe(child):
+                return False
+
+    elif isinstance(value, list):
+        for child in value:
+            if not _phase14_payload_safe(child):
+                return False
+
+    return True
+
+
+async def _get_execution_request(
+    pg,
+    request_id: str,
+):
+    result = await pg.execute(
+        text("""
+            SELECT
+                id,
+                provider,
+                action_type,
+                target_type,
+                target_id,
+                idempotency_key,
+                request_payload,
+                dry_run,
+                status,
+                human_approval_required,
+                approved_by,
+                approved_at,
+                executed_by,
+                executed_at,
+                created_by,
+                failure_code,
+                failure_message,
+                created_at,
+                updated_at
+            FROM marketing_execution_requests
+            WHERE id = :request_id
+            LIMIT 1
+        """),
+        {
+            "request_id": request_id,
+        },
+    )
+
+    return result.first()
+
+
+async def _get_execution_policy(
+    pg,
+    provider: str,
+):
+    result = await pg.execute(
+        text("""
+            SELECT
+                id,
+                provider,
+                enabled,
+                dry_run_only,
+                human_approval_required,
+                allowed_actions,
+                created_by,
+                created_at,
+                updated_at
+            FROM marketing_provider_execution_policies
+            WHERE provider = :provider
+            LIMIT 1
+        """),
+        {
+            "provider": provider,
+        },
+    )
+
+    return result.first()
+
+
+@api.get("/marketing-os/execution/providers")
+async def marketing_execution_providers(
+    user=Depends(require_roles(*MARKETING_ROLES)),
+):
+    return {
+        "providers": sorted(SUPPORTED_PROVIDERS),
+        "supported_actions": sorted(ALLOWED_ACTIONS),
+        "live_execution_enabled": False,
+        "dry_run_only": True,
+        "human_approval_required": True,
+    }
+
+
+@api.get("/marketing-os/execution/policies")
+async def marketing_execution_policies(
+    user=Depends(require_roles(*MARKETING_ROLES)),
+):
+    async with AsyncSessionLocal() as pg:
+        result = await pg.execute(
+            text("""
+                SELECT
+                    id,
+                    provider,
+                    enabled,
+                    dry_run_only,
+                    human_approval_required,
+                    allowed_actions,
+                    created_by,
+                    created_at,
+                    updated_at
+                FROM marketing_provider_execution_policies
+                ORDER BY provider ASC
+            """)
+        )
+
+        rows = [
+            serialize_row(row)
+            for row in result.fetchall()
+        ]
+
+    return {
+        "items": rows,
+        "live_execution_enabled": False,
+    }
+
+
+@api.put("/marketing-os/execution/policies/{provider}")
+async def marketing_execution_policy_update(
+    provider: str,
+    body: ExecutionPolicyUpdate,
+    user=Depends(require_roles("admin")),
+):
+    actor = _execution_actor_id(user)
+    provider = canonical_provider(provider)
+
+    if provider not in SUPPORTED_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported marketing provider",
+        )
+
+    normalized_actions = []
+
+    for action in body.allowed_actions:
+        value = str(action or "").strip().lower()
+
+        if value not in ALLOWED_ACTIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported action: {value}",
+            )
+
+        if value not in normalized_actions:
+            normalized_actions.append(value)
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            existing = await _get_execution_policy(
+                pg,
+                provider,
+            )
+
+            if existing:
+                await pg.execute(
+                    text("""
+                        UPDATE marketing_provider_execution_policies
+                        SET
+                            enabled = :enabled,
+                            dry_run_only = true,
+                            human_approval_required = true,
+                            allowed_actions =
+                                CAST(:allowed_actions AS jsonb),
+                            updated_at = now()
+                        WHERE provider = :provider
+                    """),
+                    {
+                        "provider": provider,
+                        "enabled": bool(body.enabled),
+                        "allowed_actions": json.dumps(
+                            normalized_actions
+                        ),
+                    },
+                )
+
+            else:
+                await pg.execute(
+                    text("""
+                        INSERT INTO marketing_provider_execution_policies (
+                            id,
+                            provider,
+                            enabled,
+                            dry_run_only,
+                            human_approval_required,
+                            allowed_actions,
+                            created_by
+                        )
+                        VALUES (
+                            :id,
+                            :provider,
+                            :enabled,
+                            true,
+                            true,
+                            CAST(:allowed_actions AS jsonb),
+                            :created_by
+                        )
+                    """),
+                    {
+                        "id": new_marketing_id(),
+                        "provider": provider,
+                        "enabled": bool(body.enabled),
+                        "allowed_actions": json.dumps(
+                            normalized_actions
+                        ),
+                        "created_by": actor,
+                    },
+                )
+
+    return {
+        "provider": provider,
+        "enabled": bool(body.enabled),
+        "dry_run_only": True,
+        "human_approval_required": True,
+        "allowed_actions": normalized_actions,
+        "live_execution_enabled": False,
+    }
+
+
+@api.get("/marketing-os/execution/requests")
+async def marketing_execution_requests(
+    status: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    user=Depends(require_roles(*MARKETING_ROLES)),
+):
+    params = {
+        "limit": limit,
+    }
+
+    where = ""
+
+    if status:
+        where = "WHERE status = :status"
+        params["status"] = str(status).strip().lower()
+
+    async with AsyncSessionLocal() as pg:
+        result = await pg.execute(
+            text(f"""
+                SELECT
+                    id,
+                    provider,
+                    action_type,
+                    target_type,
+                    target_id,
+                    idempotency_key,
+                    request_payload,
+                    dry_run,
+                    status,
+                    human_approval_required,
+                    approved_by,
+                    approved_at,
+                    executed_by,
+                    executed_at,
+                    created_by,
+                    failure_code,
+                    failure_message,
+                    created_at,
+                    updated_at
+                FROM marketing_execution_requests
+                {where}
+                ORDER BY created_at DESC
+                LIMIT :limit
+            """),
+            params,
+        )
+
+        rows = [
+            serialize_row(row)
+            for row in result.fetchall()
+        ]
+
+    return {
+        "items": rows,
+        "count": len(rows),
+        "live_execution_enabled": False,
+    }
+
+
+@api.post(
+    "/marketing-os/execution/requests",
+    status_code=201,
+)
+async def marketing_execution_request_create(
+    body: ExecutionRequestCreate,
+    user=Depends(require_roles(*MARKETING_ROLES)),
+):
+    actor = _execution_actor_id(user)
+
+    if body.dry_run is not True:
+        raise HTTPException(
+            status_code=400,
+            detail="Phase 14 supports dry-run requests only",
+        )
+
+    if not _phase14_payload_safe(body.payload):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Execution payload contains prohibited "
+                "PHI, clinical, or credential fields"
+            ),
+        )
+
+    prepared = prepare_execution_request(
+        provider=body.provider,
+        action_type=body.action_type,
+        target_type=body.target_type,
+        target_id=body.target_id,
+        payload=body.payload,
+        dry_run=True,
+    )
+
+    if not prepared.get("valid"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Invalid execution request",
+                "errors": prepared.get("errors") or [],
+            },
+        )
+
+    request = prepared["request"]
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            duplicate = await pg.execute(
+                text("""
+                    SELECT
+                        id,
+                        provider,
+                        action_type,
+                        target_type,
+                        target_id,
+                        idempotency_key,
+                        request_payload,
+                        dry_run,
+                        status,
+                        human_approval_required,
+                        approved_by,
+                        approved_at,
+                        executed_by,
+                        executed_at,
+                        created_by,
+                        failure_code,
+                        failure_message,
+                        created_at,
+                        updated_at
+                    FROM marketing_execution_requests
+                    WHERE idempotency_key = :idempotency_key
+                    LIMIT 1
+                """),
+                {
+                    "idempotency_key":
+                        request["idempotency_key"],
+                },
+            )
+
+            duplicate_row = duplicate.first()
+
+            if duplicate_row:
+                result = serialize_row(duplicate_row)
+                result["idempotent_replay"] = True
+                result["live_execution_enabled"] = False
+                return result
+
+            await pg.execute(
+                text("""
+                    INSERT INTO marketing_execution_requests (
+                        id,
+                        provider,
+                        action_type,
+                        target_type,
+                        target_id,
+                        idempotency_key,
+                        request_payload,
+                        dry_run,
+                        status,
+                        human_approval_required,
+                        created_by
+                    )
+                    VALUES (
+                        :id,
+                        :provider,
+                        :action_type,
+                        :target_type,
+                        :target_id,
+                        :idempotency_key,
+                        CAST(:request_payload AS jsonb),
+                        true,
+                        'draft',
+                        true,
+                        :created_by
+                    )
+                """),
+                {
+                    "id": request["id"],
+                    "provider": request["provider"],
+                    "action_type": request["action_type"],
+                    "target_type": request["target_type"],
+                    "target_id": request["target_id"],
+                    "idempotency_key":
+                        request["idempotency_key"],
+                    "request_payload": json.dumps(
+                        request["request_payload"]
+                    ),
+                    "created_by": actor,
+                },
+            )
+
+    return {
+        **request,
+        "created_by": actor,
+        "idempotent_replay": False,
+        "live_execution_enabled": False,
+    }
+
+
+@api.post(
+    "/marketing-os/execution/requests/{request_id}/submit"
+)
+async def marketing_execution_request_submit(
+    request_id: str,
+    user=Depends(require_roles(*MARKETING_ROLES)),
+):
+    _execution_actor_id(user)
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            row = await _get_execution_request(
+                pg,
+                request_id,
+            )
+
+            if not row:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Execution request not found",
+                )
+
+            current = serialize_row(row)
+
+            try:
+                updated = submit_for_approval(current)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail=str(exc),
+                ) from exc
+
+            await pg.execute(
+                text("""
+                    UPDATE marketing_execution_requests
+                    SET
+                        status = :status,
+                        updated_at = now()
+                    WHERE id = :request_id
+                """),
+                {
+                    "status": updated["status"],
+                    "request_id": request_id,
+                },
+            )
+
+    return {
+        "id": request_id,
+        "status": updated["status"],
+        "human_approval_required": True,
+        "live_execution_enabled": False,
+    }
+
+
+@api.post(
+    "/marketing-os/execution/requests/{request_id}/decision"
+)
+async def marketing_execution_request_decision(
+    request_id: str,
+    body: ExecutionDecision,
+    user=Depends(require_roles("admin")),
+):
+    actor = _execution_actor_id(user)
+    decision = str(body.decision or "").strip().lower()
+
+    if decision not in {"approve", "reject"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Decision must be approve or reject",
+        )
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            row = await _get_execution_request(
+                pg,
+                request_id,
+            )
+
+            if not row:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Execution request not found",
+                )
+
+            current = serialize_row(row)
+
+            try:
+                updated = decide_request(
+                    current,
+                    decision=decision,
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail=str(exc),
+                ) from exc
+
+            await pg.execute(
+                text("""
+                    INSERT INTO marketing_execution_approvals (
+                        id,
+                        execution_request_id,
+                        decision,
+                        reason,
+                        decided_by
+                    )
+                    VALUES (
+                        :id,
+                        :execution_request_id,
+                        :decision,
+                        :reason,
+                        :decided_by
+                    )
+                """),
+                {
+                    "id": new_marketing_id(),
+                    "execution_request_id": request_id,
+                    "decision": decision,
+                    "reason": body.reason,
+                    "decided_by": actor,
+                },
+            )
+
+            if decision == "approve":
+                await pg.execute(
+                    text("""
+                        UPDATE marketing_execution_requests
+                        SET
+                            status = 'approved',
+                            approved_by = :actor,
+                            approved_at = now(),
+                            updated_at = now()
+                        WHERE id = :request_id
+                    """),
+                    {
+                        "actor": actor,
+                        "request_id": request_id,
+                    },
+                )
+
+            else:
+                await pg.execute(
+                    text("""
+                        UPDATE marketing_execution_requests
+                        SET
+                            status = 'rejected',
+                            approved_by = NULL,
+                            approved_at = NULL,
+                            updated_at = now()
+                        WHERE id = :request_id
+                    """),
+                    {
+                        "request_id": request_id,
+                    },
+                )
+
+    return {
+        "id": request_id,
+        "decision": decision,
+        "status": updated["status"],
+        "decided_by": actor,
+        "human_approval_required": True,
+        "live_execution_enabled": False,
+    }
+
+
+@api.get(
+    "/marketing-os/execution/requests/{request_id}/approvals"
+)
+async def marketing_execution_request_approvals(
+    request_id: str,
+    user=Depends(require_roles(*MARKETING_ROLES)),
+):
+    async with AsyncSessionLocal() as pg:
+        result = await pg.execute(
+            text("""
+                SELECT
+                    id,
+                    execution_request_id,
+                    decision,
+                    reason,
+                    decided_by,
+                    created_at
+                FROM marketing_execution_approvals
+                WHERE execution_request_id = :request_id
+                ORDER BY created_at ASC
+            """),
+            {
+                "request_id": request_id,
+            },
+        )
+
+        rows = [
+            serialize_row(row)
+            for row in result.fetchall()
+        ]
+
+    return {
+        "items": rows,
+        "count": len(rows),
+    }
+
+
+@api.get(
+    "/marketing-os/execution/requests/{request_id}/attempts"
+)
+async def marketing_execution_request_attempts(
+    request_id: str,
+    user=Depends(require_roles(*MARKETING_ROLES)),
+):
+    async with AsyncSessionLocal() as pg:
+        result = await pg.execute(
+            text("""
+                SELECT
+                    id,
+                    execution_request_id,
+                    attempt_number,
+                    provider,
+                    dry_run,
+                    status,
+                    request_snapshot,
+                    response_snapshot,
+                    error_code,
+                    error_message,
+                    started_at,
+                    finished_at
+                FROM marketing_execution_attempts
+                WHERE execution_request_id = :request_id
+                ORDER BY attempt_number ASC
+            """),
+            {
+                "request_id": request_id,
+            },
+        )
+
+        rows = [
+            serialize_row(row)
+            for row in result.fetchall()
+        ]
+
+    return {
+        "items": rows,
+        "count": len(rows),
+    }
+
+
+@api.post(
+    "/marketing-os/execution/requests/{request_id}/dry-run"
+)
+async def marketing_execution_request_dry_run(
+    request_id: str,
+    user=Depends(require_roles(*MARKETING_ROLES)),
+):
+    _execution_actor_id(user)
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            row = await _get_execution_request(
+                pg,
+                request_id,
+            )
+
+            if not row:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Execution request not found",
+                )
+
+            request = serialize_row(row)
+
+            if request.get("status") != "approved":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Execution request must be human-approved "
+                        "before dry-run validation"
+                    ),
+                )
+
+            if request.get("dry_run") is not True:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Live execution is not enabled",
+                )
+
+            policy_row = await _get_execution_policy(
+                pg,
+                request["provider"],
+            )
+
+            if policy_row:
+                policy = serialize_row(policy_row)
+            else:
+                policy = {
+                    "provider": request["provider"],
+                    "enabled": False,
+                    "dry_run_only": True,
+                    "human_approval_required": True,
+                    "allowed_actions": [],
+                }
+
+            attempt_count = await pg.execute(
+                text("""
+                    SELECT COUNT(*) AS count
+                    FROM marketing_execution_attempts
+                    WHERE execution_request_id = :request_id
+                """),
+                {
+                    "request_id": request_id,
+                },
+            )
+
+            attempt_number = int(
+                attempt_count.scalar() or 0
+            ) + 1
+
+            attempt_id = new_marketing_id()
+
+            await pg.execute(
+                text("""
+                    INSERT INTO marketing_execution_attempts (
+                        id,
+                        execution_request_id,
+                        attempt_number,
+                        provider,
+                        dry_run,
+                        status,
+                        request_snapshot
+                    )
+                    VALUES (
+                        :id,
+                        :execution_request_id,
+                        :attempt_number,
+                        :provider,
+                        true,
+                        'started',
+                        CAST(:request_snapshot AS jsonb)
+                    )
+                """),
+                {
+                    "id": attempt_id,
+                    "execution_request_id": request_id,
+                    "attempt_number": attempt_number,
+                    "provider": request["provider"],
+                    "request_snapshot": json.dumps(
+                        {
+                            "provider":
+                                request["provider"],
+                            "action_type":
+                                request["action_type"],
+                            "target_type":
+                                request["target_type"],
+                            "target_id":
+                                request["target_id"],
+                            "request_payload":
+                                request["request_payload"],
+                            "dry_run": True,
+                        },
+                        default=str,
+                    ),
+                },
+            )
+
+            try:
+                outcome = await perform_dry_run(
+                    request,
+                    provider_enabled=bool(
+                        policy.get("enabled")
+                    ),
+                    provider_dry_run_only=True,
+                    provider_human_approval_required=True,
+                    provider_allowed_actions=(
+                        policy.get("allowed_actions")
+                        or []
+                    ),
+                )
+
+                attempt_status = (
+                    "dry_run_succeeded"
+                    if outcome.get("allowed")
+                    else "policy_blocked"
+                )
+
+                await pg.execute(
+                    text("""
+                        UPDATE marketing_execution_attempts
+                        SET
+                            status = :status,
+                            response_snapshot =
+                                CAST(:response_snapshot AS jsonb),
+                            finished_at = now()
+                        WHERE id = :attempt_id
+                    """),
+                    {
+                        "status": attempt_status,
+                        "response_snapshot": json.dumps(
+                            outcome,
+                            default=str,
+                        ),
+                        "attempt_id": attempt_id,
+                    },
+                )
+
+            except Exception as exc:
+                await pg.execute(
+                    text("""
+                        UPDATE marketing_execution_attempts
+                        SET
+                            status = 'failed',
+                            error_code = 'dry_run_error',
+                            error_message = :error_message,
+                            finished_at = now()
+                        WHERE id = :attempt_id
+                    """),
+                    {
+                        "error_message": str(exc)[:2000],
+                        "attempt_id": attempt_id,
+                    },
+                )
+
+                raise HTTPException(
+                    status_code=500,
+                    detail="Dry-run validation failed",
+                ) from exc
+
+    return {
+        "request_id": request_id,
+        "attempt_id": attempt_id,
+        "attempt_number": attempt_number,
+        "outcome": outcome,
+        "external_write_performed": False,
+        "live_execution_enabled": False,
+    }

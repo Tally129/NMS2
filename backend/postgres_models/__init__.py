@@ -136,3 +136,10 @@ from .marketing_phase12 import (
     MarketingDirectorBrief,
 )
 
+
+from .marketing_phase14 import (
+    MarketingExecutionRequest,
+    MarketingExecutionApproval,
+    MarketingExecutionAttempt,
+    MarketingProviderExecutionPolicy,
+)
