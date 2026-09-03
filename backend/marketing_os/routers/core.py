@@ -1244,3 +1244,6 @@ from marketing_os.routers import nurture as _marketing_nurture_routes  # noqa: F
 # Phase 9 — conversion optimization + experimentation.
 from marketing_os.routers import experiments as _marketing_experiments_routes  # noqa: F401,E402
 
+# Phase 10 — reputation + local growth intelligence.
+from marketing_os.routers import local_growth as _marketing_local_growth_routes  # noqa: F401,E402
+

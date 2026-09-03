@@ -115,4 +115,11 @@ from .marketing_phase9 import (  # noqa: F401
     MarketingExperimentAssignment,
     MarketingExperimentOutcome,
 )
+from .marketing_phase10 import (  # noqa: F401
+    MarketingLocation,
+    MarketingReputationSource,
+    MarketingReputationSnapshot,
+    MarketingLocalListingSnapshot,
+    MarketingLocalOpportunity,
+)
 

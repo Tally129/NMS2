@@ -1830,3 +1830,29 @@ marketing_funnels, marketing_funnel_steps, marketing_conversion_events (no PHI/E
 - Tests: 23 unit + 5 HTTP focused Phase 9 (green).
 
 _Last updated: Jul 2025 (Marketing OS Phase 9 · Experimentation)_
+
+---
+
+## Marketing OS Phase 10 — Reputation + Local Growth (read-only intelligence)
+Migration `a0b1c2d3e4f5` (revises `f8a9b0c1d2e3`). Tables: `marketing_locations`,
+`marketing_reputation_sources`, `marketing_reputation_snapshots`,
+`marketing_local_listing_snapshots`, `marketing_local_opportunities`.
+FKs only to auth_users, marketing_search_sites, and self tables (no PHI/EMR/patient).
+- NO review text stored — aggregate metrics + metadata only.
+- Provider-neutral opaque sources (google/yelp/bing/apple/facebook/other).
+- Deterministic services (services/local_growth.py): listing completeness, NAP
+  consistency, reputation trend, review velocity, source coverage, location health
+  score (0-100 weighted), explainable prioritized opportunities (missing_hours,
+  nap_inconsistent, low_review_velocity, weak_response_rate, missing_directory,
+  incomplete_profile, local_ranking_gap). Reuses Phase 3 marketing_local_rank_snapshots
+  (read-only) for ranking gap; does not duplicate local-rank.
+- API /api/marketing-os/local/... : locations, sources, reputation/listing snapshots
+  (idempotent upsert), health, opportunities recompute+list, reputation-overview.
+- Read-only: no review posting/replies, no listing edits, no provider writes, no SMS,
+  human approval for any future external action; AI advisory only.
+- UI: ReputationLocalPanel in Marketing Command Center (location selector, health/rating/
+  reviews/velocity, listing completeness, NAP, response rate, source coverage,
+  prioritized opportunities, read-only banner).
+- Tests: 15 unit + 4 HTTP focused Phase 10 (green).
+
+_Last updated: Jul 2025 (Marketing OS Phase 10 · Reputation + Local Growth)_
