@@ -19,6 +19,7 @@ import {
 import { useToast } from "../../hooks/use-toast";
 import AddPatientWizard from "../../components/AddPatientWizard";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
 
 const STORAGE_KEY = "nms-patient-list-settings";
 const PAGE_SIZE_OPTIONS = [25, 50, 100, 200];
@@ -194,7 +195,7 @@ export default function PatientsList() {
 
   const selectedCount = selectedIds.length;
 
-  const currentPageIds = patients.map(
+  const currentPageIds = normalizeArray(patients).map(
     (patient) => patient.id
   );
 
@@ -228,11 +229,11 @@ export default function PatientsList() {
       const next = { ...current };
 
       if (allCurrentPageSelected) {
-        patients.forEach((patient) => {
+        normalizeArray(patients).forEach((patient) => {
           delete next[patient.id];
         });
       } else {
-        patients.forEach((patient) => {
+        normalizeArray(patients).forEach((patient) => {
           next[patient.id] = patient;
         });
       }
@@ -543,7 +544,7 @@ export default function PatientsList() {
               </tr>
             )}
 
-            {patients.map((patient) => (
+            {normalizeArray(patients).map((patient) => (
               <tr
                 key={patient.id}
                 className="border-t border-[#e7dfc9] hover:bg-[#f1ead8]/60"

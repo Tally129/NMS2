@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useToast } from "../../hooks/use-toast";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
 
 const fmt = (cents) => {
   const n = Number(cents || 0) / 100;
@@ -93,7 +94,7 @@ function CashDashboardPane() {
             </tr>
           </thead>
           <tbody>
-            {accounts.map((a) => (
+            {normalizeArray(accounts).map((a) => (
               <tr key={a.id} className="border-t border-[#e2ebe4]" data-testid={`cash-row-${a.id}`}>
                 <td className="p-3">{a.name} <span className="text-xs text-slate-400 font-mono">· {a.gl_code}</span></td>
                 <td className="p-3 text-xs uppercase text-slate-500">{a.kind}</td>
@@ -153,7 +154,7 @@ function BankAccountsPane() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
+            {normalizeArray(rows).map((r) => (
               <tr key={r.id} className="border-t border-[#e2ebe4]" data-testid={`ba-row-${r.id}`}>
                 <td className="p-3 font-medium">{r.name}</td>
                 <td className="p-3 text-xs uppercase text-slate-500">{r.kind}</td>
@@ -193,7 +194,7 @@ function BankAccountsPane() {
               <Select value={form.gl_account_code} onValueChange={(v) => setForm({ ...form, gl_account_code: v })}>
                 <SelectTrigger><SelectValue placeholder="Pick a chart-of-accounts code" /></SelectTrigger>
                 <SelectContent>
-                  {coa.filter((a) => ["asset", "liability"].includes(a.type)).map((a) => (
+                  {normalizeArray(coa).filter((a) => ["asset", "liability"].includes(a.type)).map((a) => (
                     <SelectItem key={a.code} value={a.code}>{a.code} · {a.name}</SelectItem>
                   ))}
                 </SelectContent>
@@ -303,7 +304,7 @@ function ReconciliationPane() {
           <Select value={selected} onValueChange={setSelected}>
             <SelectTrigger data-testid="recon-account-select"><SelectValue /></SelectTrigger>
             <SelectContent>
-              {accounts.map((a) => <SelectItem key={a.id} value={a.id}>{a.name} · {a.gl_account_code}</SelectItem>)}
+              {normalizeArray(accounts).map((a) => <SelectItem key={a.id} value={a.id}>{a.name} · {a.gl_account_code}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>
@@ -327,7 +328,7 @@ function ReconciliationPane() {
               <tr><th>Bank txn</th><th>Journal memo</th><th className="text-right">Amount</th><th className="text-right">Confidence</th></tr>
             </thead>
             <tbody>
-              {proposals.map((p) => (
+              {normalizeArray(proposals).map((p) => (
                 <tr key={p.bank_transaction_id} className="border-t border-[#eddfba]">
                   <td className="py-1">{new Date(p.bank_posted_at).toLocaleDateString()} · {p.description}</td>
                   <td>{p.memo}</td>
@@ -496,13 +497,13 @@ function TransfersPane() {
           <div><Label>From</Label>
             <Select value={form.from_bank_account_id} onValueChange={(v) => setForm({ ...form, from_bank_account_id: v })}>
               <SelectTrigger data-testid="transfer-from"><SelectValue placeholder="Source account" /></SelectTrigger>
-              <SelectContent>{accts.map((a) => <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>)}</SelectContent>
+              <SelectContent>{normalizeArray(accts).map((a) => <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>)}</SelectContent>
             </Select>
           </div>
           <div><Label>To</Label>
             <Select value={form.to_bank_account_id} onValueChange={(v) => setForm({ ...form, to_bank_account_id: v })}>
               <SelectTrigger data-testid="transfer-to"><SelectValue placeholder="Destination account" /></SelectTrigger>
-              <SelectContent>{accts.map((a) => <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>)}</SelectContent>
+              <SelectContent>{normalizeArray(accts).map((a) => <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>)}</SelectContent>
             </Select>
           </div>
           <div><Label>Amount</Label><Input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} data-testid="transfer-amount" /></div>
@@ -516,9 +517,9 @@ function TransfersPane() {
         <div className="p-4 bg-[#f4f7f2] eyebrow text-[#3d6b52]">Recent transfers</div>
         <table className="w-full text-sm">
           <tbody>
-            {rows.map((r) => {
-              const src = accts.find((a) => a.id === r.from_bank_account_id)?.name || "—";
-              const dst = accts.find((a) => a.id === r.to_bank_account_id)?.name || "—";
+            {normalizeArray(rows).map((r) => {
+              const src = normalizeArray(accts).find((a) => a.id === r.from_bank_account_id)?.name || "—";
+              const dst = normalizeArray(accts).find((a) => a.id === r.to_bank_account_id)?.name || "—";
               return (
                 <tr key={r.id} className="border-t border-[#e2ebe4]">
                   <td className="p-3 text-xs">{new Date(r.created_at).toLocaleDateString()}</td>

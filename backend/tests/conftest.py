@@ -33,6 +33,31 @@ import pyotp
 import pytest
 import requests
 
+# Local test requests reach Uvicorn over HTTP, but represent HTTPS traffic
+# terminated by the production reverse proxy.
+_original_session_request = requests.sessions.Session.request
+
+
+def _request_with_forwarded_https(
+    self,
+    method,
+    url,
+    **kwargs,
+):
+    headers = dict(kwargs.pop("headers", {}) or {})
+    headers.setdefault("X-Forwarded-Proto", "https")
+    kwargs["headers"] = headers
+
+    return _original_session_request(
+        self,
+        method,
+        url,
+        **kwargs,
+    )
+
+
+requests.sessions.Session.request = _request_with_forwarded_https
+
 SEEDED_WORKFORCE = {
     "tallyravello@gmail.com",
     "admin@natmedsol.local",

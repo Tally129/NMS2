@@ -17,6 +17,8 @@ from fastapi import Depends, File, Form, HTTPException, Query, Request, UploadFi
 
 from audit import get_client_ip, log_audit
 from notifiers import push_to_user
+from services.document_text import extract_document_text
+from services.form_document_extractor import extract_form_structure
 from deps import (
     _resolve_self_client, _strip_id, api, db, get_current_user,
     logger, require_roles,
@@ -35,6 +37,113 @@ from pg_shims import (
 
 
 # =================== PHASE 10: FORMS & CONSENTS ===================
+
+
+INTAKE_MAPPING_ROOTS = {
+    "demographics",
+    "health_history",
+    "symptoms",
+    "lifestyle",
+    "consent",
+}
+
+
+def _set_nested_value(target: dict, dotted_path: str, value: Any) -> None:
+    """Set a nested dictionary value using a validated dotted path."""
+    parts = [part for part in dotted_path.split(".") if part]
+
+    if len(parts) < 2:
+        return
+
+    current = target
+
+    for part in parts[:-1]:
+        child = current.get(part)
+
+        if not isinstance(child, dict):
+            child = {}
+            current[part] = child
+
+        current = child
+
+    current[parts[-1]] = value
+
+
+def _build_intake_writeback(
+    template: dict,
+    answers: Dict[str, Any],
+) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Any], List[str]]:
+    """Split submitted answers into approved intake mappings and unmapped data.
+
+    Only mappings explicitly approved by an administrator are eligible for
+    structured intake writeback.
+    """
+    structured: Dict[str, Dict[str, Any]] = {
+        "demographics": {},
+        "health_history": {},
+        "symptoms": {},
+        "lifestyle": {},
+        "consent": {},
+    }
+    unmapped: Dict[str, Any] = {}
+    written_paths: List[str] = []
+
+    fields = template.get("fields") or []
+
+    for field in fields:
+        field_id = str(field.get("id") or "").strip()
+
+        if not field_id or field_id not in answers:
+            continue
+
+        value = answers[field_id]
+        mapping = str(field.get("mapping") or "").strip()
+        mapping_status = str(field.get("mapping_status") or "unmapped")
+
+        valid_mapping = False
+
+        if mapping_status == "approved" and "." in mapping:
+            root, nested_path = mapping.split(".", 1)
+
+            valid_nested_path = bool(nested_path) and all(
+                part
+                and part.replace("_", "").replace("-", "").isalnum()
+                for part in nested_path.split(".")
+            )
+
+            valid_mapping = (
+                root in INTAKE_MAPPING_ROOTS
+                and valid_nested_path
+            )
+
+        if valid_mapping:
+            root, nested_path = mapping.split(".", 1)
+            _set_nested_value(
+                structured[root],
+                nested_path,
+                value,
+            )
+            written_paths.append(mapping)
+        else:
+            unmapped[field_id] = value
+
+    return structured, unmapped, written_paths
+
+
+def _deep_merge_dict(existing: Any, incoming: Any) -> dict:
+    """Recursively merge incoming JSON data without deleting existing keys."""
+    result = dict(existing) if isinstance(existing, dict) else {}
+
+    if not isinstance(incoming, dict):
+        return result
+
+    for key, value in incoming.items():
+        if isinstance(value, dict):
+            result[key] = _deep_merge_dict(result.get(key), value)
+        else:
+            result[key] = value
+
+    return result
 
 
 def _hydrate_template(t: dict) -> dict:
@@ -73,7 +182,11 @@ def _extract_text_from_upload(filename: str, data: bytes) -> str:
     raise HTTPException(status_code=400, detail="Unsupported file type. Upload PDF, DOCX, or TXT.")
 
 
-async def _llm_form_transcribe(text: str, hint_category: Optional[str] = None) -> dict:
+async def _llm_form_transcribe(
+    text: str,
+    hint_category: Optional[str] = None,
+    document_structure: Optional[dict] = None,
+) -> dict:
     """Use Claude to convert raw form text into our structured form schema."""
     from llm_client import complete_text  # local import — deferred SDK load
 
@@ -88,23 +201,58 @@ async def _llm_form_transcribe(text: str, hint_category: Optional[str] = None) -
         '  "category": "consent|intake|hipaa|photo_release|treatment|other",\n'
         '  "fields": [\n'
         '    {"id": "kebab-case", "type": "text|textarea|date|checkbox|radio|select|signature|email|phone|number",\n'
-        '     "label": "Question label", "required": true|false, "placeholder": "...", "options": ["..."], "help_text": "..."}\n'
+        '     "label": "Question label", "required": true|false, "placeholder": "...", "options": ["..."],\n'
+        '     "help_text": "...", "section": "Demographics|Health History|Symptoms|Lifestyle|Consent|Other",\n'
+        '     "mapping": "demographics.key|health_history.key|symptoms.key|lifestyle.key|consent.key|null",\n'
+        '     "mapping_confidence": 0.0}\n'
         "  ]\n"
         "}\n\n"
         "Rules: Always include a final {type:'signature', label:'Patient signature', required:true} field. "
         "If the form requests a printed name + date, add text + date fields above the signature. "
-        "Convert checkboxes to type 'checkbox'. Multi-choice lists become type 'radio' with options array. "
+        "Convert yes/no acknowledgements to type 'checkbox'. Use type 'radio' only "
+        "when exactly one option may be selected. For 'select all that apply' or "
+        "multiple independent choices, create separate checkbox fields so each "
+        "choice can be answered independently. "
         "Detect the category from content (HIPAA notice → 'hipaa'; photo/likeness → 'photo_release'; "
         "treatment/procedure consent → 'treatment'; medical-history forms → 'intake'; otherwise 'consent' or 'other'). "
-        "IDs should be kebab-case derived from labels. Limit to 30 fields max."
+        "IDs should be kebab-case derived from labels. Preserve every meaningful "
+        "question, input, checkbox, radio choice, signature area, acknowledgement, "
+        "date field, and table entry. Do not impose an arbitrary field-count limit. "
+        "Do not combine unrelated questions merely to shorten the result. "
+        "Group each field into a logical section. Suggest a mapping only when the "
+        "question clearly belongs in one of these intake objects: demographics, "
+        "health_history, symptoms, lifestyle, or consent. Use dot notation, such as "
+        "'demographics.date_of_birth' or 'health_history.allergies'. If uncertain, "
+        "return mapping null and mapping_confidence 0. Do not invent database tables "
+        "or top-level mapping groups."
     )
     if hint_category:
         sys_msg += f"\nUser category hint: {hint_category}."
 
     try:
+        structure_json = json.dumps(
+            document_structure or {},
+            ensure_ascii=False,
+            default=str,
+        )
+
+        user_message = (
+            "Convert the uploaded document into a complete digital form.\n\n"
+            "The structured extraction may contain PDF widgets, field types, "
+            "page numbers, bounding boxes, checkbox states, radio groups, "
+            "DOCX tables, and visible text. Treat every embedded widget as "
+            "a potential field even when its internal name is generic. Use "
+            "visible document text to create a meaningful label.\n\n"
+            f"STRUCTURED DOCUMENT EXTRACTION:\n{structure_json[:30000]}\n\n"
+            f"VISIBLE OR OCR TEXT:\n{text[:24000]}"
+        )
+
         response = await complete_text(
-            sys_msg, f"Form source text:\n\n{text[:18000]}",
+            sys_msg,
+            user_message,
             session_id=f"form-transcribe-{new_id()[:8]}",
+            max_tokens=7000,
+            temperature=0.1,
         )
     except RuntimeError:
         raise HTTPException(status_code=503, detail={"code": "ai_unavailable", "message": "AI service is unavailable."})
@@ -123,6 +271,41 @@ async def _llm_form_transcribe(text: str, hint_category: Optional[str] = None) -
             ftype = "text"
         fid = (f.get("id") or f.get("label") or f"field-{i+1}").lower()
         fid = "".join(ch if (ch.isalnum() or ch == "-") else "-" for ch in fid).strip("-") or f"field-{i+1}"
+        raw_mapping = str(f.get("mapping") or "").strip()
+        allowed_mapping_roots = {
+            "demographics",
+            "health_history",
+            "symptoms",
+            "lifestyle",
+            "consent",
+        }
+
+        mapping = None
+        if "." in raw_mapping:
+            root, nested_key = raw_mapping.split(".", 1)
+
+            # Mapping keys must be simple dot-notation identifiers. The AI may
+            # suggest them, but an administrator must approve them before the
+            # form is published.
+            valid_nested_key = (
+                nested_key
+                and all(
+                    part
+                    and part.replace("_", "").replace("-", "").isalnum()
+                    for part in nested_key.split(".")
+                )
+            )
+
+            if root in allowed_mapping_roots and valid_nested_key:
+                mapping = raw_mapping[:160]
+
+        try:
+            confidence = float(f.get("mapping_confidence") or 0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        confidence = max(0.0, min(confidence, 1.0))
+
         fields.append({
             "id": fid,
             "type": ftype,
@@ -131,6 +314,10 @@ async def _llm_form_transcribe(text: str, hint_category: Optional[str] = None) -
             "placeholder": (f.get("placeholder") or "")[:120] or None,
             "options": [str(o)[:80] for o in (f.get("options") or [])][:20],
             "help_text": (f.get("help_text") or "")[:300] or None,
+            "section": (f.get("section") or "Other").strip()[:100],
+            "mapping": mapping,
+            "mapping_status": "suggested" if mapping else "unmapped",
+            "mapping_confidence": confidence if mapping else 0.0,
         })
 
     cat = data.get("category") or hint_category or "other"
@@ -167,6 +354,31 @@ async def create_form_template(payload: FormTemplateIn, request: Request,
                                user=Depends(require_roles("admin", "practitioner", "staff"))):
     now = datetime.now(timezone.utc)
     doc = payload.dict()
+
+    if doc.get("publication_status") == "published":
+        unreviewed = [
+            field.get("id")
+            for field in (doc.get("fields") or [])
+            if field.get("mapping_status") == "suggested"
+        ]
+
+        if unreviewed:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "unreviewed_intake_mappings",
+                    "message": (
+                        "Approve or remove every suggested intake mapping "
+                        "before publishing."
+                    ),
+                    "field_ids": unreviewed,
+                },
+            )
+
+    # Every new uploaded or AI-generated template starts as a reviewable
+    # versioned record. Only approved mappings should be published.
+    doc["version"] = max(1, int(doc.get("version") or 1))
+    doc["publication_status"] = doc.get("publication_status") or "draft"
     doc["id"] = new_id()
     doc["builtin"] = False
     doc["created_by"] = user["id"]
@@ -191,6 +403,27 @@ async def update_form_template(tpl_id: str, payload: FormTemplateIn, request: Re
         # Allow admins to override built-ins; others may only clone
         raise HTTPException(status_code=403, detail="Built-in templates can only be edited by admins")
     updates = payload.dict()
+
+    if updates.get("publication_status") == "published":
+        unreviewed = [
+            field.get("id")
+            for field in (updates.get("fields") or [])
+            if field.get("mapping_status") == "suggested"
+        ]
+
+        if unreviewed:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "unreviewed_intake_mappings",
+                    "message": (
+                        "Approve or remove every suggested intake mapping "
+                        "before publishing."
+                    ),
+                    "field_ids": unreviewed,
+                },
+            )
+
     updates["updated_at"] = datetime.now(timezone.utc)
     await db.form_templates.update_one({"id": tpl_id}, {"$set": updates})
     await log_audit(db, user["id"], user["email"], "form_template.update",
@@ -225,11 +458,80 @@ async def transcribe_form(file: UploadFile = File(...),
     data = await file.read()
     if len(data) > 8 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File too large (max 8 MB)")
-    text = _extract_text_from_upload(file.filename or "", data)
+    filename = file.filename or ""
+
+    text = extract_document_text(
+        filename,
+        data,
+    )
+
+    try:
+        document_structure = extract_form_structure(
+            filename,
+            data,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Structured form extraction failed; continuing with text: %s",
+            exc,
+        )
+        document_structure = {
+            "document_type": "unknown",
+            "structured_extraction_error": type(exc).__name__,
+        }
+
     if not text or len(text) < 30:
-        raise HTTPException(status_code=400, detail="Document appears empty after extraction")
-    result = await _llm_form_transcribe(text, hint_category=category)
-    result["source"] = "ai"
+        # A fillable PDF can contain meaningful widgets even when visible
+        # text extraction is sparse.
+        widget_count = int(
+            document_structure.get("widget_count") or 0
+        )
+
+        if widget_count == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Document appears empty after extraction",
+            )
+
+    result = await _llm_form_transcribe(
+        text,
+        hint_category=category,
+        document_structure=document_structure,
+    )
+    result["document_metadata"] = {
+        "document_type": document_structure.get(
+            "document_type"
+        ),
+        "page_count": document_structure.get(
+            "page_count"
+        ),
+        "widget_count": document_structure.get(
+            "widget_count",
+            0,
+        ),
+        "has_fillable_fields": document_structure.get(
+            "has_fillable_fields",
+            False,
+        ),
+    }
+
+    result["source"] = "upload"
+    result["source_filename"] = (file.filename or "uploaded-form")[:180]
+    result["form_type"] = (
+        "intake"
+        if result.get("category") == "intake"
+        else "consent"
+        if result.get("category") in {
+            "consent", "hipaa", "photo_release", "treatment"
+        }
+        else "questionnaire"
+    )
+    result["version"] = 1
+    result["publication_status"] = "draft"
+    result["requires_signature"] = any(
+        field.get("type") == "signature"
+        for field in result.get("fields", [])
+    )
     result["extracted_text_preview"] = text[:500]
     return result
 
@@ -258,6 +560,19 @@ async def send_form(payload: FormSendIn, request: Request,
     tpl = await db.form_templates.find_one({"id": payload.template_id})
     if not tpl:
         raise HTTPException(status_code=404, detail="Template not found")
+
+    if tpl.get("publication_status", "draft") != "published":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "form_not_published",
+                "message": (
+                    "Review and publish this form before assigning it "
+                    "to a patient."
+                ),
+            },
+        )
+
     client = None
     if payload.client_id:
         client = await find_client(client_id=payload.client_id)
@@ -294,9 +609,19 @@ async def send_form(payload: FormSendIn, request: Request,
                     metadata={"template_id": tpl["id"], "client_id": (client or {}).get("id"), "channel": doc["channel"]},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
 
-    # Compose absolute submit URL using request origin
+    # Compose the form destination.
+    #
+    # Patient-linked submissions are portal-first: the email/push sends the
+    # patient to the authenticated Forms & Consents page. Protected.jsx will
+    # require patient authentication and AuthCard will return the patient to
+    # this page after login.
+    #
+    # Keep the tokenized responder URL for submissions that are not attached
+    # to a patient account.
     base_url = os.environ.get("PUBLIC_BASE_URL", "") or str(request.base_url).rstrip("/").replace("/api", "")
-    submit_url = f"{base_url}/forms/respond/{token}"
+    public_submit_url = f"{base_url}/forms/respond/{token}"
+    portal_forms_url = f"{base_url}/portal/patient/forms"
+    submit_url = portal_forms_url if client else public_submit_url
 
     from notifiers import send_email as notify_email
 
@@ -311,16 +636,29 @@ async def send_form(payload: FormSendIn, request: Request,
         payload.channel = "link"
 
     if payload.channel == "email" and target:
-        html = (
-            f"<p>Hi{(' ' + (client.get('full_name') or '').split(' ')[0]) if client else ''},</p>"
-            f"<p>Please complete <strong>{tpl.get('title','')}</strong> using the secure link below:</p>"
-            f"<p><a href=\"{submit_url}\">{submit_url}</a></p>"
-            "<p>— Natural Medical Solutions</p>"
+        from email_templates import form_request_notification
+
+        first_name = None
+        if client:
+            first_name = client.get("full_name")
+
+        subject, html, plain = form_request_notification(
+            first_name=first_name,
+            form_title=tpl.get("title", "") or "Requested Form",
+            submit_url=submit_url,
         )
+
         delivery_status = await notify_email(
-            db, target, f"Please complete: {tpl.get('title','')}", html,
+            db,
+            target,
+            subject,
+            html,
+            plain_text=plain,
             action="form.email",
-            payload_metadata={"submission_id": doc["id"], "submit_url": submit_url},
+            payload_metadata={
+                "submission_id": doc["id"],
+            },
+            redact_recipient=True,
         )
 
     await db.form_submissions.update_one({"id": doc["id"]}, {"$set": {"delivery_status": delivery_status, "delivery_target": target}})
@@ -329,6 +667,26 @@ async def send_form(payload: FormSendIn, request: Request,
 
     out = _strip_id(doc)
     out["submit_url"] = submit_url
+
+    # Add a durable account update to the patient's consolidated Messages
+    # experience. Failure here must never prevent the form assignment itself.
+    if client and client.get("user_id"):
+        try:
+            from services.patient_activity import add_patient_activity_message
+
+            await add_patient_activity_message(
+                client_id=client["id"],
+                body="A new form is ready for you in Forms & Consents.",
+                event_type="form_assigned",
+                source_id=doc["id"],
+                portal_path="/portal/patient/forms",
+            )
+        except Exception:
+            logger.exception(
+                "Unable to create patient activity message for form %s",
+                doc["id"],
+            )
+
     # Best-effort push to client
     if client and client.get("user_id"):
         try:
@@ -336,12 +694,31 @@ async def send_form(payload: FormSendIn, request: Request,
                 client["user_id"],
                 f"New form: {tpl.get('title','')}",
                 "Tap to fill in and sign.",
-                url=f"/forms/respond/{token}",
+                url="/portal/patient/forms" if client else f"/forms/respond/{token}",
                 tag=f"form-{doc['id']}",
             )
         except Exception:
             pass
     return out
+
+
+@api.get("/forms/pending-count")
+async def pending_form_count(user=Depends(get_current_user)):
+    """Return the authenticated patient's actionable form count."""
+    if user["role"] != "client":
+        return {"count": 0}
+
+    self_client = await _resolve_self_client(user)
+
+    if not self_client:
+        return {"count": 0}
+
+    count = await db.form_submissions.count_documents({
+        "client_id": self_client["id"],
+        "status": "sent",
+    })
+
+    return {"count": count}
 
 
 @api.get("/forms/submissions", response_model=List[FormSubmissionOut])
@@ -353,14 +730,23 @@ async def list_form_submissions(
 ):
     if user["role"] == "client":
         self_client = await _resolve_self_client(user)
+
         if not self_client:
             return []
-        q: Dict[str, Any] = {"client_id": self_client["id"]}
+
+        q: Dict[str, Any] = {
+            "client_id": self_client["id"],
+            "status": {"$ne": "void"},
+        }
     else:
         q = {}
     if status:
+        if user["role"] == "client" and status == "void":
+            return []
+
         q["status"] = status
-    if client_id:
+
+    if client_id and user["role"] != "client":
         q["client_id"] = client_id
     if template_id:
         q["template_id"] = template_id
@@ -438,15 +824,314 @@ async def public_form_submit(token: str, payload: FormSubmissionAnswers, request
         }],
     }
     await db.form_submissions.update_one({"id": sub["id"]}, {"$set": update})
-    await log_audit(db, None, None, "form.submit_public",
-                    resource_type="form_submission", resource_id=sub["id"],
-                    severity="high", outcome="success",
-                    metadata={"template_id": sub.get("template_id"), "client_id": sub.get("client_id")},
-                    ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+
+    # Apply only administrator-approved mappings to the patient's structured
+    # intake record. Unmapped answers remain preserved with the submission.
+    template = await db.form_templates.find_one({
+        "id": sub.get("template_id"),
+    })
+
+    mapped_paths: List[str] = []
+    unmapped_answers: Dict[str, Any] = {}
+
+    if template and sub.get("client_id"):
+        structured, unmapped_answers, mapped_paths = _build_intake_writeback(
+            template,
+            payload.answers or {},
+        )
+
+        has_structured_updates = any(
+            bool(values)
+            for values in structured.values()
+        )
+
+        is_intake_template = (
+            template.get("form_type") == "intake"
+            or template.get("category") == "intake"
+        )
+
+        if has_structured_updates or is_intake_template:
+            from postgres_db import AsyncSessionLocal
+            from repositories import clients as clients_repo
+
+            client_id = sub["client_id"]
+            now = datetime.now(timezone.utc)
+
+            async with AsyncSessionLocal() as pg:
+                existing_intake = await clients_repo.get_intake_for_client(
+                    pg,
+                    client_id,
+                )
+
+            existing_intake = existing_intake or {}
+
+            intake_fields = {
+                "demographics": _deep_merge_dict(
+                    existing_intake.get("demographics"),
+                    structured["demographics"],
+                ),
+                "health_history": _deep_merge_dict(
+                    existing_intake.get("health_history"),
+                    structured["health_history"],
+                ),
+                "symptoms": _deep_merge_dict(
+                    existing_intake.get("symptoms"),
+                    structured["symptoms"],
+                ),
+                "lifestyle": _deep_merge_dict(
+                    existing_intake.get("lifestyle"),
+                    structured["lifestyle"],
+                ),
+                "consent": _deep_merge_dict(
+                    existing_intake.get("consent"),
+                    structured["consent"],
+                ),
+                "completed": (
+                    True
+                    if is_intake_template
+                    else bool(existing_intake.get("completed"))
+                ),
+                "completed_at": (
+                    now
+                    if is_intake_template
+                    else existing_intake.get("completed_at")
+                ),
+                "signed_at": (
+                    now
+                    if payload.signature_data
+                    else existing_intake.get("signed_at")
+                ),
+            }
+
+            intake_id = existing_intake.get("id") or new_id()
+
+            async with AsyncSessionLocal() as pg:
+                async with pg.begin():
+                    await clients_repo.upsert_intake(
+                        pg,
+                        intake_id=intake_id,
+                        client_id=client_id,
+                        fields=intake_fields,
+                    )
+
+            if is_intake_template:
+                await db.clients.update_one(
+                    {"id": client_id},
+                    {"$set": {"intake_completed": True}},
+                )
+
+        # Preserve processing details with the immutable submission record.
+        await db.form_submissions.update_one(
+            {"id": sub["id"]},
+            {"$set": {
+                "unmapped_answers": unmapped_answers,
+                "mapped_intake_fields": mapped_paths,
+                "intake_writeback_at": (
+                    datetime.now(timezone.utc)
+                    if mapped_paths
+                    else None
+                ),
+            }},
+        )
+
+        update["unmapped_answers"] = unmapped_answers
+        update["mapped_intake_fields"] = mapped_paths
+
+    await log_audit(
+        db,
+        None,
+        None,
+        "form.submit_public",
+        resource_type="form_submission",
+        resource_id=sub["id"],
+        severity="high",
+        outcome="success",
+        metadata={
+            "template_id": sub.get("template_id"),
+            "client_id": sub.get("client_id"),
+            "mapped_intake_fields": mapped_paths,
+            "mapped_field_count": len(mapped_paths),
+            "unmapped_answer_count": len(unmapped_answers),
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
     sub.update(update)
     out = _strip_id(sub)
     if out.get("token"):
         out["submit_url"] = f"/forms/respond/{out['token']}"
+    return out
+
+
+
+@api.get("/forms/submissions/{sub_id}")
+async def get_form_submission_detail(
+    sub_id: str,
+    user=Depends(get_current_user),
+):
+    """
+    Return one form submission for an authenticated authorized user.
+
+    Patients may retrieve only submissions assigned to their own client record.
+    Workforce users may retrieve submissions according to their existing role.
+    Public token access is intentionally not used for completed-form review.
+    """
+    submission = await db.form_submissions.find_one({"id": sub_id})
+
+    if not submission:
+        raise HTTPException(
+            status_code=404,
+            detail="Form submission not found",
+        )
+
+    role = user.get("role")
+
+    if role == "client":
+        self_client = await _resolve_self_client(user)
+
+        if (
+            not self_client
+            or submission.get("client_id") != self_client.get("id")
+            or submission.get("status") == "void"
+        ):
+            # Do not disclose whether another patient's submission exists.
+            raise HTTPException(
+                status_code=404,
+                detail="Form submission not found",
+            )
+
+    elif role not in {
+        "admin",
+        "practitioner",
+        "staff",
+        "medical_assistant",
+    }:
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden",
+        )
+
+    out = _strip_id(submission)
+
+    template = None
+    if submission.get("template_id"):
+        template = await db.form_templates.find_one({
+            "id": submission["template_id"],
+        })
+
+    if template:
+        out["template"] = _strip_id(template)
+
+    # Never expose the reusable public responder token from the
+    # authenticated completed-submission detail endpoint.
+    out.pop("token", None)
+    out.pop("submit_url", None)
+
+    return out
+
+
+@api.post("/forms/submissions/{sub_id}/unassign", response_model=FormSubmissionOut)
+async def unassign_form_submission(
+    sub_id: str,
+    payload: dict,
+    request: Request,
+    user=Depends(
+        require_roles(
+            "admin",
+            "practitioner",
+            "staff",
+            "medical_assistant",
+        )
+    ),
+):
+    """Remove a pending form from a patient's portal without deleting history."""
+    submission = await db.form_submissions.find_one({"id": sub_id})
+
+    if not submission:
+        raise HTTPException(
+            status_code=404,
+            detail="Form assignment not found",
+        )
+
+    current_status = submission.get("status") or "sent"
+
+    if current_status == "submitted":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "completed_form_cannot_be_unassigned",
+                "message": (
+                    "Completed forms cannot be unassigned. "
+                    "Use the amendment workflow if a correction is needed."
+                ),
+            },
+        )
+
+    if current_status == "void":
+        out = _strip_id(submission)
+
+        if out.get("token"):
+            out["submit_url"] = (
+                f"/forms/respond/{out['token']}"
+            )
+
+        return out
+
+    reason = (
+        (payload or {}).get("reason")
+        or "No longer required"
+    ).strip()
+
+    now = datetime.now(timezone.utc)
+
+    await db.form_submissions.update_one(
+        {"id": sub_id},
+        {
+            "$set": {
+                "status": "void",
+                "lifecycle_status": "void",
+                "voided_at": now,
+                "voided_by": user["id"],
+                "voided_by_name": (
+                    user.get("full_name")
+                    or user.get("email")
+                ),
+                "void_reason": reason,
+                "updated_at": now,
+            }
+        },
+    )
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "form.unassign",
+        resource_type="form_submission",
+        resource_id=sub_id,
+        severity="high",
+        outcome="success",
+        metadata={
+            "template_id": submission.get("template_id"),
+            "client_id": submission.get("client_id"),
+            "previous_status": current_status,
+            "reason": reason,
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    updated = await db.form_submissions.find_one(
+        {"id": sub_id}
+    )
+
+    out = _strip_id(updated)
+
+    if out.get("token"):
+        out["submit_url"] = (
+            f"/forms/respond/{out['token']}"
+        )
+
     return out
 
 
@@ -467,15 +1152,6 @@ async def amend_form_submission(sub_id: str, payload: dict, request: Request,
     return out
 
 
-@api.get("/forms/submissions/{sub_id}", response_model=FormSubmissionOut)
-async def get_form_submission(sub_id: str, user=Depends(require_roles("admin", "practitioner", "staff"))):
-    sub = await db.form_submissions.find_one({"id": sub_id})
-    if not sub:
-        raise HTTPException(status_code=404, detail="Submission not found")
-    out = _strip_id(sub)
-    if out.get("token"):
-        out["submit_url"] = f"/forms/respond/{out['token']}"
-    return out
 
 
 # =================== PHASE 11: SOAP TEMPLATES ===================

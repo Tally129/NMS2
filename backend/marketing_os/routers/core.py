@@ -39,6 +39,7 @@ from marketing_os.services.execution_policy import (
 )
 from marketing_os.services.execution_queue import (
     decide_request,
+    execution_request_matches_existing,
     perform_dry_run,
     prepare_execution_request,
     submit_for_approval,
@@ -1441,6 +1442,42 @@ def _execution_actor_id(user: dict) -> str:
     return value
 
 
+def _idempotency_reuse_conflict() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": (
+                "idempotency_key_reused_with_different_request"
+            ),
+            "message": (
+                "Operation token was already used for a "
+                "different execution request."
+            ),
+        },
+    )
+
+
+def _serialize_and_validate_execution_replay(
+    row,
+    *,
+    incoming_request: dict[str, Any],
+    actor: str,
+) -> dict[str, Any]:
+    existing = serialize_row(row)
+
+    if not execution_request_matches_existing(
+        existing,
+        incoming_request,
+        actor=actor,
+    ):
+        raise _idempotency_reuse_conflict()
+
+    existing["idempotent_replay"] = True
+    existing["live_execution_enabled"] = False
+
+    return existing
+
+
 async def _get_execution_request(
     pg,
     request_id: str,
@@ -1738,6 +1775,19 @@ async def marketing_execution_request_create(
             detail="Phase 14 supports dry-run requests only",
         )
 
+    operation_token = body.operation_token.strip()
+    if len(operation_token) < 16:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_operation_token",
+                "message": (
+                    "Operation token must contain at least "
+                    "16 non-whitespace characters."
+                ),
+            },
+        )
+
     prepared = prepare_execution_request(
         provider=body.provider,
         action_type=body.action_type,
@@ -1745,7 +1795,7 @@ async def marketing_execution_request_create(
         target_id=body.target_id,
         payload=body.payload,
         dry_run=True,
-        operation_token=body.operation_token,
+        operation_token=operation_token,
     )
 
     if not prepared.get("valid"):
@@ -1804,10 +1854,11 @@ async def marketing_execution_request_create(
             duplicate_row = duplicate.first()
 
             if duplicate_row:
-                result = serialize_row(duplicate_row)
-                result["idempotent_replay"] = True
-                result["live_execution_enabled"] = False
-                return result
+                return _serialize_and_validate_execution_replay(
+                    duplicate_row,
+                    incoming_request=request,
+                    actor=actor,
+                )
 
             insert_result = await pg.execute(
                 text("""
@@ -1908,14 +1959,11 @@ async def marketing_execution_request_create(
                         ),
                     )
 
-                result = serialize_row(
-                    concurrent_row
+                return _serialize_and_validate_execution_replay(
+                    concurrent_row,
+                    incoming_request=request,
+                    actor=actor,
                 )
-
-                result["idempotent_replay"] = True
-                result["live_execution_enabled"] = False
-
-                return result
 
     return {
         **request,

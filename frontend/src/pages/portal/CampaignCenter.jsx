@@ -22,6 +22,7 @@ import {
   AiGenerateButton, AiLoadingOverlay, AiDisclaimerBanner, AiSectionCard,
   showAiErrorToast,
 } from "../../components/ai";
+import { normalizeArray } from "../../lib/collections";
 
 // Preview merge-field context — realistic placeholder values so template
 // authors can visualize the final email without touching real patient data.
@@ -68,7 +69,7 @@ export default function CampaignCenter() {
   const load = React.useCallback(async () => {
     try {
       const r = await api.get("/campaigns");
-      setCampaigns(r.data || []);
+      setCampaigns(normalizeArray(r.data, ["campaigns"]));
     } catch (e) {
       toast({ title: "Could not load campaigns", description: getErrorMessage(e) || "" });
     }
@@ -215,7 +216,7 @@ export default function CampaignCenter() {
               </tr>
             </thead>
             <tbody>
-              {campaigns.map((c) => {
+              {normalizeArray(campaigns).map((c) => {
                 const Icon = channelIcon(c.channel);
                 return (
                   <tr key={c.id} className="border-t border-[#e2ebe4] hover:bg-[#fbfdfb]" data-testid={`campaign-row-${c.id}`}>

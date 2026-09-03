@@ -842,7 +842,8 @@ def _ai_marketing_drafter():
 AI_MARKETING_CONTENT_TYPES = (
     "social_post", "social_series", "email", "email_sequence", "sms",
     "blog_outline", "blog_article", "landing_page", "ad_copy",
-    "content_calendar", "short_video_script", "patient_education",
+    "content_calendar", "short_video_script", "video_prompt",
+    "patient_education",
     "service_description", "faq", "promotion", "campaign_strategy",
 )
 
@@ -938,6 +939,45 @@ def _build_marketing_ai_prompt(payload: "AiMarketingDraftIn") -> str:
     if payload.requested_length:
         lines.append(f"Requested length: {payload.requested_length}")
     lines.append(f"Number of variations: {payload.number_of_variations}")
+
+    if payload.content_type == "video_prompt":
+        lines.extend([
+            "",
+            "VIDEO PROMPT REQUIREMENTS — follow all of these:",
+            "- Create a complete production-ready prompt for an AI video generator.",
+            "- Do not return only a hook, caption, title, or brief summary.",
+            "- Target approximately 60 to 90 seconds unless the clinic requested another duration.",
+            "- Default to vertical 9:16 format for Reels, TikTok, and Shorts unless another platform is specified.",
+            "- Include a clear creative concept, audience, objective, visual style, mood, lighting, color palette, pacing, and realism level.",
+            "- Include 6 to 10 numbered scenes.",
+            "- For every scene include:",
+            "  1. timestamp or estimated duration,",
+            "  2. setting and environment,",
+            "  3. people or subjects shown,",
+            "  4. exact action taking place,",
+            "  5. shot type and camera movement,",
+            "  6. lighting and visual details,",
+            "  7. voiceover or spoken dialogue,",
+            "  8. on-screen text,",
+            "  9. music or sound direction,",
+            "  10. transition into the next scene.",
+            "- Include an opening hook within the first three seconds.",
+            "- Include a final branded call-to-action scene.",
+            "- Include a negative prompt listing visuals, claims, text errors, distorted anatomy, logos, credentials, pricing, or medical outcomes the generator must not invent.",
+            "- Avoid patient testimonials, before-and-after claims, guaranteed outcomes, cure language, and individualized medical advice.",
+            "- Put the entire usable video-generation prompt in the JSON field named draft.",
+            "- Each item in variations must also be a complete scene-by-scene video prompt, not a short concept.",
+            "- The draft should be detailed enough to paste directly into an AI video-generation platform.",
+        ])
+    elif payload.content_type == "short_video_script":
+        lines.extend([
+            "",
+            "SHORT VIDEO SCRIPT REQUIREMENTS:",
+            "- Write a complete spoken script with an opening hook, body, and call to action.",
+            "- Include suggested visuals, on-screen text, and approximate timestamps.",
+            "- Do not return only a title or one-line concept.",
+        ])
+
     if payload.clinic_details:
         # Only keys the operator explicitly typed in. Do NOT pull from any
         # patient collection.
@@ -973,19 +1013,76 @@ def _validate_marketing_ai_response(
         return str(val or "")[:cap]
 
     def _str_list(val, cap_items: int = 25, cap_len: int = 400) -> list[str]:
+        """Normalize model lists into strings.
+
+        Claude sometimes returns content variations as objects instead of
+        plain strings. Accept common copy fields while continuing to discard
+        unknown structured data.
+        """
         if not isinstance(val, list):
             return []
+
         out: list[str] = []
+
         for item in val[:cap_items]:
+            normalized = ""
+
             if isinstance(item, (str, int, float)):
-                out.append(str(item)[:cap_len])
+                normalized = str(item)
+
+            elif isinstance(item, dict):
+                for key in (
+                    "draft",
+                    "copy",
+                    "body",
+                    "content",
+                    "caption",
+                    "text",
+                    "script",
+                    "email",
+                    "post",
+                    "article",
+                    "outline",
+                ):
+                    value = item.get(key)
+
+                    if isinstance(value, (str, int, float)) and str(value).strip():
+                        normalized = str(value)
+                        break
+
+                # Last safe fallback: join primitive values only.
+                if not normalized:
+                    primitive_values = [
+                        str(value)
+                        for value in item.values()
+                        if isinstance(value, (str, int, float))
+                        and str(value).strip()
+                    ]
+
+                    if primitive_values:
+                        normalized = "\n\n".join(primitive_values)
+
+            normalized = normalized.strip()
+
+            if normalized:
+                out.append(normalized[:cap_len])
+
         return out
 
     envelope = {
         "content_type": content_type,
         "title": _str(data.get("title"), 200),
         "summary": _str(data.get("summary"), 800),
-        "draft": _str(data.get("draft"), 12000),
+        "draft": _str(
+            data.get("draft")
+            or data.get("content")
+            or data.get("body")
+            or data.get("copy")
+            or data.get("caption")
+            or data.get("text")
+            or data.get("script"),
+            12000,
+        ),
         "variations": _str_list(data.get("variations"), 20, 6000),
         "hashtags": _str_list(data.get("hashtags"), 30, 80),
         "subject_lines": _str_list(data.get("subject_lines"), 15, 200),
@@ -998,6 +1095,39 @@ def _validate_marketing_ai_response(
         # Force-set. Guardrail regardless of what the model says.
         "human_review_required": True,
     }
+
+    # Ensure the frontend always receives usable copy when the model
+    # returned meaningful text under another accepted envelope field.
+    if not envelope["draft"] and not envelope["variations"]:
+        fallback = (
+            envelope["summary"]
+            or envelope["title"]
+        )
+
+        if fallback:
+            envelope["draft"] = fallback
+
+    if content_type == "video_prompt":
+        video_copy = envelope["draft"]
+
+        if not video_copy and envelope["variations"]:
+            video_copy = envelope["variations"][0]
+            envelope["draft"] = video_copy
+
+        # A production-ready scene-by-scene prompt should be meaningfully
+        # detailed. Do not silently present a one-line model response as a
+        # completed video prompt.
+        if len(video_copy.strip()) < 500:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "code": "incomplete_video_prompt",
+                    "message": (
+                        "The AI returned an incomplete video prompt. "
+                        "Please regenerate."
+                    ),
+                },
+            )
 
     if content_type == "content_calendar":
         items = []
@@ -1035,8 +1165,19 @@ async def ai_campaign_draft(payload: AiMarketingDraftIn, request: Request,
     user_prompt = _build_marketing_ai_prompt(payload)
     started = datetime.now(timezone.utc)
     try:
+        template = MARKETING_AI_TEMPLATE
+
+        if payload.content_type == "video_prompt":
+            template = _LlmPromptTemplate(
+                feature="marketing_video_prompt",
+                system=MARKETING_AI_TEMPLATE.system,
+                max_tokens=5000,
+                temperature=0.25,
+            )
+
         raw = await _llm_run_template(
-            MARKETING_AI_TEMPLATE, user_prompt,
+            template,
+            user_prompt,
             session_id=f"marketing.{payload.content_type}",
         )
     except RuntimeError as exc:
@@ -1047,9 +1188,50 @@ async def ai_campaign_draft(payload: AiMarketingDraftIn, request: Request,
         } else 502
         raise HTTPException(status_code=status, detail={"code": code})
 
-    envelope = _validate_marketing_ai_response(
-        _llm_safe_extract_json(raw), payload.content_type,
-    )
+    parsed = _llm_safe_extract_json(raw)
+
+    # Detailed scene-by-scene video prompts may be returned as plain text
+    # even when JSON was requested. Preserve that usable content instead
+    # of discarding it with an invalid_model_response error.
+    if (
+        payload.content_type == "video_prompt"
+        and not isinstance(parsed, dict)
+        and isinstance(raw, str)
+        and raw.strip()
+    ):
+        cleaned_raw = raw.strip()
+
+        # Remove common Markdown fences without changing the generated copy.
+        if cleaned_raw.startswith("```"):
+            cleaned_raw = cleaned_raw.split("\n", 1)[-1]
+
+            if cleaned_raw.endswith("```"):
+                cleaned_raw = cleaned_raw[:-3].rstrip()
+
+        envelope = {
+            "content_type": "video_prompt",
+            "title": payload.service_or_topic[:200],
+            "summary": "",
+            "draft": cleaned_raw[:30000],
+            "variations": [],
+            "hashtags": [],
+            "subject_lines": [],
+            "calls_to_action": (
+                [payload.call_to_action]
+                if payload.call_to_action
+                else []
+            ),
+            "compliance_notes": [],
+            "disclaimer_suggestions": [],
+            "provider_review_required": False,
+            "human_review_required": True,
+        }
+    else:
+        envelope = _validate_marketing_ai_response(
+            parsed,
+            payload.content_type,
+        )
+
     envelope["disclaimer"] = MARKETING_AI_DISCLAIMER
     envelope["human_review_required"] = True
 

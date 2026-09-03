@@ -218,6 +218,8 @@ class TestPOS:
         assert abs(d["tax"] - 13.6) < 0.01
         assert abs(d["total"] - 188.6) < 0.01
         assert d["payment_method"] == "chase_pos"
+        assert d["status"] == "pending"
+        assert d.get("paid_at") is None
         TestPOS.txn_id = d["id"]
         # verify decrement
         rinv = requests.get(f"{API}/inventory", headers=admin_headers, timeout=15)
@@ -232,7 +234,15 @@ class TestPOS:
             "payment_method": method,
         }, timeout=20)
         assert r.status_code == 200, r.text
-        assert r.json()["payment_method"] == method
+        data = r.json()
+        assert data["payment_method"] == method
+
+        if method in {"cash", "check"}:
+            assert data["status"] == "paid"
+            assert data.get("paid_at") is not None
+        else:
+            assert data["status"] == "pending"
+            assert data.get("paid_at") is None
 
     def test_transactions_filter_by_client(self, admin_headers, admin_client_id):
         r = requests.get(f"{API}/transactions", headers=admin_headers,

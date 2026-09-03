@@ -3,6 +3,7 @@ import PortalLayout, { PortalHeader } from "../PortalLayout";
 import api from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { Pill, Apple, Moon, TestTube2, CalendarCheck, Sparkles } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 const TYPE_META = {
   supplement: { icon: Pill, label: "Supplement" },
@@ -18,7 +19,7 @@ export default function PatientPlan() {
   const [supplements, setSupplements] = React.useState([]);
 
   React.useEffect(() => {
-    api.get("/treatment-plans").then((r) => setPlans(r.data || [])).catch(() => {});
+    api.get("/treatment-plans").then((r) => setPlans(normalizeArray(r.data, ["plans"]))).catch(() => {});
   }, []);
 
   // Resolve the patient's own client_id to fetch their supplement assignments
@@ -30,7 +31,7 @@ export default function PatientPlan() {
         const me = r.data;
         if (!me?.id || !active) return;
         const a = await api.get(`/clients/${me.id}/supplement-assignments`);
-        if (active) setSupplements(a.data || []);
+        if (active) setSupplements(normalizeArray(a.data, ["supplements"]));
       } catch {
         // graceful fallback
       }
@@ -52,7 +53,7 @@ export default function PatientPlan() {
             <span className="text-xs uppercase tracking-widest text-[#8a6a3c]">{supplements.length} sheet{supplements.length === 1 ? "" : "s"}</span>
           </div>
           <div className="grid sm:grid-cols-2 gap-4">
-            {supplements.map((s) => (
+            {normalizeArray(supplements).map((s) => (
               <article key={s.id} className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5" data-testid={`patient-supp-${s.id}`}>
                 <div className="flex items-start gap-2 mb-2">
                   <div className="rounded-full bg-[#f1ead8] p-2 text-[#8a6a3c] flex-shrink-0"><Pill size={14} /></div>
@@ -91,7 +92,7 @@ export default function PatientPlan() {
         </div>
       ) : plans.length === 0 ? null : (
         <div className="space-y-6" data-testid="patient-treatment-plans">
-          {plans.map((p) => (
+          {normalizeArray(plans).map((p) => (
             <article key={p.id} className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-6">
               <header className="mb-4">
                 <div className="font-display text-2xl text-[#1f2a22]">{p.title}</div>

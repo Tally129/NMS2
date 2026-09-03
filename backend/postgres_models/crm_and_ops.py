@@ -41,6 +41,84 @@ class Campaign(_Ph35Base, Base):
     __tablename__ = "emr_campaigns"
 
 
+class ContentStrategy(_Ph35Base, Base):
+    """Persistent AI content strategy, planning brief, and generated plan."""
+    __tablename__ = "emr_content_strategies"
+
+    status: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, index=True,
+    )
+    created_by: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        ForeignKey("auth_users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+
+class ContentAsset(_Ph35Base, Base):
+    """Reusable content generated from or attached to a strategy."""
+    __tablename__ = "emr_content_assets"
+
+    strategy_id: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        ForeignKey("emr_content_strategies.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    content_type: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, index=True,
+    )
+    status: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, index=True,
+    )
+    created_by: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        ForeignKey("auth_users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+
+class PublishingQueue(_Ph35Base, Base):
+    """Approved content staged for controlled publishing."""
+    __tablename__ = "emr_publishing_queue"
+
+    content_asset_id: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        ForeignKey("emr_content_assets.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    strategy_id: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        ForeignKey("emr_content_strategies.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    status: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        nullable=True,
+        index=True,
+    )
+    platform: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+        index=True,
+    )
+    scheduled_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    created_by: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        ForeignKey("auth_users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+
 class FrontDeskVisit(_Ph35Base, Base):
     __tablename__ = "emr_front_desk_visits"
     client_id: Mapped[Optional[str]] = mapped_column(

@@ -86,8 +86,7 @@ export default function AppointmentsEHR() {
   }, [appts]);
 
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  const todayUpcoming = appts
-    .filter((a) => a.start && new Date(a.start) >= today)
+  const todayUpcoming = normalizeArray(appts).filter((a) => a.start && new Date(a.start) >= today)
     .sort((a, b) => new Date(a.start) - new Date(b.start))
     .slice(0, 4);
 
@@ -216,7 +215,7 @@ export default function AppointmentsEHR() {
                 </SheetDescription>
               </SheetHeader>
               <div className="mt-6 space-y-4">
-                <KV k="MRN" v={(clients.find((c) => c.id === selected.client_id) || {}).mrn || "—"} />
+                <KV k="MRN" v={(normalizeArray(clients).find((c) => c.id === selected.client_id) || {}).mrn || "—"} />
                 <KV k="Provider" v={selected.practitioner_name || "—"} />
                 <KV k="Visit type" v={selected.visit_type || "Consultation"} />
                 <KV k="Mode" v={selected.visit_mode === "telehealth" ? "Telehealth" : "In-clinic"} />

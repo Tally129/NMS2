@@ -95,9 +95,9 @@ export default function PointOfSale() {
   const updateLine = (i, patch) => {
     const next = [...cart]; next[i] = { ...next[i], ...patch }; setCart(next);
   };
-  const remove = (i) => setCart(cart.filter((_, idx) => idx !== i));
+  const remove = (i) => setCart(normalizeArray(cart).filter((_, idx) => idx !== i));
 
-  const subtotal = cart.reduce((s, l) => s + l.qty * l.unit_price, 0);
+  const subtotal = normalizeArray(cart).reduce((s, l) => s + l.qty * l.unit_price, 0);
   const afterDiscount = Math.max(0, subtotal - (discount || 0));
   const tax = afterDiscount * (taxRate || 0);
   const total = afterDiscount + tax + (tip || 0);
@@ -111,7 +111,7 @@ export default function PointOfSale() {
     try {
       const payload = {
         client_id: clientId === "walkin" ? null : clientId,
-        lines: cart.map((l) => ({ type: l.type, ref_id: l.ref_id, name: l.name, qty: l.qty, unit_price: l.unit_price })),
+        lines: normalizeArray(cart).map((l) => ({ type: l.type, ref_id: l.ref_id, name: l.name, qty: l.qty, unit_price: l.unit_price })),
         discount: parseFloat(discount) || 0,
         tip: parseFloat(tip) || 0,
         tax_rate: parseFloat(taxRate) || 0,
@@ -123,9 +123,15 @@ export default function PointOfSale() {
         appointment_id: appointmentId || undefined,
       };
       const r = await api.post("/pos/checkout", payload);
+      const wasPaid = r.data.status === "paid";
+
       toast({
-        title: `Sale recorded · $${r.data.total.toFixed(2)}`,
-        description: appointmentId ? "Appointment marked completed." : undefined,
+        title: wasPaid
+          ? `Payment recorded · $${r.data.total.toFixed(2)}`
+          : `Invoice created · $${r.data.total.toFixed(2)}`,
+        description: wasPaid
+          ? (appointmentId ? "Payment received and appointment completed." : "Payment received.")
+          : "Payment is pending. This will not be marked paid until payment is confirmed.",
       });
       // Download PDF receipt through the authenticated axios instance —
       // never read the bearer token from localStorage.
@@ -166,8 +172,8 @@ export default function PointOfSale() {
              data-testid="pos-appointment-banner">
           <div className="text-sm text-[#2f4a3a]">
             <span className="font-medium">Appointment checkout</span> —
-            completing this sale will mark the appointment as completed and
-            record it against this visit.
+            this transaction will be linked to the visit. The appointment is
+            completed only after payment is actually recorded as paid.
           </div>
           <button
             type="button"
@@ -329,7 +335,7 @@ export default function PointOfSale() {
             <div className="text-sm text-[#6a6a6a] py-6 text-center">Cart is empty</div>
           ) : (
             <ul className="divide-y divide-[#e7dfc9]">
-              {cart.map((l, i) => (
+              {normalizeArray(cart).map((l, i) => (
                 <li key={i} className="py-2.5 flex items-center gap-2" data-testid={`pos-cart-line-${i}`}>
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium text-[#1f2a22] truncate">{l.name}</div>

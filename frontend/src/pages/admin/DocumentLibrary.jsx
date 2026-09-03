@@ -14,6 +14,7 @@ import {
   FileUp, Sparkles, FileText, Activity, ClipboardList, Pill,
   Loader2, ArrowRight, CheckCircle2, AlertCircle, Trash2,
 } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 const TYPE_META = {
   form:       { label: "Form / Consent", color: "#c19a4b", icon: ClipboardList, dest: "/portal/admin/forms" },
@@ -37,12 +38,96 @@ export default function DocumentLibrary() {
   const [analyzing, setAnalyzing] = React.useState(false);
   const [result, setResult] = React.useState(null);
   const [supplements, setSupplements] = React.useState([]);
+  const [forms, setForms] = React.useState([]);
+  const [protocols, setProtocols] = React.useState([]);
+  const [soapTemplates, setSoapTemplates] = React.useState([]);
+  const [librarySearch, setLibrarySearch] = React.useState("");
+  const [libraryType, setLibraryType] = React.useState("all");
   const [savingSupp, setSavingSupp] = React.useState(false);
 
   const loadSupplements = async () => {
-    try { const r = await api.get("/library/supplements"); setSupplements(r.data || []); } catch {}
+    try { const r = await api.get("/library/supplements"); setSupplements(normalizeArray(r.data, ["supplements"])); } catch {}
   };
-  React.useEffect(() => { loadSupplements(); }, []);
+  const loadLibrary = async () => {
+    const results = await Promise.allSettled([
+      api.get("/forms/templates"),
+      api.get("/protocols/templates"),
+      api.get("/soap-templates"),
+      api.get("/library/supplements"),
+    ]);
+
+    const [formsR, protocolsR, soapR, supplementsR] = results;
+
+    if (formsR.status === "fulfilled") {
+      setForms(normalizeArray(formsR.value.data, ["templates", "forms"]));
+    }
+
+    if (protocolsR.status === "fulfilled") {
+      setProtocols(normalizeArray(protocolsR.value.data, ["templates", "protocols"]));
+    }
+
+    if (soapR.status === "fulfilled") {
+      setSoapTemplates(normalizeArray(soapR.value.data, ["templates"]));
+    }
+
+    if (supplementsR.status === "fulfilled") {
+      setSupplements(normalizeArray(supplementsR.value.data, ["supplements"]));
+    }
+  };
+
+  React.useEffect(() => { loadLibrary(); }, []);
+
+  const libraryItems = React.useMemo(() => {
+    const items = [
+      ...normalizeArray(forms).map((item) => ({
+        ...item,
+        library_type: "form",
+      })),
+      ...normalizeArray(protocols).map((item) => ({
+        ...item,
+        library_type: "protocol",
+      })),
+      ...normalizeArray(soapTemplates).map((item) => ({
+        ...item,
+        library_type: "soap",
+      })),
+      ...normalizeArray(supplements).map((item) => ({
+        ...item,
+        library_type: "supplement",
+      })),
+    ];
+
+    const q = librarySearch.trim().toLowerCase();
+
+    return items.filter((item) => {
+      if (
+        libraryType !== "all" &&
+        item.library_type !== libraryType
+      ) {
+        return false;
+      }
+
+      if (!q) return true;
+
+      return [
+        item.title,
+        item.description,
+        item.summary,
+        item.category,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase()
+        .includes(q);
+    });
+  }, [
+    forms,
+    protocols,
+    soapTemplates,
+    supplements,
+    librarySearch,
+    libraryType,
+  ]);
 
   const onPick = (e) => {
     const f = e.target.files?.[0];
@@ -187,44 +272,115 @@ export default function DocumentLibrary() {
         </div>
       )}
 
-      {/* Supplement sheets gallery */}
-      <div className="mt-10" data-testid="library-supplements-section">
-        <div className="flex items-end justify-between mb-3">
-          <h2 className="font-display text-2xl text-[#1f2a22]">Supplement directions</h2>
-          <span className="text-xs text-[#8a6a3c] uppercase tracking-widest">{supplements.length} sheets</span>
-        </div>
-        {supplements.length === 0 ? (
-          <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-8 text-center text-sm text-[#6a6a6a]">
-            No supplement sheets yet. Drop a directions PDF and the AI will detect it.
+      {/* Unified document library */}
+      <div className="mt-10" data-testid="unified-document-library">
+        <div className="flex flex-col gap-4">
+          <div>
+            <h2 className="font-display text-2xl text-[#1f2a22]">
+              Clinical document library
+            </h2>
+            <p className="mt-1 text-sm text-[#6a6a6a]">
+              Browse forms, consents, protocols, SOAP templates, and supplement directions.
+            </p>
           </div>
-        ) : (
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {supplements.map((s) => (
-              <div key={s.id} className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5" data-testid={`library-supp-${s.id}`}>
-                <div className="flex items-start justify-between gap-2 mb-2">
-                  <div className="flex items-start gap-2 min-w-0">
-                    <Pill size={16} className="text-[#8a6a3c] mt-0.5" />
-                    <h3 className="font-display text-lg text-[#1f2a22] leading-tight">{s.title}</h3>
-                  </div>
-                  <button onClick={() => removeSupp(s.id)} className="text-[#7a2a2a] hover:opacity-70" title="Delete">
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-                {s.summary && <p className="text-sm text-[#5a5a5a] line-clamp-2 mb-3">{s.summary}</p>}
-                <ul className="text-xs text-[#3a3a3a] space-y-1">
-                  {(s.items || []).slice(0, 5).map((it, idx) => (
-                    <li key={idx} className="flex justify-between gap-3">
-                      <span className="font-medium truncate">{it.name}</span>
-                      <span className="text-[#6a6a6a] flex-shrink-0">{it.dose || ""}{it.frequency ? ` · ${it.frequency}` : ""}</span>
-                    </li>
-                  ))}
-                  {(s.items || []).length > 5 && <li className="text-[#8a6a3c] text-[10px] uppercase tracking-widest">+{s.items.length - 5} more</li>}
-                </ul>
-              </div>
+
+          <Input
+            value={librarySearch}
+            onChange={(e) => setLibrarySearch(e.target.value)}
+            placeholder="Search documents..."
+            className="max-w-xl bg-[#fbf7ee] border-[#e0d6bc]"
+            data-testid="library-search"
+          />
+
+          <div className="flex flex-wrap gap-2">
+            {[
+              ["all", "All"],
+              ["form", "Forms & Consents"],
+              ["protocol", "Protocols"],
+              ["soap", "SOAP Templates"],
+              ["supplement", "Supplements"],
+            ].map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setLibraryType(value)}
+                className={`rounded-full border px-4 py-2 text-xs uppercase tracking-wide ${
+                  libraryType === value
+                    ? "bg-[#2f4a3a] border-[#2f4a3a] text-[#f6f1e6]"
+                    : "bg-[#fbf7ee] border-[#e0d6bc] text-[#3a3a3a]"
+                }`}
+              >
+                {label}
+              </button>
             ))}
           </div>
-        )}
+        </div>
+
+        <div className="mt-5">
+          {libraryItems.length === 0 ? (
+            <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-8 text-center text-sm text-[#6a6a6a]">
+              No documents match this filter.
+            </div>
+          ) : (
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {libraryItems.map((item) => {
+                const meta = TYPE_META[item.library_type] || TYPE_META.other;
+                const Icon = meta.icon;
+
+                return (
+                  <div
+                    key={`${item.library_type}-${item.id}`}
+                    className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5"
+                  >
+                    <div className="flex items-start gap-3">
+                      <Icon
+                        size={18}
+                        style={{ color: meta.color }}
+                        className="mt-1 flex-shrink-0"
+                      />
+
+                      <div className="min-w-0 flex-1">
+                        <div
+                          className="text-[10px] uppercase tracking-widest"
+                          style={{ color: meta.color }}
+                        >
+                          {meta.label}
+                        </div>
+
+                        <h3 className="mt-1 font-display text-lg text-[#1f2a22]">
+                          {item.title || "Untitled document"}
+                        </h3>
+
+                        {(item.description || item.summary) && (
+                          <p className="mt-2 line-clamp-2 text-sm text-[#6a6a6a]">
+                            {item.description || item.summary}
+                          </p>
+                        )}
+
+                        {meta.dest ? (
+                          <button
+                            type="button"
+                            onClick={() => navigate(meta.dest)}
+                            className="mt-4 inline-flex items-center gap-1 text-sm font-medium text-[#2f4a3a] hover:underline"
+                          >
+                            Open
+                            <ArrowRight size={13} />
+                          </button>
+                        ) : (
+                          <span className="mt-4 inline-block text-xs text-[#8a6a3c]">
+                            Stored in Document Library
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
+
     </PortalLayout>
   );
 }

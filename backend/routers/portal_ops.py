@@ -73,25 +73,65 @@ RESET_TTL_MIN = 60  # first-time invites get a longer runway than the 20-min for
 TEST_PATIENT_TAG = "portal_test_patient"
 
 
-async def _issue_portal_link(user: dict, request: Request, ttl_min: int = RESET_TTL_MIN) -> tuple[str, str]:
-    """Create a fresh password-reset token for `user`; return (raw_token, url)."""
+async def _issue_portal_link(
+    user: dict,
+    request: Request,
+    ttl_min: int = RESET_TTL_MIN,
+) -> tuple[str, str]:
+    """Create a fresh single-use setup token using the primary auth token table.
+
+    New workforce and portal invitations now use the same PostgreSQL token
+    storage and redemption path as the working forgot-password flow. Legacy
+    invitation tokens remain redeemable through the reset endpoint fallback.
+    """
     raw = secrets.token_urlsafe(48)
     now = datetime.now(timezone.utc)
-    await insert_portal_reset_token(
-        token_id=new_id(),
-        user_id=user["id"],
-        token_hash=_hash_token(raw),
-        expires_at=now + timedelta(minutes=ttl_min),
-        email_hash=_hash_email(user["email"]),
-        ip=get_client_ip(request),
-        purpose="portal_invite",
-    )
+    token_hash = _hash_token(raw)
+
+    from sqlalchemy import update
+    from postgres_models import PasswordResetToken
+    from repositories import password_reset as password_reset_repo
+
+    # Invalidate any outstanding primary reset/setup tokens for this user,
+    # then create one fresh token atomically.
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await pg.execute(
+                update(PasswordResetToken)
+                .where(
+                    PasswordResetToken.user_id == user["id"],
+                    PasswordResetToken.consumed_at.is_(None),
+                )
+                .values(
+                    consumed_at=now,
+                    consumed_ip="superseded",
+                )
+            )
+
+            await password_reset_repo.create_token(
+                pg,
+                token_id=new_id(),
+                token_hash=token_hash,
+                user_id=user["id"],
+                email_hash=_hash_email(user["email"]),
+                expires_at=now + timedelta(minutes=ttl_min),
+                ip=get_client_ip(request),
+            )
+
+    # Also invalidate old legacy invitation rows so only the newest email works.
+    await invalidate_portal_reset_tokens(user["id"])
+
     origin = _frontend_origin(request)
+
     from urllib.parse import quote as _url_quote
-    _encoded = _url_quote(raw, safe="")
-    url = (f"{origin}/reset-password?token={_encoded}"
-            if origin
-            else f"/reset-password?token={_encoded}")
+
+    encoded = _url_quote(raw, safe="")
+    url = (
+        f"{origin}/reset-password?token={encoded}"
+        if origin
+        else f"/reset-password?token={encoded}"
+    )
+
     return raw, url
 
 

@@ -43,14 +43,19 @@ class UserBase(BaseModel):
 
 
 class UserCreate(UserBase):
-    # NIST validator (validate_password_strength) is the single source of truth; keep Pydantic lax so the clean 400 wins over 422.
-    password: str = Field(min_length=1)
+    # Workforce accounts are invitation-based and do not receive an
+    # administrator-selected password. Client accounts still require one,
+    # enforced in the admin route.
+    password: Optional[str] = Field(default=None, min_length=1)
 
 
 class UserOut(UserBase):
     id: str
     mfa_enabled: bool = False
     is_active: bool = True
+    must_change_password: bool = False
+    onboarding_status: Optional[str] = None
+    temporary_password_expires_at: Optional[datetime] = None
     created_at: datetime
     last_login_at: Optional[datetime] = None
 
@@ -121,8 +126,40 @@ class ClientIn(BaseModel):
         return validate_test_email(v)
 
 
-class ClientOut(ClientIn):
+class ClientOut(BaseModel):
     id: str
+    user_id: Optional[str] = None
+    full_name: Optional[str] = None
+
+    # Stored legacy patient emails are returned as-is so one malformed
+    # historical address cannot break the entire patient list.
+    email: Optional[str] = None
+
+    phone: Optional[str] = None
+    dob: Optional[str] = None
+    sex: Optional[str] = None
+    address: Optional[str] = None
+    emergency_contact: Optional[str] = None
+    assigned_practitioner_id: Optional[str] = None
+    mrn: Optional[str] = None
+    photo_file_id: Optional[str] = None
+    gender_identity: Optional[str] = None
+    pronouns: Optional[str] = None
+    language: Optional[str] = None
+    marital_status: Optional[str] = None
+    alt_phone: Optional[str] = None
+    referral_source: Optional[str] = None
+    primary_concern: Optional[str] = None
+    wellness_goals: Optional[str] = None
+    current_supplements: Optional[str] = None
+    dietary_restrictions: Optional[str] = None
+    allergies: Optional[str] = None
+    comms_pref: Optional[str] = None
+    consent_telehealth: Optional[bool] = None
+    consent_photo: Optional[bool] = None
+    consent_marketing: Optional[bool] = None
+    notes: Optional[str] = None
+    tags: Optional[List[str]] = None
     intake_completed: bool = False
     created_at: datetime
 
@@ -146,9 +183,189 @@ class IntakeOut(IntakeIn):
     created_at: datetime
 
 
+# --------- Vitals ---------
+class VitalIn(BaseModel):
+    client_id: str
+    appointment_id: Optional[str] = None
+
+    source: Literal[
+        "staff_measured",
+        "patient_reported",
+        "device_imported",
+    ] = "staff_measured"
+
+    visit_mode: Literal[
+        "in_person",
+        "telehealth",
+        "home",
+    ] = "in_person"
+
+    recorded_at: Optional[datetime] = None
+
+    systolic: Optional[int] = Field(
+        default=None,
+        ge=40,
+        le=300,
+    )
+    diastolic: Optional[int] = Field(
+        default=None,
+        ge=20,
+        le=200,
+    )
+    pulse: Optional[int] = Field(
+        default=None,
+        ge=20,
+        le=300,
+    )
+    respiratory_rate: Optional[int] = Field(
+        default=None,
+        ge=4,
+        le=80,
+    )
+    temperature_f: Optional[float] = Field(
+        default=None,
+        ge=85,
+        le=115,
+    )
+    oxygen_saturation: Optional[float] = Field(
+        default=None,
+        ge=40,
+        le=100,
+    )
+    height_in: Optional[float] = Field(
+        default=None,
+        ge=12,
+        le=108,
+    )
+    weight_lb: Optional[float] = Field(
+        default=None,
+        ge=1,
+        le=1500,
+    )
+    pain_score: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=10,
+    )
+    blood_glucose: Optional[float] = Field(
+        default=None,
+        ge=10,
+        le=1500,
+    )
+    waist_in: Optional[float] = Field(
+        default=None,
+        ge=5,
+        le=150,
+    )
+    notes: Optional[str] = Field(
+        default=None,
+        max_length=4000,
+    )
+
+
+class VitalUpdate(BaseModel):
+    appointment_id: Optional[str] = None
+    source: Optional[Literal[
+        "staff_measured",
+        "patient_reported",
+        "device_imported",
+    ]] = None
+    visit_mode: Optional[Literal[
+        "in_person",
+        "telehealth",
+        "home",
+    ]] = None
+    recorded_at: Optional[datetime] = None
+
+    systolic: Optional[int] = Field(None, ge=40, le=300)
+    diastolic: Optional[int] = Field(None, ge=20, le=200)
+    pulse: Optional[int] = Field(None, ge=20, le=300)
+    respiratory_rate: Optional[int] = Field(
+        None,
+        ge=4,
+        le=80,
+    )
+    temperature_f: Optional[float] = Field(
+        None,
+        ge=85,
+        le=115,
+    )
+    oxygen_saturation: Optional[float] = Field(
+        None,
+        ge=40,
+        le=100,
+    )
+    height_in: Optional[float] = Field(
+        None,
+        ge=12,
+        le=108,
+    )
+    weight_lb: Optional[float] = Field(
+        None,
+        ge=1,
+        le=1500,
+    )
+    pain_score: Optional[int] = Field(None, ge=0, le=10)
+    blood_glucose: Optional[float] = Field(
+        None,
+        ge=10,
+        le=1500,
+    )
+    waist_in: Optional[float] = Field(
+        None,
+        ge=5,
+        le=150,
+    )
+    notes: Optional[str] = Field(
+        default=None,
+        max_length=4000,
+    )
+
+    amendment_reason: str = Field(
+        min_length=3,
+        max_length=1000,
+    )
+
+
+class VitalOut(BaseModel):
+    id: str
+    client_id: str
+    appointment_id: Optional[str] = None
+
+    recorded_by_id: Optional[str] = None
+    recorded_by_name: Optional[str] = None
+    recorded_at: datetime
+    source: str
+    visit_mode: str
+
+    systolic: Optional[int] = None
+    diastolic: Optional[int] = None
+    pulse: Optional[int] = None
+    respiratory_rate: Optional[int] = None
+    temperature_f: Optional[float] = None
+    oxygen_saturation: Optional[float] = None
+    height_in: Optional[float] = None
+    weight_lb: Optional[float] = None
+    bmi: Optional[float] = None
+    pain_score: Optional[int] = None
+    blood_glucose: Optional[float] = None
+    waist_in: Optional[float] = None
+    notes: Optional[str] = None
+
+    amended_at: Optional[datetime] = None
+    amended_by_id: Optional[str] = None
+    amended_by_name: Optional[str] = None
+    amendment_reason: Optional[str] = None
+    prior_values: List[Dict[str, Any]] = []
+
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+
 # --------- SOAP Notes ---------
 class NoteIn(BaseModel):
     client_id: str
+    appointment_id: Optional[str] = None
     subjective: str = ""
     objective: str = ""
     assessment: str = ""
@@ -165,6 +382,7 @@ class Amendment(BaseModel):
 
 class NoteOut(NoteIn):
     id: str
+    client_name: Optional[str] = None
     practitioner_id: str
     practitioner_name: Optional[str] = None
     created_at: datetime
@@ -277,6 +495,8 @@ class AppointmentOut(BaseModel):
     visit_mode: Literal["in_person", "telehealth"] = "in_person"
     consent_telehealth: bool = False
     telehealth: Optional[Dict[str, Any]] = None
+    waiting_room: Optional[Dict[str, Any]] = None
+    recordings: List[Dict[str, Any]] = []
     created_at: datetime
     created_by: Optional[str] = None
     # Set by pos_checkout when the visit is paid (handoff #4).
@@ -500,6 +720,7 @@ class TreatmentIn(BaseModel):
     sku: Optional[str] = None
     description: Optional[str] = None
     active: bool = True
+    concierge_public: bool = False
 
 
 class TreatmentOut(TreatmentIn):
@@ -520,6 +741,9 @@ class InventoryItemIn(BaseModel):
 class InventoryItemOut(InventoryItemIn):
     id: str
     created_at: datetime
+    updated_at: Optional[datetime] = None
+    archived_at: Optional[datetime] = None
+    archived_by: Optional[str] = None
 
 
 class InventoryAdjustIn(BaseModel):
@@ -655,6 +879,7 @@ class PasswordChange(BaseModel):
 # --------- Telehealth ---------
 class TelehealthConsentIn(BaseModel):
     signature: str
+    recording_consent: bool = False
 
 
 # =========== PHASE 10: FORMS & CONSENTS ===========
@@ -672,6 +897,13 @@ class FormField(BaseModel):
     options: List[str] = []  # for radio/select
     help_text: Optional[str] = None
 
+    # AI-suggested intake organization and mapping. An admin should review
+    # mappings before publishing the template.
+    section: Optional[str] = None
+    mapping: Optional[str] = None
+    mapping_status: Literal["suggested", "approved", "unmapped"] = "unmapped"
+    mapping_confidence: Optional[float] = None
+
 
 class FormTemplateIn(BaseModel):
     title: str
@@ -679,6 +911,15 @@ class FormTemplateIn(BaseModel):
     category: FormCategory = "other"
     fields: List[FormField] = []
     active: bool = True
+
+    # Document-to-digital-form metadata.
+    source: Literal["ai", "upload", "manual"] = "manual"
+    source_filename: Optional[str] = None
+    form_type: Literal["intake", "consent", "questionnaire", "other"] = "other"
+    version: int = 1
+    publication_status: Literal["draft", "published", "archived"] = "draft"
+    requires_signature: bool = False
+    auto_assign_new_patients: bool = False
 
 
 class FormTemplateOut(FormTemplateIn):
@@ -696,7 +937,13 @@ class FormTranscribeOut(BaseModel):
     category: FormCategory = "other"
     fields: List[FormField] = []
     source: str = "ai"  # ai | upload | manual
+    source_filename: Optional[str] = None
+    form_type: Literal["intake", "consent", "questionnaire", "other"] = "other"
+    version: int = 1
+    publication_status: Literal["draft", "published", "archived"] = "draft"
+    requires_signature: bool = False
     extracted_text_preview: Optional[str] = None
+    document_metadata: Optional[dict] = None
 
 
 class FormGenerateIn(BaseModel):
@@ -732,6 +979,10 @@ class FormSubmissionOut(BaseModel):
     answers: Dict[str, Any] = {}
     signature_data: Optional[str] = None
     status: Literal["sent", "submitted", "expired", "void"] = "sent"
+    voided_at: Optional[datetime] = None
+    voided_by: Optional[str] = None
+    voided_by_name: Optional[str] = None
+    void_reason: Optional[str] = None
     lifecycle_status: Optional[str] = None
     finalized_at: Optional[datetime] = None
     finalized_by: Optional[str] = None

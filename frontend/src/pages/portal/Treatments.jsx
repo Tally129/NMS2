@@ -8,8 +8,18 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { useToast } from "../../hooks/use-toast";
 import { Plus, Pencil, Trash2, Search } from "lucide-react";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
 
-const empty = { name: "", category: "", duration_min: 60, price: 0, sku: "", description: "", active: true };
+const empty = {
+  name: "",
+  category: "",
+  duration_min: 60,
+  price: 0,
+  sku: "",
+  description: "",
+  active: true,
+  concierge_public: false,
+};
 
 export default function Treatments() {
   const { toast } = useToast();
@@ -20,13 +30,13 @@ export default function Treatments() {
   const [q, setQ] = React.useState("");
 
   const load = () =>
-    api.get("/treatments").then((r) => setItems(r.data || [])).finally(() => setLoading(false));
+    api.get("/treatments").then((r) => setItems(normalizeArray(r.data, ["items"]))).finally(() => setLoading(false));
   React.useEffect(() => { load(); }, []);
 
   const filtered = React.useMemo(() => {
     const s = q.trim().toLowerCase();
     if (!s) return items;
-    return items.filter((t) =>
+    return normalizeArray(items).filter((t) =>
       (t.name || "").toLowerCase().includes(s) ||
       (t.category || "").toLowerCase().includes(s) ||
       (t.sku || "").toLowerCase().includes(s) ||
@@ -145,6 +155,25 @@ export default function Treatments() {
             <div><Label>Price</Label><Input type="number" step="0.01" className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} data-testid="tx-price" /></div>
             <div className="md:col-span-2"><Label>Description</Label><Input className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></div>
             <div className="md:col-span-2"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.active} onChange={(e) => setForm({ ...form, active: e.target.checked })} data-testid="tx-active" /> Active (available for booking & POS)</label></div>
+            <div className="md:col-span-2">
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={!!form.concierge_public}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      concierge_public: e.target.checked,
+                    })
+                  }
+                  data-testid="tx-concierge-public"
+                />
+                Public service (approved for website AI Concierge)
+              </label>
+              <p className="mt-1 ml-5 text-xs text-[#6a6a6a]">
+                Only enable this for information approved for public visitors.
+              </p>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEdit(null)}>Cancel</Button>

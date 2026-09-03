@@ -100,6 +100,12 @@ class Appointment(Base):
         server_default=func.now(), onupdate=_utcnow,
     )
 
+    archived_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
 
 class AppointmentRequest(Base):
     """Anonymous / public appointment-request submissions.
@@ -139,7 +145,29 @@ class AppointmentRequest(Base):
         DateTime(timezone=True), nullable=True,
     )
 
+    archived_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+    archived_by: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        ForeignKey("auth_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     ip: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    # SHA-256 digest of an opaque browser-generated Concierge submission key.
+    # Nullable so legacy/public non-Concierge appointment requests are
+    # unaffected. PostgreSQL permits multiple NULLs in a UNIQUE column.
+    concierge_idempotency_key: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
 
     legacy_mongo_id: Mapped[Optional[str]] = mapped_column(String(64),
                                                             nullable=True)

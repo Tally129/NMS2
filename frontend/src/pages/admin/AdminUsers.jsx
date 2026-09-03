@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { useToast } from "../../hooks/use-toast";
 import { UserPlus, Search, UserX, UserCheck, Send } from "lucide-react";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
 
 const ROLES = [
   { value: "admin", label: "Administrator" },
@@ -26,12 +27,12 @@ export default function AdminUsers() {
   const [q, setQ] = React.useState("");
   const [roleFilter, setRoleFilter] = React.useState("all");
 
-  const load = () => api.get("/admin/users").then((r) => setUsers(r.data || [])).finally(() => setLoading(false));
+  const load = () => api.get("/admin/users").then((r) => setUsers(normalizeArray(r.data, ["users"]))).finally(() => setLoading(false));
   React.useEffect(() => { load(); }, []);
 
   const filtered = React.useMemo(() => {
     const s = q.trim().toLowerCase();
-    return users.filter((u) => {
+    return normalizeArray(users).filter((u) => {
       if (roleFilter !== "all" && u.role !== roleFilter) return false;
       if (!s) return true;
       return (u.full_name || "").toLowerCase().includes(s) ||

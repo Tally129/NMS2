@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -105,4 +105,157 @@ class LegacyPasswordResetToken(Base):
     used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now(),
+    )
+
+class VitalRecord(Base):
+    """One visit-based set of patient vital signs.
+
+    New visits create new rows. Corrections update the row while preserving
+    amendment metadata and a snapshot of the prior values.
+    """
+
+    __tablename__ = "emr_vitals"
+
+    id: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+    )
+
+    client_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("emr_clients.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    appointment_id: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        ForeignKey(
+            "emr_appointments.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    recorded_by_id: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        ForeignKey(
+            "auth_users.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    recorded_by_name: Mapped[Optional[str]] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        server_default=func.now(),
+        index=True,
+    )
+
+    source: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default="staff_measured",
+        server_default="staff_measured",
+    )
+
+    visit_mode: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="in_person",
+        server_default="in_person",
+    )
+
+    systolic: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    diastolic: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    pulse: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    respiratory_rate: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    temperature_f: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    oxygen_saturation: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    height_in: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    weight_lb: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    bmi: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    pain_score: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    blood_glucose: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    waist_in: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    notes: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    amended_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    amended_by_id: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    amended_by_name: Mapped[Optional[str]] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+    amendment_reason: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    prior_values: Mapped[Optional[list]] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )

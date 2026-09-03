@@ -19,6 +19,7 @@ import { useToast } from "../../hooks/use-toast";
 import { useAuth } from "../../lib/auth";
 import { getErrorMessage } from "../../lib/errors";
 import TasksWidget from "../../components/TasksWidget";
+import { normalizeArray } from "../../lib/collections";
 
 const STATUSES = [
   { value: "new", label: "New" },
@@ -77,8 +78,8 @@ export default function TasksPage() {
     if (filters.priority) params.priority = filters.priority;
     if (filters.search) params.search = filters.search;
     try {
-      const r = await api.get("/tasks", { params });
-      setTasks(r.data || []);
+      const r = await api.getList("/tasks", { params }, ["tasks"]);
+      setTasks(normalizeArray(r.data, ["tasks"]));
     } catch (e) {
       toast({ title: "Could not load tasks", description: getErrorMessage(e) || "" });
     }
@@ -86,8 +87,8 @@ export default function TasksPage() {
 
   React.useEffect(() => { load(); }, [load]);
   React.useEffect(() => {
-    api.get("/admin/users").then((r) => setUsers(r.data || [])).catch(() => {});
-    api.get("/clients").then((r) => setClients(r.data || [])).catch(() => {});
+    api.getList("/admin/users", {}, ["users"]).then((r) => setUsers(normalizeArray(r.data, ["users"]))).catch(() => {});
+    api.getList("/clients", {}, ["clients"]).then((r) => setClients(normalizeArray(r.data, ["clients"]))).catch(() => {});
   }, []);
 
   const bump = async (id, patch) => {
@@ -103,7 +104,7 @@ export default function TasksPage() {
     }
   };
 
-  const overdueTasks = tasks.filter(
+  const overdueTasks = normalizeArray(tasks).filter(
     (t) => t.due_date && new Date(t.due_date) < new Date() && t.status !== "completed"
   );
 
@@ -207,7 +208,7 @@ export default function TasksPage() {
               </tr>
             </thead>
             <tbody>
-              {tasks.map((t) => {
+              {normalizeArray(tasks).map((t) => {
                 const overdue = t.due_date && new Date(t.due_date) < new Date() && t.status !== "completed";
                 return (
                   <tr key={t.id} className="border-t border-[#e2ebe4] hover:bg-[#fbfdfb]" data-testid={`task-row-${t.id}`}>
@@ -309,8 +310,8 @@ function NewTaskDialog({ open, onOpenChange, users, clients, onCreated }) {
     } finally { setBusy(false); }
   };
 
-  const staffUsers = users.filter((u) => ["staff", "medical_assistant", "admin"].includes(u.role));
-  const providerUsers = users.filter((u) => u.role === "practitioner");
+  const staffUsers = normalizeArray(users).filter((u) => ["staff", "medical_assistant", "admin"].includes(u.role));
+  const providerUsers = normalizeArray(users).filter((u) => u.role === "practitioner");
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -348,7 +349,7 @@ function NewTaskDialog({ open, onOpenChange, users, clients, onCreated }) {
                 <SelectTrigger data-testid="new-task-client"><SelectValue placeholder="None" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="_none">— None —</SelectItem>
-                  {clients.slice(0, 200).map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}
+                  {normalizeArray(clients).slice(0, 200).map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>

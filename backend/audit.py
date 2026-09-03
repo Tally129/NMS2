@@ -164,10 +164,13 @@ async def log_audit(
 
 
 def get_client_ip(request) -> Optional[str]:
+    """Return the client IP established by the trusted proxy boundary.
+
+    Uvicorn is reachable only from loopback and is configured to trust
+    proxy headers only from 127.0.0.1. Do not independently parse
+    X-Forwarded-For here; request.client is the normalized authority.
+    """
     try:
-        xff = request.headers.get("x-forwarded-for")
-        if xff:
-            return xff.split(",")[0].strip()
         return request.client.host if request.client else None
     except Exception:
         return None

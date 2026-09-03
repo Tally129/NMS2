@@ -6,6 +6,7 @@ import { Button } from "../../components/ui/button";
 import { useToast } from "../../hooks/use-toast";
 import { getErrorMessage } from "../../lib/errors";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceArea } from "recharts";
+import { normalizeArray } from "../../lib/collections";
 
 export default function PatientLabs() {
   const { toast } = useToast();
@@ -27,7 +28,7 @@ export default function PatientLabs() {
           api.get("/labs/presets"),
         ]);
 
-        setLabs(labsResponse.data || []);
+        setLabs(normalizeArray(labsResponse.data, ["labs"]));
         setPresets(presetsResponse.data?.presets || []);
       } catch (error) {
         setLabs([]);

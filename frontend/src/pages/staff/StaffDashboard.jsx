@@ -8,6 +8,7 @@ import {
   AlertTriangle, Calendar, ChevronRight, PlayCircle,
   CalendarDays, Receipt, Building2,
 } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 /**
  * Staff dashboard — front-desk-first. Replaces the practitioner dashboard for staff role.
@@ -38,11 +39,11 @@ export default function StaffDashboard() {
         api.get("/time-clock/me").catch(() => ({ data: [] })),
         api.get("/transactions?limit=200").catch(() => ({ data: [] })),
       ]);
-      setToday(v.data || []);
-      setAppts(a.data || []);
-      setInventory(i.data || []);
-      setExpiring(e.data || []);
-      setShifts(s.data || []);
+      setToday(normalizeArray(v.data, ["today"]));
+      setAppts(normalizeArray(a.data, ["appts"]));
+      setInventory(normalizeArray(i.data, ["inventory"]));
+      setExpiring(normalizeArray(e.data, ["expiring"]));
+      setShifts(normalizeArray(s.data, ["shifts"]));
       const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
       const todayTxns = (t.data || []).filter((x) => x.created_at && new Date(x.created_at) >= startOfDay);
       setTodayTxnTotal(todayTxns.reduce((sum, x) => sum + (x.total || 0), 0));
@@ -51,16 +52,15 @@ export default function StaffDashboard() {
   };
   React.useEffect(() => { load(); const t = setInterval(load, 30_000); return () => clearInterval(t); }, []);
 
-  const lowStock = inventory.filter((i) => (i.stock || 0) <= (i.low_stock_threshold || 5));
-  const inClinic = today.filter((v) => v.status === "checked_in" || v.status === "in_room").length;
-  const walkIns = today.filter((v) => v.walk_in).length;
-  const completed = today.filter((v) => v.status === "checked_out").length;
+  const lowStock = normalizeArray(inventory).filter((i) => (i.stock || 0) <= (i.low_stock_threshold || 5));
+  const inClinic = normalizeArray(today).filter((v) => v.status === "checked_in" || v.status === "in_room").length;
+  const walkIns = normalizeArray(today).filter((v) => v.walk_in).length;
+  const completed = normalizeArray(today).filter((v) => v.status === "checked_out").length;
 
   // Next 4 appointments today (any mode)
   const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
   const dayEnd = new Date(); dayEnd.setHours(23, 59, 59, 999);
-  const todaysAppts = appts
-    .filter((a) => a.start && new Date(a.start) >= dayStart && new Date(a.start) <= dayEnd)
+  const todaysAppts = normalizeArray(appts).filter((a) => a.start && new Date(a.start) >= dayStart && new Date(a.start) <= dayEnd)
     .sort((a, b) => new Date(a.start) - new Date(b.start));
   const upNext = todaysAppts
     .filter((a) => new Date(a.start) >= new Date() && !["completed", "canceled"].includes(a.status))
@@ -195,7 +195,7 @@ export default function StaffDashboard() {
           tone={expiring.length > 0 ? "alert" : "ok"}
           icon={AlertTriangle}
           link="/portal/staff/inventory"
-          rows={expiring.slice(0, 5).map((i) => ({ left: i.name, right: i.expiring_lot?.expires_on || "—" }))}
+          rows={normalizeArray(expiring).slice(0, 5).map((i) => ({ left: i.name, right: i.expiring_lot?.expires_on || "—" }))}
           empty="No lots expiring within 60 days."
           testid="staff-expiring"
         />

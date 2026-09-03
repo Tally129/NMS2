@@ -49,6 +49,25 @@ async def get_note(session: AsyncSession, note_id: str) -> Optional[Dict[str, An
     return note_to_dict(row)
 
 
+async def get_note_by_appointment(
+    session: AsyncSession,
+    appointment_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the VisitNote linked to an appointment, if any."""
+    row = (
+        await session.execute(
+            select(VisitNote)
+            .where(
+                VisitNote.appointment_id == appointment_id
+            )
+            .order_by(VisitNote.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    return note_to_dict(row)
+
+
 async def list_notes_for_client(session: AsyncSession, client_id: str,
                                   limit: int = 500) -> List[Dict[str, Any]]:
     stmt = (select(VisitNote)

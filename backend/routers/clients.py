@@ -6,10 +6,12 @@ Extracted from server.py during Phase 16 refactor.
 from __future__ import annotations
 
 import io
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import text
 from fastapi import Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
@@ -23,18 +25,22 @@ from deps import (
 from storage import NotFound as StorageNotFound, get_storage
 from models import (
     AmendIn, ClientIn, ClientOut, FileMetaOut, IntakeIn, IntakeOut,
-    NoteIn, NoteOut, new_id,
+    NoteIn, NoteOut, VitalIn, VitalOut, VitalUpdate, new_id,
 )
 from pg_shims import (
     delete_client as _pg_delete_client, find_active_assignment,
     find_assignment, find_client, find_intake_by_client,
     find_supplement_sheet, find_user_by_id, find_clients_by_ids,
     insert_assignment, insert_client, list_active_assignments_for_client,
-    list_active_supplement_sheets, list_clients, touch_assignment_reference,
+    list_active_supplement_sheets, list_clients, list_clients_paginated, touch_assignment_reference,
     update_client as _pg_update_client, upsert_intake, deactivate_assignment,
 )
 from postgres_db import AsyncSessionLocal
 from repositories import clinical_and_messaging as cm_repo
+from repositories import scheduling as sched_repo
+from repositories import vitals as vitals_repo
+
+logger = logging.getLogger("nms.clients")
 
 
 async def _fetch_note(note_id: str):
@@ -48,10 +54,45 @@ async def _fetch_notes_for_client(client_id: str):
 
 
 # =================== CLIENTS ===================
-@api.get("/clients", response_model=List[ClientOut])
-async def list_clients_endpoint(user=Depends(require_roles("admin", "practitioner", "staff", "medical_assistant", "front_desk", "frontdesk"))):
-    items = await list_clients(sort_desc=True, limit=500)
-    return [_strip_id(i) for i in items]
+@api.get("/clients")
+async def list_clients_endpoint(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    q: Optional[str] = Query(default=None, max_length=120),
+    sort_by: str = Query(
+        default="created_at",
+        pattern="^(created_at|full_name|mrn|dob)$",
+    ),
+    sort_dir: str = Query(
+        default="desc",
+        pattern="^(asc|desc)$",
+    ),
+    user=Depends(
+        require_roles(
+            "admin",
+            "practitioner",
+            "staff",
+            "medical_assistant",
+            "front_desk",
+            "frontdesk",
+        )
+    ),
+):
+    result = await list_clients_paginated(
+        page=page,
+        page_size=page_size,
+        q=q,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
+
+    return {
+        **result,
+        "items": [
+            _strip_id(item)
+            for item in result["items"]
+        ],
+    }
 
 
 @api.get("/clients/me", response_model=ClientOut)
@@ -66,22 +107,32 @@ async def my_client_record(user=Depends(get_current_user)):
 async def get_client(client_id: str, request: Request, user=Depends(get_current_user)):
     c = await find_client(client_id=client_id)
     if not c:
-        raise HTTPException(status_code=404, detail="Client not found")
+        raise HTTPException(status_code=404, detail="Patient not found")
     role = user.get("role") or ""
-    # Central scope enforcement — mirrors permissions.assert_client_visible.
+
+    # Patients may only view their own client record. Authorized workforce
+    # roles may view all patient charts as part of clinic operations.
     if role == "client":
         if c.get("user_id") != user["id"]:
-            raise HTTPException(status_code=403, detail="Forbidden")
-    elif role == "practitioner":
-        assigned = c.get("assigned_practitioner_id")
-        # Assigned-only scope. Even unassigned clients require break-glass.
-        if assigned != user["id"]:
-            from permissions import _is_breakglass_active
-            if not await _is_breakglass_active(user["id"], client_id):
-                raise HTTPException(status_code=403, detail={
-                    "code": "scope_denied",
-                    "resource": "client", "id": client_id,
-                })
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden",
+            )
+    elif role not in {
+        "admin",
+        "practitioner",
+        "medical_assistant",
+        "staff",
+    }:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "scope_denied",
+                "resource": "client",
+                "id": client_id,
+            },
+        )
+
     # admin / auditor / staff pass through (admin=full, auditor=break-glass GET
     # already gated by require_roles elsewhere; staff have client:list not read_any
     # but need patient demographics for scheduling — allowed here).
@@ -113,7 +164,7 @@ async def update_client(client_id: str, payload: ClientIn, request: Request,
                         user=Depends(require_roles("admin", "staff", "practitioner"))):
     c = await find_client(client_id=client_id)
     if not c:
-        raise HTTPException(status_code=404, detail="Client not found")
+        raise HTTPException(status_code=404, detail="Patient not found")
     updates = {k: v for k, v in payload.dict().items() if v is not None}
     await _pg_update_client(client_id, updates)
     await log_audit(db, user["id"], user["email"], "client.update",
@@ -130,14 +181,14 @@ async def save_intake(payload: IntakeIn, request: Request, user=Depends(get_curr
     if user["role"] == "client":
         target_client = await _resolve_self_client(user)
         if not target_client:
-            raise HTTPException(status_code=404, detail="Client record missing")
+            raise HTTPException(status_code=404, detail="Patient record missing")
         client_id = target_client["id"]
     else:
         if not payload.client_id:
             raise HTTPException(status_code=400, detail="client_id required")
         target_client = await find_client(client_id=payload.client_id)
         if not target_client:
-            raise HTTPException(status_code=404, detail="Client not found")
+            raise HTTPException(status_code=404, detail="Patient not found")
         client_id = payload.client_id
 
     existing = await find_intake_by_client(client_id)
@@ -181,6 +232,222 @@ async def get_intake(client_id: str, request: Request, user=Depends(get_current_
                     resource_type="intake", resource_id=intake["id"],
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return _strip_id(intake)
+
+
+# =================== VITALS ===================
+def _calculate_bmi(
+    height_in: Optional[float],
+    weight_lb: Optional[float],
+) -> Optional[float]:
+    if not height_in or not weight_lb:
+        return None
+
+    if height_in <= 0 or weight_lb <= 0:
+        return None
+
+    return round(
+        (weight_lb / (height_in * height_in)) * 703,
+        1,
+    )
+
+
+@api.get("/vitals", response_model=List[VitalOut])
+async def list_vitals(
+    request: Request,
+    client_id: str = Query(...),
+    appointment_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    user=Depends(
+        require_roles(
+            "admin",
+            "practitioner",
+            "medical_assistant",
+        )
+    ),
+):
+    client = await find_client(client_id=client_id)
+
+    if not client:
+        raise HTTPException(
+            status_code=404,
+            detail="Patient not found",
+        )
+
+    async with AsyncSessionLocal() as pg:
+        rows = await vitals_repo.list_for_client(
+            pg,
+            client_id,
+            appointment_id=appointment_id,
+            limit=limit,
+        )
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "vitals.list",
+        resource_type="client",
+        resource_id=client_id,
+        metadata={
+            "appointment_id": appointment_id,
+            "count": len(rows),
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    return rows
+
+
+@api.post("/vitals", response_model=VitalOut)
+async def create_vitals(
+    payload: VitalIn,
+    request: Request,
+    user=Depends(
+        require_roles(
+            "admin",
+            "practitioner",
+            "medical_assistant",
+        )
+    ),
+):
+    client = await find_client(
+        client_id=payload.client_id
+    )
+
+    if not client:
+        raise HTTPException(
+            status_code=404,
+            detail="Patient not found",
+        )
+
+    document = payload.dict()
+    document["id"] = new_id()
+    document["recorded_by_id"] = user["id"]
+    document["recorded_by_name"] = (
+        user.get("full_name") or user.get("email")
+    )
+    document["recorded_at"] = (
+        payload.recorded_at
+        or datetime.now(timezone.utc)
+    )
+    document["created_at"] = datetime.now(timezone.utc)
+    document["bmi"] = _calculate_bmi(
+        payload.height_in,
+        payload.weight_lb,
+    )
+    document["prior_values"] = []
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            created = await vitals_repo.create(
+                pg,
+                document,
+            )
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "vitals.create",
+        resource_type="vital_record",
+        resource_id=created["id"],
+        metadata={
+            "client_id": payload.client_id,
+            "appointment_id": payload.appointment_id,
+            "source": payload.source,
+            "visit_mode": payload.visit_mode,
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    return created
+
+
+@api.put("/vitals/{vital_id}", response_model=VitalOut)
+async def amend_vitals(
+    vital_id: str,
+    payload: VitalUpdate,
+    request: Request,
+    user=Depends(
+        require_roles(
+            "admin",
+            "practitioner",
+            "medical_assistant",
+        )
+    ),
+):
+    async with AsyncSessionLocal() as pg:
+        existing = await vitals_repo.get_by_id(
+            pg,
+            vital_id,
+        )
+
+    if not existing:
+        raise HTTPException(
+            status_code=404,
+            detail="Vitals record not found",
+        )
+
+    updates = payload.dict(
+        exclude={
+            "amendment_reason",
+        },
+        exclude_unset=True,
+    )
+
+    height = updates.get(
+        "height_in",
+        existing.get("height_in"),
+    )
+    weight = updates.get(
+        "weight_lb",
+        existing.get("weight_lb"),
+    )
+    updates["bmi"] = _calculate_bmi(
+        height,
+        weight,
+    )
+
+    amended_by_name = (
+        user.get("full_name") or user.get("email")
+    )
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            amended = await vitals_repo.amend(
+                pg,
+                vital_id,
+                fields=updates,
+                amended_by_id=user["id"],
+                amended_by_name=amended_by_name,
+                amendment_reason=(
+                    payload.amendment_reason.strip()
+                ),
+            )
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "vitals.amend",
+        resource_type="vital_record",
+        resource_id=vital_id,
+        severity="high",
+        metadata={
+            "client_id": existing["client_id"],
+            "appointment_id": (
+                existing.get("appointment_id")
+            ),
+            "fields": sorted(updates.keys()),
+            "reason": payload.amendment_reason,
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    return amended
 
 
 # =================== SOAP NOTES ===================
@@ -234,12 +501,494 @@ async def list_all_notes(request: Request,
     return out
 
 
+@api.post("/notes/ai-draft")
+async def create_ai_note_draft(
+    payload: dict,
+    request: Request,
+    user=Depends(
+        require_roles(
+            "practitioner",
+            "admin",
+            "medical_assistant",
+        )
+    ),
+):
+    """Generate an editable SOAP draft without saving a clinical note."""
+    client_id = str(payload.get("client_id") or "").strip()
+    encounter_text = str(
+        payload.get("encounter_text")
+        or payload.get("encounter")
+        or ""
+    ).strip()
+    template_id = str(payload.get("template_id") or "").strip() or None
+
+    if not client_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Patient is required",
+        )
+
+    if len(encounter_text) < 10:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Enter encounter notes or a transcript before "
+                "generating a SOAP draft."
+            ),
+        )
+
+    if len(encounter_text) > 12000:
+        raise HTTPException(
+            status_code=413,
+            detail="Encounter notes are too long (12,000 characters max).",
+        )
+
+    client = await find_client(client_id=client_id)
+
+    if not client:
+        raise HTTPException(
+            status_code=404,
+            detail="Patient not found",
+        )
+
+    authorizing_provider_id = None
+
+    # Keep the same delegation rules already used for clinical-note creation.
+    if user.get("role") != "practitioner":
+        delegation = await has_active_delegation(
+            user,
+            client_id,
+        )
+
+        if not delegation:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "delegation_required",
+                    "message": (
+                        "Provider authorization is required to use AI "
+                        "for clinical documentation."
+                    ),
+                },
+            )
+
+        authorizing_provider_id = delegation.get("provider_id")
+
+    intake = await find_intake_by_client(client_id) or {}
+
+    async with AsyncSessionLocal() as pg:
+        previous_notes = await cm_repo.list_notes_for_client(
+            pg,
+            client_id,
+            limit=1,
+        )
+
+    last_note = previous_notes[0] if previous_notes else None
+
+    template = None
+
+    if template_id:
+        template = await db.soap_templates.find_one({
+            "id": template_id,
+            "active": True,
+        })
+
+        if not template:
+            raise HTTPException(
+                status_code=404,
+                detail="SOAP template not found",
+            )
+
+    from services.soap_ai import generate_soap_draft
+
+    try:
+        result = await generate_soap_draft(
+            client=client,
+            intake=intake,
+            last_note=last_note,
+            encounter_text=encounter_text,
+            template=template,
+            session_id=f"clinic-soap-{new_id()[:12]}",
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "ai_unavailable",
+                "message": str(exc),
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "invalid_ai_response",
+                "message": str(exc),
+            },
+        )
+    except Exception as exc:
+        logger.warning("Clinic SOAP AI draft failed: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "soap_ai_failed",
+                "message": "SOAP drafting failed.",
+            },
+        )
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "note.ai_draft_generated",
+        resource_type="client",
+        resource_id=client_id,
+        metadata={
+            "template_id": template_id,
+            "actor_role": user.get("role"),
+            "authorizing_provider_id": authorizing_provider_id,
+            "source": result.get("source"),
+            "model": result.get("model"),
+            "encounter_character_count": len(encounter_text),
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    return result
+
+
+# =================== IN-PERSON CLINICAL SCRIBE ===================
+
+@api.post("/notes/clinical-scribe/recording")
+async def upload_clinical_scribe_recording(
+    request: Request,
+    file: UploadFile = File(...),
+    client_id: str = Form(...),
+    recording_consent: bool = Form(...),
+    user=Depends(
+        require_roles(
+            "practitioner",
+            "admin",
+            "medical_assistant",
+        )
+    ),
+):
+    """Upload an in-person clinical recording and start HealthScribe.
+
+    Patient identity remains inside NMS. HealthScribe receives only the
+    clinical audio and an opaque internal job identifier.
+    """
+    if not recording_consent:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "recording_consent_required",
+                "message": (
+                    "Patient recording consent must be confirmed "
+                    "before clinical audio is processed."
+                ),
+            },
+        )
+
+    client = await find_client(client_id=client_id)
+
+    if not client:
+        raise HTTPException(
+            status_code=404,
+            detail="Patient not found",
+        )
+
+    # Apply the same delegation rule used for clinical note creation.
+    if user["role"] != "practitioner":
+        delegation = await has_active_delegation(
+            user,
+            client_id,
+        )
+
+        if not delegation:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "delegation_required",
+                    "message": (
+                        "Provider authorization is required "
+                        "to create clinical documentation."
+                    ),
+                },
+            )
+
+    contents = await file.read()
+
+    if not contents:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "empty_recording",
+            },
+        )
+
+    # Keep a reasonable hard ceiling on browser uploads.
+    if len(contents) > 100 * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "code": "recording_too_large",
+            },
+        )
+
+    from services.telehealth_transcription import (
+        normalize_recording_to_flac,
+        start_job,
+    )
+
+    from storage import get_storage
+
+    recording_id = new_id()
+
+    try:
+        flac_contents = await normalize_recording_to_flac(
+            contents
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "recording_normalization_failed",
+                "message": str(exc),
+            },
+        )
+
+    storage = get_storage()
+
+    if getattr(storage, "backend_name", "") != "s3":
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "healthscribe_requires_s3",
+            },
+        )
+
+    bucket = getattr(storage, "bucket", None)
+
+    if not bucket:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "storage_bucket_unavailable",
+            },
+        )
+
+    # Do not put patient names, email addresses, DOBs, etc.
+    # into object keys or HealthScribe job names.
+    storage_key = (
+        f"visits/inperson-{client_id}/"
+        f"{recording_id}.healthscribe.flac"
+    )
+
+    obj_meta = await storage.put_bytes(
+        storage_key,
+        flac_contents,
+        content_type="audio/flac",
+        metadata={
+            "client_id": client_id,
+            "uploader_id": user["id"],
+            "kind": "in_person_clinical_scribe",
+        },
+    )
+
+    media_uri = f"s3://{bucket}/{storage_key}"
+
+    try:
+        job = await start_job(
+            appointment_id=f"inperson-{client_id}",
+            recording_id=recording_id,
+            media_s3_uri=media_uri,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": str(exc),
+            },
+        )
+    except Exception as exc:
+        logger.exception(
+            "In-person HealthScribe start failed "
+            "client=%s recording=%s: %s",
+            client_id,
+            recording_id,
+            exc,
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "healthscribe_start_failed",
+            },
+        )
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "note.clinical_scribe_start",
+        resource_type="client",
+        resource_id=client_id,
+        metadata={
+            "recording_id": recording_id,
+            "job_name": job.get("job_name"),
+            "size": len(contents),
+            "normalized_size": len(flac_contents),
+            "storage_backend": getattr(
+                obj_meta,
+                "backend",
+                "s3",
+            ),
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get(
+            "user-agent"
+        ),
+    )
+
+    return {
+        "client_id": client_id,
+        "recording_id": recording_id,
+        **job,
+    }
+
+
+@api.get("/notes/clinical-scribe/transcription")
+async def get_clinical_scribe_transcription(
+    client_id: str,
+    job_name: str,
+    user=Depends(
+        require_roles(
+            "practitioner",
+            "admin",
+            "medical_assistant",
+        )
+    ),
+):
+    """Poll an in-person HealthScribe job."""
+
+    client = await find_client(
+        client_id=client_id
+    )
+
+    if not client:
+        raise HTTPException(
+            status_code=404,
+            detail="Patient not found",
+        )
+
+    if user["role"] != "practitioner":
+        delegation = await has_active_delegation(
+            user,
+            client_id,
+        )
+
+        if not delegation:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "delegation_required",
+                },
+            )
+
+    expected_prefix = (
+        f"nms-inperson-{client_id}-"
+    )
+
+    if not job_name.startswith(expected_prefix):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "transcription_scope_denied",
+            },
+        )
+
+    from services.telehealth_transcription import (
+        get_completed_outputs,
+    )
+
+    try:
+        result = await get_completed_outputs(
+            job_name
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": str(exc),
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "In-person HealthScribe status failed "
+            "client=%s job=%s: %s",
+            client_id,
+            job_name,
+            exc,
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "healthscribe_status_failed",
+            },
+        )
+
+    return {
+        "client_id": client_id,
+        **result,
+    }
+
+
+
 @api.post("/notes", response_model=NoteOut)
 async def create_note(payload: NoteIn, request: Request,
                       user=Depends(require_roles("practitioner", "admin", "medical_assistant"))):
     c = await find_client(client_id=payload.client_id)
     if not c:
-        raise HTTPException(status_code=404, detail="Client not found")
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    # A SOAP note linked to an encounter must belong to the
+    # same patient as that appointment.
+    if payload.appointment_id:
+        async with AsyncSessionLocal() as pg:
+            linked_appointment = (
+                await sched_repo.get_appointment(
+                    pg,
+                    payload.appointment_id,
+                )
+            )
+
+        if not linked_appointment:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "appointment_not_found",
+                    "message":
+                        "The linked appointment was not found.",
+                },
+            )
+
+        if (
+            str(linked_appointment.get("client_id"))
+            != str(payload.client_id)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code":
+                        "appointment_client_mismatch",
+                    "message":
+                        "The SOAP note patient does not match "
+                        "the linked appointment.",
+                },
+            )
     # Delegated draft editing gate — admin / medical_assistant need an active delegation.
     authorizing_provider_id = None
     if user["role"] != "practitioner":
@@ -317,7 +1066,13 @@ async def update_note(note_id: str, payload: NoteIn, request: Request,
             })
         authorizing_provider_id = deleg.get("provider_id")
     updates = payload.dict()
-    updates.pop("client_id", None)  # locked to original
+
+    # Patient and encounter linkage are immutable after the
+    # clinical note is created. Draft edits may change only
+    # the SOAP content.
+    updates.pop("client_id", None)
+    updates.pop("appointment_id", None)
+
     updates["updated_at"] = datetime.now(timezone.utc)
     async with AsyncSessionLocal() as pg:
         async with pg.begin():
@@ -360,8 +1115,58 @@ async def finalize_note(note_id: str, request: Request,
         async with pg.begin():
             prev = list(note.get("prior_versions") or [])
             prev.append(snapshot)
-            await cm_repo.update_note(pg, note_id, {"prior_versions": prev})
-            finalized = await cm_repo.finalize_note(pg, note_id, user_id=user["id"])
+
+            await cm_repo.update_note(
+                pg,
+                note_id,
+                {"prior_versions": prev},
+            )
+
+            finalized = await cm_repo.finalize_note(
+                pg,
+                note_id,
+                user_id=user["id"],
+            )
+
+            # A finalized SOAP note linked to a telehealth
+            # appointment completes the documentation workflow.
+            appointment_id = (
+                (finalized or note).get("appointment_id")
+            )
+
+            if appointment_id:
+                appointment = (
+                    await sched_repo.get_appointment(
+                        pg,
+                        appointment_id,
+                    )
+                )
+
+                if (
+                    appointment
+                    and appointment.get("visit_mode")
+                    == "telehealth"
+                ):
+                    telehealth = dict(
+                        appointment.get("telehealth") or {}
+                    )
+
+                    telehealth.update({
+                        "documentation_status": "complete",
+                        "documentation_completed_at":
+                            now.isoformat(),
+                        "documentation_completed_by":
+                            user["id"],
+                        "finalized_note_id": note_id,
+                    })
+
+                    await sched_repo.update_appointment(
+                        pg,
+                        appointment_id,
+                        {
+                            "telehealth": telehealth,
+                        },
+                    )
     await log_audit(db, user["id"], user["email"], "note.finalize",
                     resource_type="note", resource_id=note_id,
                     severity="high", outcome="success",
@@ -460,7 +1265,7 @@ async def create_client_supplement_assignment(client_id: str, payload: dict, req
         raise HTTPException(status_code=404, detail="Sheet not found")
     client = await find_client(client_id=client_id)
     if not client:
-        raise HTTPException(status_code=404, detail="Client not found")
+        raise HTTPException(status_code=404, detail="Patient not found")
     existing = await find_active_assignment(client_id, sheet_id)
     if existing:
         return _strip_id(existing)
@@ -592,14 +1397,14 @@ async def upload_file(
     if user["role"] == "client":
         self_client = await _resolve_self_client(user)
         if not self_client:
-            raise HTTPException(status_code=404, detail="Client record missing")
+            raise HTTPException(status_code=404, detail="Patient record missing")
         client_id = self_client["id"]
     else:
         # Workforce upload must specify a client the actor can see.
         if client_id:
             target = await find_client(client_id=client_id)
             if not target:
-                raise HTTPException(status_code=404, detail="Client not found")
+                raise HTTPException(status_code=404, detail="Patient not found")
 
     content = await file.read()
     if len(content) > MAX_UPLOAD_BYTES:

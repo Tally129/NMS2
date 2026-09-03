@@ -99,6 +99,53 @@ def prepare_execution_request(
     }
 
 
+def execution_request_matches_existing(
+    existing: Mapping[str, Any],
+    incoming: Mapping[str, Any],
+    *,
+    actor: str,
+) -> bool:
+    """Return True only for an exact retry of one operation token."""
+
+    def value(mapping, key):
+        try:
+            return mapping.get(key)
+        except AttributeError:
+            return mapping[key]
+
+    existing_payload = (
+        value(existing, "request_payload")
+        or {}
+    )
+
+    incoming_payload = (
+        value(incoming, "request_payload")
+        or {}
+    )
+
+    return (
+        str(value(existing, "provider") or "")
+        == str(value(incoming, "provider") or "")
+        and
+        str(value(existing, "action_type") or "")
+        == str(value(incoming, "action_type") or "")
+        and
+        str(value(existing, "target_type") or "")
+        == str(value(incoming, "target_type") or "")
+        and
+        (value(existing, "target_id") or None)
+        == (value(incoming, "target_id") or None)
+        and
+        existing_payload == incoming_payload
+        and
+        str(value(existing, "created_by") or "")
+        == str(actor or "")
+        and
+        bool(value(existing, "dry_run"))
+        == bool(value(incoming, "dry_run"))
+    )
+
+
 def submit_for_approval(
     request: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -186,6 +233,7 @@ async def perform_dry_run(
 
 __all__ = [
     "prepare_execution_request",
+    "execution_request_matches_existing",
     "submit_for_approval",
     "decide_request",
     "perform_dry_run",

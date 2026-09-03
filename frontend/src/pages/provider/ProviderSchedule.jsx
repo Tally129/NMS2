@@ -12,6 +12,7 @@ import { Label } from "../../components/ui/label";
 import { useToast } from "../../hooks/use-toast";
 import { ChevronLeft, ChevronRight, CalendarDays, Plus, Trash2 } from "lucide-react";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
 
 const HOUR_START = 8;
 const HOUR_END = 19;
@@ -57,11 +58,11 @@ export default function ProviderSchedule() {
         practitioner_id: user?.id,
       },
     });
-    setAppts(r.data || []);
+    setAppts(normalizeArray(r.data, ["appts"]));
   }, [weekStart, weekEnd, user?.id]);
 
   React.useEffect(() => { load(); }, [load]);
-  React.useEffect(() => { api.get("/clients").then((r) => setClients(r.data || [])); }, []);
+  React.useEffect(() => { api.get("/clients").then((r) => setClients(normalizeArray(r.data, ["clients"]))); }, []);
 
   const openCreate = (date, hour) => {
     const d = new Date(date); d.setHours(hour, 0, 0, 0);
@@ -119,7 +120,7 @@ export default function ProviderSchedule() {
   const days = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
 
   const apptsFor = (day, hour) =>
-    appts.filter((a) => {
+    normalizeArray(appts).filter((a) => {
       const s = new Date(a.start);
       return sameDay(s, day) && s.getHours() === hour;
     });
@@ -201,7 +202,7 @@ export default function ProviderSchedule() {
             <div><Label>Patient</Label>
               <Select value={form.client_id} onValueChange={(v) => setForm({ ...form, client_id: v })}>
                 <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]"><SelectValue placeholder="Select patient" /></SelectTrigger>
-                <SelectContent>{clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}</SelectContent>
+                <SelectContent>{normalizeArray(clients).map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}</SelectContent>
               </Select>
             </div>
             <div className="grid grid-cols-2 gap-3">

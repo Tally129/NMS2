@@ -16,6 +16,7 @@ import {
   Activity, Plus, Edit3, Trash2, Send, CheckCircle2, Loader2, Clock,
   ChevronRight, Leaf, X, Search, ArchiveRestore, Archive, Upload, Sparkles,
 } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 const STATUS_PILL = {
   proposed: { label: "Awaiting accept", c: "bg-[#f1ead8] text-[#8a6a3c] border-[#e0d6bc]" },
@@ -54,10 +55,10 @@ export default function Protocols() {
         api.get("/practitioners").catch(() => ({ data: [] })),
         api.get("/clients").catch(() => ({ data: [] })),
       ]);
-      setTemplates(t.data || []);
-      setEnrollments(e.data || []);
-      setProviders(p.data || []);
-      setClients(c.data || []);
+      setTemplates(normalizeArray(t.data, ["templates"]));
+      setEnrollments(normalizeArray(e.data, ["enrollments"]));
+      setProviders(normalizeArray(p.data, ["providers"]));
+      setClients(normalizeArray(c.data, ["clients"]));
     } catch (e) {
       toast({ title: "Failed to load", description: getErrorMessage(e) || "" });
     }
@@ -65,7 +66,7 @@ export default function Protocols() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   React.useEffect(() => { loadAll(); }, [showInactive]);
 
-  const filteredEnr = enrollments.filter((e) => {
+  const filteredEnr = normalizeArray(enrollments).filter((e) => {
     if (statusFilter !== "all" && e.status !== statusFilter) return false;
     if (providerFilter !== "all" && e.practitioner_id !== providerFilter) return false;
     if (clientFilter !== "all" && e.client_id !== clientFilter) return false;
@@ -151,14 +152,14 @@ export default function Protocols() {
               <SelectTrigger className="w-52 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="protocol-provider-filter"><SelectValue placeholder="All providers" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All providers</SelectItem>
-                {providers.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name || p.email}</SelectItem>)}
+                {normalizeArray(providers).map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name || p.email}</SelectItem>)}
               </SelectContent>
             </Select>
             <Select value={clientFilter} onValueChange={setClientFilter}>
               <SelectTrigger className="w-52 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="protocol-client-filter"><SelectValue placeholder="All patients" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All patients</SelectItem>
-                {clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}
+                {normalizeArray(clients).map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
@@ -232,7 +233,7 @@ export default function Protocols() {
             <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-12 text-center text-[#6a6a6a]">No protocol templates yet.</div>
           ) : (
             <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5" data-testid="protocol-templates-grid">
-              {templates.map((t) => (
+              {normalizeArray(templates).map((t) => (
                 <div key={t.id} className={`rounded-2xl border bg-[#fbf7ee] p-5 flex flex-col ${t.active ? "border-[#e7dfc9]" : "border-[#d4c9a8] opacity-70"}`} data-testid={`protocol-tpl-${t.id}`}>
                   <div className="flex items-start justify-between gap-2 mb-2">
                     <div className="flex items-start gap-2 min-w-0">
@@ -409,7 +410,7 @@ function ProposeProtocolDialog({ template, clients, onOpenChange, onProposed }) 
             <Label>Patient</Label>
             <Select value={clientId} onValueChange={setClientId}>
               <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="protocol-propose-client"><SelectValue placeholder="Select patient…" /></SelectTrigger>
-              <SelectContent>{clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}</SelectContent>
+              <SelectContent>{normalizeArray(clients).map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}</SelectContent>
             </Select>
           </div>
           <div className="grid grid-cols-2 gap-3">

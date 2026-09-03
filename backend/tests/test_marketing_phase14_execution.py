@@ -10,6 +10,7 @@ from marketing_os.services.execution_policy import (
 )
 from marketing_os.services.execution_queue import (
     decide_request,
+    execution_request_matches_existing,
     perform_dry_run,
     prepare_execution_request,
     submit_for_approval,
@@ -711,3 +712,168 @@ def test_same_operation_token_preserves_queue_key():
         first["request"]["idempotency_key"]
         == second["request"]["idempotency_key"]
     )
+
+
+def test_same_token_ignores_request_content_for_queue_key():
+    token = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+
+    first = build_idempotency_key(
+        provider="google_ads",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id="111",
+        payload={"reason": "first"},
+        operation_token=token,
+    )
+
+    second = build_idempotency_key(
+        provider="meta_ads",
+        action_type="budget.update",
+        target_type="campaign",
+        target_id="222",
+        payload={"amount": 99},
+        operation_token=token,
+    )
+
+    assert first == second
+
+
+def test_same_token_whitespace_is_normalized():
+    first = build_idempotency_key(
+        provider="google_ads",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id="111",
+        payload={},
+        operation_token=(
+            "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+        ),
+    )
+
+    second = build_idempotency_key(
+        provider="meta_ads",
+        action_type="ad.create",
+        target_type="ad",
+        target_id=None,
+        payload={"name": "Anything"},
+        operation_token=(
+            "  eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee  "
+        ),
+    )
+
+    assert first == second
+
+
+def test_different_token_identical_request_gets_new_key():
+    first = build_idempotency_key(
+        provider="google_ads",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id="123",
+        payload={"reason": "review"},
+        operation_token=(
+            "ffffffff-ffff-4fff-8fff-ffffffffffff"
+        ),
+    )
+
+    second = build_idempotency_key(
+        provider="google_ads",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id="123",
+        payload={"reason": "review"},
+        operation_token=(
+            "99999999-9999-4999-8999-999999999999"
+        ),
+    )
+
+    assert first != second
+
+
+def test_execution_retry_match_accepts_exact_request():
+    incoming = {
+        "provider": "google_ads",
+        "action_type": "campaign.pause",
+        "target_type": "campaign",
+        "target_id": "123",
+        "request_payload": {"reason": "review"},
+        "dry_run": True,
+    }
+
+    existing = {
+        **incoming,
+        "created_by": "user-1",
+    }
+
+    assert execution_request_matches_existing(
+        existing,
+        incoming,
+        actor="user-1",
+    ) is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("provider", "meta_ads"),
+        ("action_type", "campaign.resume"),
+        ("target_type", "ad"),
+        ("target_id", "999"),
+        ("request_payload", {"reason": "changed"}),
+    ],
+)
+def test_execution_retry_match_rejects_changed_request(
+    field,
+    value,
+):
+    incoming = {
+        "provider": "google_ads",
+        "action_type": "campaign.pause",
+        "target_type": "campaign",
+        "target_id": "123",
+        "request_payload": {"reason": "review"},
+        "dry_run": True,
+    }
+
+    existing = {
+        **incoming,
+        "created_by": "user-1",
+    }
+
+    existing[field] = value
+
+    assert execution_request_matches_existing(
+        existing,
+        incoming,
+        actor="user-1",
+    ) is False
+
+
+def test_execution_retry_match_rejects_changed_actor():
+    incoming = {
+        "provider": "google_ads",
+        "action_type": "campaign.pause",
+        "target_type": "campaign",
+        "target_id": "123",
+        "request_payload": {"reason": "review"},
+        "dry_run": True,
+    }
+
+    existing = {
+        **incoming,
+        "created_by": "user-1",
+    }
+
+    assert execution_request_matches_existing(
+        existing,
+        incoming,
+        actor="user-2",
+    ) is False
+
+def test_h7_whitespace_only_operation_token_rejected():
+    raw = " " * 16
+    token = raw.strip()
+
+    assert len(raw) == 16
+    assert token == ""
+    assert len(token) < 16

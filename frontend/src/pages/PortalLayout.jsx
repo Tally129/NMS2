@@ -61,6 +61,7 @@ const NAV = {
       group: "My Health",
       items: [
         { to: "/portal/patient/intake", label: "Intake", icon: ClipboardList },
+        { to: "/portal/patient/forms", label: "Forms & Consents", icon: ClipboardCheck, badge: "forms" },
         { to: "/portal/patient/chart", label: "My Chart", icon: FileText },
         { to: "/portal/patient/telehealth", label: "Telehealth", icon: Video },
         { to: "/portal/patient/plan", label: "Treatment Plan", icon: Sparkles },
@@ -68,7 +69,7 @@ const NAV = {
         { to: "/portal/patient/symptoms", label: "Symptom Tracker", icon: LineChart },
         { to: "/portal/patient/labs", label: "Lab Results", icon: TestTube2 },
         { to: "/portal/patient/files", label: "Files", icon: FolderOpen },
-        { to: "/portal/patient/billing", label: "Billing", icon: Receipt },
+        { to: "/portal/patient/billing", label: "Billing", icon: Receipt, badge: "billing" },
       ],
     },
     {
@@ -87,6 +88,7 @@ const NAV = {
       items: [
         { to: "/portal/provider", label: "Dashboard", icon: LayoutDashboard },
         { to: "/portal/provider/front-desk", label: "Front Desk", icon: Briefcase },
+        { to: "/portal/provider/front-desk#appointment-requests", label: "Appointment Requests", icon: CalendarDays, badge: "appointmentRequests" },
         { to: "/portal/provider/telehealth", label: "Telehealth", icon: Video },
         { to: "/portal/provider/appointments", label: "Appointments", icon: CalendarDays },
         { to: "/portal/provider/time-clock", label: "Time Clock", icon: Timer },
@@ -99,6 +101,7 @@ const NAV = {
         { to: "/portal/staff/tasks", label: "Tasks", icon: ClipboardCheck, badge: "tasks" },
         { to: "/portal/staff/lab-review", label: "Lab Review", icon: FlaskConical },
         { to: "/portal/staff/content-strategist", label: "AI Content Strategist", icon: Brain },
+        { to: "/portal/marketing", label: "Marketing Command Center", icon: Megaphone },
         { to: "/portal/provider/messages", label: "Messages", icon: MessageSquare, badge: "messages" },
       ],
     },
@@ -129,6 +132,7 @@ const NAV = {
       group: "Today",
       items: [
         { to: "/portal/staff", label: "Front desk", icon: Briefcase },
+        { to: "/portal/staff/front-desk#appointment-requests", label: "Appointment Requests", icon: CalendarDays, badge: "appointmentRequests" },
         { to: "/portal/staff/appointments", label: "Appointments", icon: CalendarDays },
         { to: "/portal/staff/telehealth", label: "Telehealth", icon: Video },
         { to: "/portal/staff/time-clock", label: "Time Clock", icon: Timer },
@@ -172,6 +176,7 @@ const NAV = {
       items: [
         { to: "/portal/admin", label: "Overview", icon: LayoutDashboard },
         { to: "/portal/admin/front-desk", label: "Front Desk", icon: Briefcase },
+        { to: "/portal/admin/front-desk#appointment-requests", label: "Appointment Requests", icon: CalendarDays, badge: "appointmentRequests" },
         { to: "/portal/provider/appointments", label: "Appointments", icon: CalendarDays },
         { to: "/portal/admin/telehealth", label: "Telehealth", icon: Video },
         { to: "/portal/admin/time-clock", label: "Time Clock", icon: Timer },
@@ -184,6 +189,7 @@ const NAV = {
         { to: "/portal/staff/tasks", label: "Tasks", icon: ClipboardCheck, badge: "tasks" },
         { to: "/portal/staff/lab-review", label: "Lab Review", icon: FlaskConical },
         { to: "/portal/staff/content-strategist", label: "AI Content Strategist", icon: Brain },
+        { to: "/portal/marketing", label: "Marketing Command Center", icon: Megaphone },
         { to: "/portal/admin/import-clients", label: "Import Patients", icon: Upload },
       ],
     },
@@ -225,7 +231,10 @@ export default function PortalLayout({ children }) {
   const navigate = useNavigate();
   const [open, setOpen] = React.useState(false);
   const [unread, setUnread] = React.useState(0);
+  const [pendingForms, setPendingForms] = React.useState(0);
+  const [unreadBilling, setUnreadBilling] = React.useState(0);
   const [overdueTasks, setOverdueTasks] = React.useState(0);
+  const [appointmentRequestCount, setAppointmentRequestCount] = React.useState(0);
   const [paletteOpen, setPaletteOpen] = React.useState(false);
   const groups = NAV[user?.role] || [];
 
@@ -255,6 +264,186 @@ export default function PortalLayout({ children }) {
     // Best-effort PWA push subscription (silent failure)
     import("../lib/push").then(({ ensurePushSubscription }) => ensurePushSubscription()).catch(() => {});
     return () => { active = false; clearInterval(t); };
+  }, [user]);
+
+  // Pending Forms & Consents badge — patients only.
+  // Derived from authoritative form submission state, not message read state.
+  React.useEffect(() => {
+    if (!user || user.role !== "client") {
+      setPendingForms(0);
+      return;
+    }
+
+    let active = true;
+
+    const fetchPendingForms = async () => {
+      try {
+        const api = (
+          await import("../lib/api")
+        ).default;
+
+        const response = await api.get(
+          "/forms/pending-count"
+        );
+
+        if (active) {
+          setPendingForms(
+            Number(response.data?.count || 0)
+          );
+        }
+      } catch {
+        // Badge failure must never block the patient portal.
+      }
+    };
+
+    fetchPendingForms();
+
+    const interval = setInterval(
+      fetchPendingForms,
+      30_000
+    );
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [user]);
+
+  // Unread Billing badge — patients only.
+  // Represents new invoices that the patient has not opened.
+  React.useEffect(() => {
+    if (!user || user.role !== "client") {
+      setUnreadBilling(0);
+      return;
+    }
+
+    let active = true;
+
+    const fetchUnreadBilling = async () => {
+      try {
+        const api = (
+          await import("../lib/api")
+        ).default;
+
+        const [
+          transactionResponse,
+          invoiceResponse,
+        ] = await Promise.all([
+          api.get(
+            "/transactions/patient/unread-count"
+          ),
+          api.get(
+            "/invoices/unread-count"
+          ),
+        ]);
+
+        if (active) {
+          setUnreadBilling(
+            Number(
+              transactionResponse.data?.count ||
+              0
+            ) +
+            Number(
+              invoiceResponse.data?.count ||
+              0
+            )
+          );
+        }
+      } catch {
+        // Billing badge failure must never block portal use.
+      }
+    };
+
+    fetchUnreadBilling();
+
+    const interval = setInterval(
+      fetchUnreadBilling,
+      30_000
+    );
+
+    const handleBillingViewed = () => {
+      fetchUnreadBilling();
+    };
+
+    window.addEventListener(
+      "nms:billing-viewed",
+      handleBillingViewed
+    );
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+
+      window.removeEventListener(
+        "nms:billing-viewed",
+        handleBillingViewed
+      );
+    };
+  }, [user]);
+
+  // Appointment-request badge — workforce only.
+  // Navigation contains only the aggregate count.
+  React.useEffect(() => {
+    const workforce = [
+      "admin",
+      "practitioner",
+      "staff",
+      "medical_assistant",
+      "front_desk",
+      "frontdesk",
+    ];
+
+    if (!user || !workforce.includes(user.role)) {
+      return;
+    }
+
+    let active = true;
+
+    const fetchAppointmentRequests = async () => {
+      try {
+        const api = (
+          await import("../lib/api")
+        ).default;
+
+        const response = await api.get(
+          "/appointment-requests"
+        );
+
+        const payload = response.data;
+
+        const rows = Array.isArray(payload)
+          ? payload
+          : (
+              payload?.appointment_requests ||
+              payload?.requests ||
+              payload?.items ||
+              []
+            );
+
+        const count = rows.filter(
+          (request) =>
+            request?.status === "new"
+        ).length;
+
+        if (active) {
+          setAppointmentRequestCount(count);
+        }
+      } catch {
+        // Badge failure must never block the portal.
+      }
+    };
+
+    fetchAppointmentRequests();
+
+    const interval = setInterval(
+      fetchAppointmentRequests,
+      30_000
+    );
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
   }, [user]);
 
   // Overdue-task badge — workforce only. Polls at 60s (not faster, per spec)
@@ -347,6 +536,33 @@ export default function PortalLayout({ children }) {
                             {unread}
                           </span>
                         )}
+                        {it.badge === "billing" && unreadBilling > 0 && (
+                          <span
+                            className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-[#c19a4b] text-[#1f2a22] text-[10px] font-semibold"
+                            data-testid="nav-badge-unread-billing"
+                            title={`${unreadBilling} new invoice${unreadBilling === 1 ? "" : "s"}`}
+                          >
+                            {unreadBilling}
+                          </span>
+                        )}
+                        {it.badge === "forms" && pendingForms > 0 && (
+                          <span
+                            className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-[#c19a4b] text-[#1f2a22] text-[10px] font-semibold"
+                            data-testid="nav-badge-pending-forms"
+                            title={`${pendingForms} form${pendingForms === 1 ? "" : "s"} waiting`}
+                          >
+                            {pendingForms}
+                          </span>
+                        )}
+                        {it.badge === "appointmentRequests" && appointmentRequestCount > 0 && (
+                          <span
+                            className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-[#7a2a2a] text-white text-[10px] font-semibold"
+                            data-testid="nav-badge-appointment-requests"
+                            title={`${appointmentRequestCount} new appointment request${appointmentRequestCount === 1 ? "" : "s"}`}
+                          >
+                            {appointmentRequestCount}
+                          </span>
+                        )}
                         {it.badge === "tasks" && overdueTasks > 0 && (
                           <span
                             className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-[#7a2a2a] text-white text-[10px] font-semibold"
@@ -405,7 +621,7 @@ export default function PortalLayout({ children }) {
           <BottomLink to="/portal/patient" icon={Home} label="Home" exact />
           <BottomLink to="/portal/patient/appointments" icon={CalendarDays} label="Visits" />
           <BottomLink to="/portal/patient/messages" icon={MessageSquare} label="Messages" badge={unread} />
-          <BottomLink to="/portal/patient/chart" icon={FileText} label="Chart" />
+          <BottomLink to="/portal/patient/forms" icon={ClipboardCheck} label="Forms" badge={pendingForms} />
           <BottomLink to="/portal/patient/account" icon={UserCircle} label="Me" />
         </nav>
       )}

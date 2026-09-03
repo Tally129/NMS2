@@ -56,7 +56,7 @@ x_args = context.get_x_argument(as_dictionary=True)
 if x_args.get("db_url"):
     db_url = x_args["db_url"]
 
-config.set_main_option("sqlalchemy.url", db_url)
+config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 
 import postgres_models.terminals  # noqa: F401
 

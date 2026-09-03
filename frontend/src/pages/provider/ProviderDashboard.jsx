@@ -4,6 +4,7 @@ import PortalLayout, { PortalHeader, StatCard } from "../PortalLayout";
 import api from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { Users, FileText, CalendarDays } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 export default function ProviderDashboard() {
   const { user } = useAuth();
@@ -12,7 +13,7 @@ export default function ProviderDashboard() {
 
   React.useEffect(() => {
     api.get("/dashboard/stats").then((r) => setStats(r.data));
-    api.get("/clients").then((r) => setRecent((r.data || []).slice(0, 8)));
+    api.get("/clients").then((r) => setRecent(normalizeArray(r.data, ["recent"]).slice(0, 8)));
   }, []);
 
   return (
@@ -39,7 +40,7 @@ export default function ProviderDashboard() {
           <div className="text-[#6a6a6a] text-sm">No patients yet.</div>
         ) : (
           <ul className="divide-y divide-[#e7dfc9]">
-            {recent.map((c) => (
+            {normalizeArray(recent).map((c) => (
               <li key={c.id} className="py-3 flex items-center justify-between">
                 <div>
                   <div className="font-medium text-[#1f2a22]">{c.full_name || "—"}</div>

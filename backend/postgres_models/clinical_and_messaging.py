@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -117,6 +117,13 @@ class Treatment(_PayloadMixin, Base):
     """Aesthetic / wellness treatments delivered at the front desk."""
     __tablename__ = "emr_treatments"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    concierge_public: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        index=True,
+    )
     client_id: Mapped[Optional[str]] = mapped_column(
         String(64), ForeignKey("emr_clients.id", ondelete="SET NULL"),
         nullable=True, index=True,
@@ -152,6 +159,168 @@ class LabValue(_PayloadMixin, Base):
     legacy_mongo_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
                                                   default=_utcnow, server_default=func.now())
+
+
+class LabReport(_PayloadMixin, Base):
+    """Report-level lab document.
+
+    Keeps the original uploaded report, AI transcription, structured analytes,
+    provider assignment, review history, and release state together. Approved
+    analytes are later copied into emr_lab_values for patient trends.
+    """
+    __tablename__ = "emr_lab_reports"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+    client_id: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        ForeignKey("emr_clients.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    original_file_id: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+        index=True,
+    )
+
+    source_filename: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    mime_type: Mapped[Optional[str]] = mapped_column(
+        String(120),
+        nullable=True,
+    )
+
+    report_title: Mapped[Optional[str]] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+    laboratory_name: Mapped[Optional[str]] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+    patient_name_on_report: Mapped[Optional[str]] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+    patient_dob_on_report: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+    ordering_provider: Mapped[Optional[str]] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+    accession_number: Mapped[Optional[str]] = mapped_column(
+        String(300),
+        nullable=True,
+        index=True,
+    )
+
+    collection_date: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    reported_date: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    review_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="ai_transcribed",
+        server_default="ai_transcribed",
+        index=True,
+    )
+
+    assigned_provider_id: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        ForeignKey("auth_users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    assigned_provider_name: Mapped[Optional[str]] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    review_priority: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        nullable=True,
+        index=True,
+    )
+    review_due_date: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+    document_confidence: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    verified: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        index=True,
+    )
+    released_to_patient: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        index=True,
+    )
+
+    approved_by: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    approved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    rejected_by: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    rejected_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_by: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    created_by_name: Mapped[Optional[str]] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        server_default=func.now(),
+        index=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        server_default=func.now(),
+        onupdate=_utcnow,
+    )
 
 
 class LiveSoapDraft(Base):

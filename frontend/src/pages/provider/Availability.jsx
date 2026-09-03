@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Label } from "../../components/ui/label";
 import { useToast } from "../../hooks/use-toast";
 import { Trash2 } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
@@ -17,7 +18,7 @@ export default function Availability() {
   const [items, setItems] = React.useState([]);
   const [form, setForm] = React.useState({ weekday: "0", start_time: "09:00", end_time: "17:00" });
 
-  const load = () => api.get("/availability").then((r) => setItems(r.data || []));
+  const load = () => api.get("/availability").then((r) => setItems(normalizeArray(r.data, ["items"])));
   React.useEffect(() => { load(); }, []);
 
   const add = async () => {
@@ -58,7 +59,7 @@ export default function Availability() {
           </thead>
           <tbody>
             {items.length === 0 && <tr><td colSpan={4} className="py-8 text-center text-[#6a6a6a]">No availability set</td></tr>}
-            {items.map((a) => (
+            {normalizeArray(items).map((a) => (
               <tr key={a.id} className="border-t border-[#e7dfc9]">
                 <td className="py-3 px-4">{DAYS[a.weekday]}</td>
                 <td className="py-3 px-4">{a.start_time}</td>

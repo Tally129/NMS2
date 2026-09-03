@@ -33,7 +33,7 @@ _APPT_COLS = (
     "transaction_id", "reminder_sent_at",
     "legacy_mongo_id", "legacy_client_id", "legacy_practitioner_id",
     "legacy_created_by",
-    "created_at", "updated_at",
+    "created_at", "updated_at", "archived_at",
 )
 
 
@@ -46,7 +46,8 @@ def _appt(a: Appointment) -> Dict[str, Any]:
 _REQ_COLS = (
     "id", "full_name", "email", "phone", "returning", "service", "date",
     "time", "notes", "add_ons", "status", "decline_reason", "suggested_time",
-    "reviewed_by", "reviewed_at", "ip", "legacy_mongo_id", "created_at",
+    "reviewed_by", "reviewed_at", "archived_at", "archived_by", "ip",
+    "legacy_mongo_id", "created_at",
 )
 
 
@@ -97,11 +98,17 @@ async def list_appointments(
     start_lte: Optional[datetime] = None,
     status_in: Optional[Iterable[str]] = None,
     reminder_not_sent: bool = False,
+    archived: Optional[bool] = False,
     limit: int = 1000,
     sort_desc: bool = False,
 ) -> List[Dict[str, Any]]:
     stmt = select(Appointment)
     conds = []
+
+    if archived is True:
+        conds.append(Appointment.archived_at.is_not(None))
+    elif archived is False:
+        conds.append(Appointment.archived_at.is_(None))
     if client_id:
         conds.append(Appointment.client_id == client_id)
     if practitioner_id:
@@ -147,6 +154,18 @@ async def update_appointment(session: AsyncSession, appt_id: str,
     return r.rowcount or 0
 
 
+
+async def delete_appointment(
+    session: AsyncSession,
+    appt_id: str,
+) -> int:
+    """Permanently delete one appointment after router-level safety checks."""
+    result = await session.execute(
+        delete(Appointment).where(Appointment.id == appt_id)
+    )
+    return result.rowcount or 0
+
+
 async def list_appointments_with_waiting_state(session: AsyncSession, *,
                                                   state: str = "requested",
                                                   limit: int = 200) -> List[Dict[str, Any]]:
@@ -154,10 +173,17 @@ async def list_appointments_with_waiting_state(session: AsyncSession, *,
 
     Emulates the Mongo query `{"waiting_room.state": state}` with JSONB `->>`.
     """
-    stmt = (select(Appointment)
-            .where(Appointment.waiting_room["state"].astext == state)
-            .order_by(Appointment.waiting_room["request_at"].astext.asc())
-            .limit(limit))
+    stmt = (
+        select(Appointment)
+        .where(
+            Appointment.archived_at.is_(None),
+            Appointment.waiting_room["state"].astext == state,
+        )
+        .order_by(
+            Appointment.waiting_room["request_at"].astext.asc()
+        )
+        .limit(limit)
+    )
     return [_appt(a) for a in (await session.execute(stmt)).scalars().all()]
 
 
@@ -232,14 +258,39 @@ async def get_appointment_request(session: AsyncSession,
     return _req(row)
 
 
+async def get_appointment_request_by_concierge_idempotency_key(
+    session: AsyncSession,
+    key_hash: str,
+) -> Optional[Dict[str, Any]]:
+    row = (await session.execute(
+        select(AppointmentRequest).where(
+            AppointmentRequest.concierge_idempotency_key == key_hash
+        )
+    )).scalar_one_or_none()
+    return _req(row)
+
+
 async def list_appointment_requests(
-    session: AsyncSession, *, status: Optional[str] = None, limit: int = 200,
+    session: AsyncSession,
+    *,
+    status: Optional[str] = None,
+    archived: Optional[bool] = False,
+    limit: int = 200,
 ) -> List[Dict[str, Any]]:
     stmt = select(AppointmentRequest).order_by(
         AppointmentRequest.created_at.desc()
-    ).limit(limit)
+    )
+
+    if archived is True:
+        stmt = stmt.where(AppointmentRequest.archived_at.is_not(None))
+    elif archived is False:
+        stmt = stmt.where(AppointmentRequest.archived_at.is_(None))
+
     if status:
         stmt = stmt.where(AppointmentRequest.status == status)
+
+    stmt = stmt.limit(limit)
+
     return [_req(r) for r in (await session.execute(stmt)).scalars().all()]
 
 

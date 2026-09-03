@@ -254,6 +254,51 @@ async def send_generic_portal_notification(db, to: str, *,
                              redact_recipient=True)
 
 
+async def send_generic_portal_update_email(
+    db,
+    to: str,
+    *,
+    first_name: Optional[str],
+    subject: str,
+    heading: str,
+    message: str,
+    portal_path: str,
+) -> str:
+    """Send a privacy-safe branded patient portal update."""
+    from email_templates import portal_update_notification
+
+    app_url = os.environ.get(
+        "FRONTEND_ORIGIN",
+        "https://app.natmedsol.org",
+    ).rstrip("/")
+
+    safe_path = (
+        portal_path
+        if portal_path.startswith("/")
+        else "/" + portal_path
+    )
+
+    portal_url = f"{app_url}{safe_path}"
+
+    subj, html, text = portal_update_notification(
+        first_name=first_name,
+        subject=subject,
+        heading=heading,
+        message=message,
+        portal_url=portal_url,
+    )
+
+    return await send_email(
+        db,
+        to,
+        subj,
+        html,
+        plain_text=text,
+        action="notify.portal_update",
+        redact_recipient=True,
+    )
+
+
 async def send_campaign_email(db, to: str, *, subject: str,
                                 safe_html: str, plain_text: Optional[str],
                                 campaign_id: str) -> str:

@@ -39,6 +39,19 @@ export default function Home() {
     <div className="page-fade min-h-screen bg-parchment font-body">
       <div className="top-ribbon" />
 
+      <div className="border-b border-[#e7dfc9] bg-[#fbf7ee]">
+        <div className="max-w-5xl mx-auto px-6 py-3">
+          <a
+            href="https://natmedsol.com"
+            className="inline-flex items-center gap-2 text-sm font-medium text-[#2f4a3a] hover:text-[#1f2a22] transition-colors"
+            data-testid="back-to-natural-medical-solutions"
+          >
+            <span aria-hidden="true">←</span>
+            Back to Natural Medical Solutions
+          </a>
+        </div>
+      </div>
+
       {/* HERO */}
       <section className="max-w-5xl mx-auto px-6 pt-16 pb-12 text-center">
         <div className="flex justify-center">

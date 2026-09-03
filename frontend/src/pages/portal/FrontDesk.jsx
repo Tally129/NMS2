@@ -11,6 +11,7 @@ import { useToast } from "../../hooks/use-toast";
 import {
   UserPlus, LogIn, LogOut, Building2, Users, Clock, X,
   ClipboardCheck, FileText, FolderOpen, CheckCircle2, XCircle, CreditCard,
+  Archive, RotateCcw,
 } from "lucide-react";
 import { getErrorMessage } from "../../lib/errors";
 import { normalizeArray } from "../../lib/collections";
@@ -28,34 +29,61 @@ export default function FrontDesk() {
   const [visits, setVisits] = React.useState([]);
   const [clients, setClients] = React.useState([]);
   const [requests, setRequests] = React.useState([]);   // pending appointment requests
+  const [archivedRequests, setArchivedRequests] = React.useState([]);
+  const [requestView, setRequestView] = React.useState("active");
+  const [archiveBusyId, setArchiveBusyId] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const [showCheckin, setShowCheckin] = React.useState(false);
   const [form, setForm] = React.useState({ client_id: "", room: "", walk_in: false });
   const [search, setSearch] = React.useState("");
+  const [requestAction, setRequestAction] = React.useState(null);
+  const [requestActionValue, setRequestActionValue] = React.useState("");
+  const [requestActionBusy, setRequestActionBusy] = React.useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
   const filterKey = searchParams.get("filter") || "all"; // all | in_clinic | walk_in | checked_out
 
   const load = async () => {
     setLoading(true);
     try {
-      const todayStart = new Date();
-      todayStart.setHours(0, 0, 0, 0);
-      const in30 = new Date(todayStart.getTime() + 30 * 24 * 3600 * 1000);
-      const [v, c, r] = await Promise.all([
+      const [v, c, r, ar] = await Promise.all([
         api.get("/front-desk/today"),
         api.getList("/clients", {}, ["clients"]),
-        // Handoff #1: patient-initiated appointments arrive as `requested`.
-        api.get("/appointments", {
-          params: { start: todayStart.toISOString(), end: in30.toISOString() },
-        }).catch(() => ({ data: [] })),
+        // Public submissions live in the dedicated
+        // appointment-request queue.
+        api.get("/appointment-requests").catch(
+          () => ({ data: [] })
+        ),
+        api.get("/appointment-requests?archived=true").catch(
+          () => ({ data: [] })
+        ),
       ]);
       setVisits(normalizeArray(v.data, ["visits"]));
       setClients(normalizeArray(c.data, ["clients"]));
-      setRequests(
-        normalizeArray(r.data, ["appointments"]).filter(
-          (appointment) => appointment.status === "requested"
-        )
-      );
+        const requestRows = normalizeArray(
+          r.data,
+          [
+            "appointment_requests",
+            "requests",
+            "items",
+          ]
+        );
+
+        setRequests(
+          requestRows.filter(
+            (request) => request.status === "new"
+          )
+        );
+
+        const archivedRequestRows = normalizeArray(
+          ar.data,
+          [
+            "appointment_requests",
+            "requests",
+            "items",
+          ]
+        );
+
+        setArchivedRequests(archivedRequestRows);
     } catch (e) {
       toast({ title: "Failed to load", description: getErrorMessage(e) || "" });
     } finally {
@@ -86,6 +114,213 @@ export default function FrontDesk() {
     }
   };
 
+  const approveRequest = async (request) => {
+    if (!request?.id || requestActionBusy) return;
+
+    setRequestActionBusy(true);
+
+    try {
+      const response = await api.post(
+        `/appointment-requests/${request.id}/approve`
+      );
+
+      if (response.data?.already_approved) {
+        toast({
+          title: "Request already approved",
+        });
+      } else {
+        toast({
+          title: "Appointment request approved",
+          description:
+            "The patient has been notified.",
+        });
+      }
+
+      await load();
+    } catch (e) {
+      toast({
+        title: "Unable to approve request",
+        description: getErrorMessage(e) || "",
+      });
+    } finally {
+      setRequestActionBusy(false);
+    }
+  };
+
+  const refreshAppointmentRequests = async () => {
+    const [activeRes, archivedRes] = await Promise.all([
+      api.get("/appointment-requests"),
+      api.get("/appointment-requests?archived=true"),
+    ]);
+
+    const activeRows = normalizeArray(
+      activeRes.data,
+      [
+        "appointment_requests",
+        "requests",
+        "items",
+      ]
+    );
+
+    const archivedRows = normalizeArray(
+      archivedRes.data,
+      [
+        "appointment_requests",
+        "requests",
+        "items",
+      ]
+    );
+
+    setRequests(
+      activeRows.filter(
+        (request) => request.status === "new"
+      )
+    );
+
+    setArchivedRequests(archivedRows);
+  };
+
+  const archiveRequest = async (request) => {
+    if (!request?.id || archiveBusyId) return;
+
+    const confirmed = window.confirm(
+      "Archive this appointment request? It will be removed from the active queue, but you can restore it later."
+    );
+
+    if (!confirmed) return;
+
+    setArchiveBusyId(request.id);
+
+    try {
+      await api.post(
+        `/appointment-requests/${request.id}/archive`
+      );
+
+      await refreshAppointmentRequests();
+
+      toast({
+        title: "Appointment request archived",
+        description:
+          "The request was moved to Archived and can be restored later.",
+      });
+    } catch (e) {
+      toast({
+        title: "Unable to archive request",
+        description: getErrorMessage(e) || "",
+      });
+    } finally {
+      setArchiveBusyId(null);
+    }
+  };
+
+  const restoreRequest = async (request) => {
+    if (!request?.id || archiveBusyId) return;
+
+    setArchiveBusyId(request.id);
+
+    try {
+      await api.post(
+        `/appointment-requests/${request.id}/restore`
+      );
+
+      await refreshAppointmentRequests();
+
+      toast({
+        title: "Appointment request restored",
+        description:
+          "The request was returned to the active appointment request queue.",
+      });
+
+      setRequestView("active");
+    } catch (e) {
+      toast({
+        title: "Unable to restore request",
+        description: getErrorMessage(e) || "",
+      });
+    } finally {
+      setArchiveBusyId(null);
+    }
+  };
+
+  const openRequestAction = (request, action) => {
+    setRequestAction({
+      request,
+      action,
+    });
+
+    setRequestActionValue("");
+  };
+
+  const closeRequestAction = () => {
+    if (requestActionBusy) return;
+
+    setRequestAction(null);
+    setRequestActionValue("");
+  };
+
+  const submitRequestAction = async () => {
+    const request = requestAction?.request;
+    const action = requestAction?.action;
+
+    if (!request?.id || !action) return;
+
+    const value = requestActionValue.trim();
+
+    if (action === "reschedule" && !value) {
+      toast({
+        title: "Select another date and time",
+      });
+      return;
+    }
+
+    setRequestActionBusy(true);
+
+    try {
+      if (action === "reschedule") {
+        await api.post(
+          `/appointment-requests/${request.id}/reschedule`,
+          {
+            suggested_time: value,
+          }
+        );
+
+        toast({
+          title: "Alternative time sent",
+          description:
+            "The patient has been notified.",
+        });
+      } else if (action === "decline") {
+        await api.post(
+          `/appointment-requests/${request.id}/decline`,
+          {
+            reason: value,
+          }
+        );
+
+        toast({
+          title: "Appointment request declined",
+          description:
+            "The patient has been notified.",
+        });
+      }
+
+      setRequestAction(null);
+      setRequestActionValue("");
+
+      await load();
+    } catch (e) {
+      toast({
+        title:
+          action === "reschedule"
+            ? "Unable to suggest another time"
+            : "Unable to decline request",
+        description: getErrorMessage(e) || "",
+      });
+    } finally {
+      setRequestActionBusy(false);
+    }
+  };
+
   const updateVisit = async (id, payload) => {
     try {
       await api.put(`/front-desk/${id}`, payload);
@@ -95,20 +330,6 @@ export default function FrontDesk() {
     }
   };
 
-  // Handoff #1: staff decision on a pending appointment request.
-  const respondToRequest = async (appt, decision) => {
-    try {
-      await api.put(`/appointments/${appt.id}`, {
-        status: decision === "confirm" ? "confirmed" : "canceled",
-      });
-      toast({
-        title: decision === "confirm" ? "Appointment confirmed" : "Appointment declined",
-      });
-      load();
-    } catch (e) {
-      toast({ title: "Update failed", description: getErrorMessage(e) || "" });
-    }
-  };
 
   // Handoff #4: send the front-desk row into POS with context prefilled so
   // completion writes the transaction id back onto the appointment.
@@ -195,47 +416,333 @@ export default function FrontDesk() {
       )}
 
       {/* Handoff #1: patient-initiated requests awaiting staff confirmation. */}
-      {requests.length > 0 && (
-        <div className="mb-4 rounded-2xl border border-[#c19a4b] bg-[#fdf6db] p-4"
-             data-testid="frontdesk-requests-card">
-          <div className="flex items-center justify-between mb-2">
-            <div className="font-medium text-[#8a6a3c] text-sm">
-              {requests.length} appointment request{requests.length === 1 ? "" : "s"} pending
-            </div>
-            <span className="text-[10px] uppercase tracking-wider text-[#8a6a3c]">Awaiting confirmation</span>
-          </div>
-          <ul className="space-y-2">
-            {normalizeArray(requests).map((a) => (
-              <li key={a.id} className="flex items-center justify-between gap-3 rounded-lg bg-white/70 border border-[#e6d38a] px-3 py-2"
-                  data-testid={`frontdesk-request-${a.id}`}>
-                <div className="min-w-0 text-sm">
-                  <div className="font-medium text-[#1f2a22] truncate">{a.client_name || a.client_id}</div>
-                  <div className="text-xs text-[#6a6a6a]">
-                    {a.service || "Consultation"} · {new Date(a.start).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
-                    {a.practitioner_name ? ` · ${a.practitioner_name}` : ""}
-                  </div>
+          {/* Patient-initiated appointment request queue */}
+        <div
+          id="appointment-requests"
+          className="mb-6 rounded-2xl border border-[#c19a4b] bg-[#fdf6db] p-4"
+          data-testid="frontdesk-requests-card"
+        >
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between mb-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <div className="font-medium text-[#8a6a3c] text-sm">
+                  Appointment Requests
                 </div>
-                <div className="flex-shrink-0 flex gap-2">
-                  <Button size="sm" variant="outline"
-                          className="h-8 rounded-full border-[#7a2a2a] text-[#7a2a2a]"
-                          onClick={() => respondToRequest(a, "decline")}
-                          data-testid={`frontdesk-request-decline-${a.id}`}>
-                    <XCircle size={13} className="mr-1" /> Decline
-                  </Button>
-                  <Button size="sm"
-                          className="h-8 rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]"
-                          onClick={() => respondToRequest(a, "confirm")}
-                          data-testid={`frontdesk-request-confirm-${a.id}`}>
-                    <CheckCircle2 size={13} className="mr-1" /> Confirm
-                  </Button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
 
-      <Input
+                {requestView === "active" && requests.length > 0 && (
+                  <span
+                    className="inline-flex min-w-[22px] h-[22px] px-1.5 items-center justify-center rounded-full bg-[#7a2a2a] text-white text-xs font-semibold"
+                    data-testid="frontdesk-request-count"
+                  >
+                    {requests.length}
+                  </span>
+                )}
+              </div>
+
+              <div className="text-xs text-[#6a6a6a] mt-1">
+                Requests submitted through the Request an Appointment form
+              </div>
+            </div>
+
+            <div
+              className="inline-flex self-start rounded-full border border-[#d8c67f] bg-white/70 p-1"
+              data-testid="appointment-request-view-tabs"
+            >
+              <button
+                type="button"
+                onClick={() => setRequestView("active")}
+                className={`rounded-full px-3 py-1.5 text-[10px] uppercase tracking-wider transition ${
+                  requestView === "active"
+                    ? "bg-[#8a6a3c] text-white"
+                    : "text-[#8a6a3c] hover:bg-[#f8f2df]"
+                }`}
+                data-testid="appointment-requests-active-tab"
+              >
+                Awaiting Review
+                {requests.length
+                  ? ` (${requests.length})`
+                  : ""}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setRequestView("archived")}
+                className={`rounded-full px-3 py-1.5 text-[10px] uppercase tracking-wider transition ${
+                  requestView === "archived"
+                    ? "bg-[#8a6a3c] text-white"
+                    : "text-[#8a6a3c] hover:bg-[#f8f2df]"
+                }`}
+                data-testid="appointment-requests-archived-tab"
+              >
+                Archived
+                {archivedRequests.length
+                  ? ` (${archivedRequests.length})`
+                  : ""}
+              </button>
+            </div>
+          </div>
+
+          {requestView === "active" ? (
+            requests.length === 0 ? (
+              <div
+                className="rounded-lg bg-white/60 border border-[#e6d38a] px-4 py-5 text-sm text-[#6a6a6a]"
+                data-testid="frontdesk-no-requests"
+              >
+                No new appointment requests.
+              </div>
+            ) : (
+              <ul className="space-y-3">
+                {normalizeArray(requests).map((request) => (
+                  <li
+                    key={request.id}
+                    className="rounded-xl bg-white/75 border border-[#e6d38a] px-4 py-3"
+                    data-testid={`frontdesk-request-${request.id}`}
+                  >
+                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                      <div className="min-w-0">
+                        <div className="font-medium text-[#1f2a22]">
+                          {request.fullName ||
+                            request.full_name ||
+                            "Appointment request"}
+                        </div>
+
+                        <div className="text-xs text-[#6a6a6a] mt-1">
+                          {request.service || "Consultation"}
+
+                          {request.date
+                            ? ` · ${new Date(
+                                request.date
+                              ).toLocaleDateString()}`
+                            : ""}
+
+                          {request.time
+                            ? ` · ${request.time}`
+                            : ""}
+                        </div>
+
+                        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[#6a6a6a]">
+                          {request.phone && (
+                            <span>
+                              Phone: {request.phone}
+                            </span>
+                          )}
+
+                          {request.email && (
+                            <span>
+                              Email: {request.email}
+                            </span>
+                          )}
+                        </div>
+
+                        {request.returning !== undefined &&
+                          request.returning !== null && (
+                            <div className="text-xs text-[#6a6a6a] mt-1">
+                              {request.returning
+                                ? "Returning patient"
+                                : "New patient"}
+                            </div>
+                          )}
+                      </div>
+
+                      <div className="flex flex-col items-start gap-3 md:items-end">
+                        <span className="inline-flex self-start md:self-end rounded-full bg-[#f1ead8] border border-[#e0d6bc] px-2.5 py-1 text-[10px] uppercase tracking-wider text-[#8a6a3c]">
+                          New
+                        </span>
+
+                        <div className="flex flex-wrap gap-2 md:justify-end">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 rounded-full border-[#7a2a2a] text-[#7a2a2a] hover:bg-[#f8eeee]"
+                            disabled={
+                              requestActionBusy ||
+                              Boolean(archiveBusyId)
+                            }
+                            onClick={() =>
+                              openRequestAction(
+                                request,
+                                "decline"
+                              )
+                            }
+                            data-testid={`request-decline-${request.id}`}
+                          >
+                            <XCircle
+                              size={13}
+                              className="mr-1"
+                            />
+                            Decline
+                          </Button>
+
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 rounded-full border-[#c19a4b] text-[#8a6a3c] hover:bg-[#f8f2df]"
+                            disabled={
+                              requestActionBusy ||
+                              Boolean(archiveBusyId)
+                            }
+                            onClick={() =>
+                              openRequestAction(
+                                request,
+                                "reschedule"
+                              )
+                            }
+                            data-testid={`request-reschedule-${request.id}`}
+                          >
+                            <Clock
+                              size={13}
+                              className="mr-1"
+                            />
+                            Suggest Another Time
+                          </Button>
+
+                          <Button
+                            type="button"
+                            size="sm"
+                            className="h-8 rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]"
+                            disabled={
+                              requestActionBusy ||
+                              Boolean(archiveBusyId)
+                            }
+                            onClick={() =>
+                              approveRequest(request)
+                            }
+                            data-testid={`request-approve-${request.id}`}
+                          >
+                            <CheckCircle2
+                              size={13}
+                              className="mr-1"
+                            />
+                            Approve
+                          </Button>
+
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 rounded-full border-[#9b8d75] text-[#6a6255] hover:bg-[#f2eee6]"
+                            disabled={
+                              requestActionBusy ||
+                              Boolean(archiveBusyId)
+                            }
+                            onClick={() =>
+                              archiveRequest(request)
+                            }
+                            data-testid={`request-archive-${request.id}`}
+                          >
+                            <Archive
+                              size={13}
+                              className="mr-1"
+                            />
+                            {archiveBusyId === request.id
+                              ? "Archiving…"
+                              : "Archive"}
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )
+          ) : archivedRequests.length === 0 ? (
+            <div
+              className="rounded-lg bg-white/60 border border-[#e6d38a] px-4 py-5 text-sm text-[#6a6a6a]"
+              data-testid="frontdesk-no-archived-requests"
+            >
+              No archived appointment requests.
+            </div>
+          ) : (
+            <ul className="space-y-3">
+              {normalizeArray(archivedRequests).map(
+                (request) => (
+                  <li
+                    key={request.id}
+                    className="rounded-xl bg-white/75 border border-[#e6d38a] px-4 py-3"
+                    data-testid={`frontdesk-archived-request-${request.id}`}
+                  >
+                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                      <div className="min-w-0">
+                        <div className="font-medium text-[#1f2a22]">
+                          {request.fullName ||
+                            request.full_name ||
+                            "Appointment request"}
+                        </div>
+
+                        <div className="text-xs text-[#6a6a6a] mt-1">
+                          {request.service || "Consultation"}
+
+                          {request.date
+                            ? ` · ${new Date(
+                                request.date
+                              ).toLocaleDateString()}`
+                            : ""}
+
+                          {request.time
+                            ? ` · ${request.time}`
+                            : ""}
+                        </div>
+
+                        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[#6a6a6a]">
+                          {request.phone && (
+                            <span>
+                              Phone: {request.phone}
+                            </span>
+                          )}
+
+                          {request.email && (
+                            <span>
+                              Email: {request.email}
+                            </span>
+                          )}
+                        </div>
+
+                        {request.archived_at && (
+                          <div className="text-xs text-[#8a6a3c] mt-2">
+                            Archived{" "}
+                            {new Date(
+                              request.archived_at
+                            ).toLocaleString()}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex flex-col items-start gap-3 md:items-end">
+                        <span className="inline-flex self-start md:self-end rounded-full bg-[#eee9df] border border-[#d9d0bf] px-2.5 py-1 text-[10px] uppercase tracking-wider text-[#6a6255]">
+                          {request.status || "Archived"}
+                        </span>
+
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-8 rounded-full border-[#2f4a3a] text-[#2f4a3a] hover:bg-[#edf3ee]"
+                          disabled={Boolean(archiveBusyId)}
+                          onClick={() =>
+                            restoreRequest(request)
+                          }
+                          data-testid={`request-restore-${request.id}`}
+                        >
+                          <RotateCcw
+                            size={13}
+                            className="mr-1"
+                          />
+                          {archiveBusyId === request.id
+                            ? "Restoring…"
+                            : "Restore"}
+                        </Button>
+                      </div>
+                    </div>
+                  </li>
+                )
+              )}
+            </ul>
+          )}
+        </div>
+
+<Input
         placeholder="Search by patient name…"
         value={search}
         onChange={(e) => setSearch(e.target.value)}
@@ -319,6 +826,132 @@ export default function FrontDesk() {
           </tbody>
         </table>
       </div>
+
+      <Dialog
+        open={Boolean(requestAction)}
+        onOpenChange={(open) => {
+          if (!open) closeRequestAction();
+        }}
+      >
+        <DialogContent
+          className="bg-[#fbf7ee] border-[#e7dfc9] max-w-lg"
+          data-testid="appointment-request-action-dialog"
+        >
+          <DialogHeader>
+            <DialogTitle>
+              {requestAction?.action === "reschedule"
+                ? "Suggest Another Time"
+                : "Decline Appointment Request"}
+            </DialogTitle>
+
+            <DialogDescription>
+              {requestAction?.action === "reschedule"
+                ? "Choose an alternative date and time. The patient will receive a notification after you send it."
+                : "You may include a brief reason for declining this appointment request."}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="rounded-xl border border-[#e7dfc9] bg-white/60 px-4 py-3 text-sm">
+              <div className="font-medium text-[#1f2a22]">
+                {requestAction?.request?.fullName ||
+                  requestAction?.request?.full_name ||
+                  "Appointment request"}
+              </div>
+
+              <div className="mt-1 text-xs text-[#6a6a6a]">
+                {requestAction?.request?.service ||
+                  "Consultation"}
+
+                {requestAction?.request?.date
+                  ? ` · ${requestAction.request.date}`
+                  : ""}
+
+                {requestAction?.request?.time
+                  ? ` · ${requestAction.request.time}`
+                  : ""}
+              </div>
+            </div>
+
+            {requestAction?.action === "reschedule" ? (
+              <div>
+                <Label htmlFor="request-suggested-time">
+                  Proposed date and time
+                </Label>
+
+                <Input
+                  id="request-suggested-time"
+                  type="datetime-local"
+                  className="mt-2 bg-white border-[#e0d6bc]"
+                  value={requestActionValue}
+                  onChange={(e) =>
+                    setRequestActionValue(
+                      e.target.value
+                    )
+                  }
+                  data-testid="request-suggested-time"
+                />
+              </div>
+            ) : (
+              <div>
+                <Label htmlFor="request-decline-reason">
+                  Reason (optional)
+                </Label>
+
+                <textarea
+                  id="request-decline-reason"
+                  className="mt-2 min-h-28 w-full rounded-md border border-[#e0d6bc] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#5b6f5b]/30"
+                  value={requestActionValue}
+                  onChange={(e) =>
+                    setRequestActionValue(
+                      e.target.value
+                    )
+                  }
+                  placeholder="Optional note for the patient"
+                  data-testid="request-decline-reason"
+                />
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={requestActionBusy}
+              onClick={closeRequestAction}
+            >
+              Cancel
+            </Button>
+
+            <Button
+              type="button"
+              disabled={
+                requestActionBusy ||
+                (
+                  requestAction?.action ===
+                    "reschedule" &&
+                  !requestActionValue.trim()
+                )
+              }
+              onClick={submitRequestAction}
+              className={
+                requestAction?.action === "decline"
+                  ? "bg-[#7a2a2a] hover:bg-[#642222] text-white"
+                  : "bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]"
+              }
+              data-testid="request-action-submit"
+            >
+              {requestActionBusy
+                ? "Saving…"
+                : requestAction?.action ===
+                    "reschedule"
+                  ? "Send Proposed Time"
+                  : "Decline Request"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={showCheckin} onOpenChange={setShowCheckin}>
         <DialogContent className="bg-[#fbf7ee] border-[#e7dfc9]">

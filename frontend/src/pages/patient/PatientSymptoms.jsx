@@ -8,6 +8,7 @@ import { Label } from "../../components/ui/label";
 import { useToast } from "../../hooks/use-toast";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceArea } from "recharts";
 import { Activity, Plus } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 export default function PatientSymptoms() {
   const { toast } = useToast();
@@ -15,7 +16,7 @@ export default function PatientSymptoms() {
   const [logs, setLogs] = React.useState([]);
   const [form, setForm] = React.useState({ symptom: "", severity: 5, note: "" });
 
-  const load = React.useCallback(() => api.get("/symptom-logs").then((r) => setLogs(r.data || [])), []);
+  const load = React.useCallback(() => api.get("/symptom-logs").then((r) => setLogs(normalizeArray(r.data, ["logs"]))), []);
   React.useEffect(() => {
     api.get("/symptoms/presets").then((r) => {
       setPresets(r.data.symptoms);
@@ -58,7 +59,7 @@ export default function PatientSymptoms() {
           <Label>Symptom</Label>
           <Select value={form.symptom} onValueChange={(v) => setForm({ ...form, symptom: v })}>
             <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]"><SelectValue /></SelectTrigger>
-            <SelectContent>{presets.map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
+            <SelectContent>{normalizeArray(presets).map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
           </Select>
         </div>
         <div>

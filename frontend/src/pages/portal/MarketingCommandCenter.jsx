@@ -266,6 +266,10 @@ export default function MarketingCommandCenter() {
   const [budgets, setBudgets] =
     React.useState([]);
 
+
+  const [campaigns, setCampaigns] =
+    React.useState([]);
+
   const [channels, setChannels] =
     React.useState([]);
 
@@ -296,7 +300,8 @@ export default function MarketingCommandCenter() {
           capabilitiesResponse,
           goalsResponse,
           budgetsResponse,
-          channelsResponse,
+          campaignsResponse,
+            channelsResponse,
           briefResponse,
         ] = await Promise.all([
           api.get(
@@ -308,7 +313,10 @@ export default function MarketingCommandCenter() {
           api.get(
             "/marketing-os/budgets"
           ),
-          api.get(
+                      api.getList(
+              "/marketing-os/campaigns"
+            ),
+            api.get(
             "/marketing-os/channel-accounts"
           ),
           api.get(
@@ -334,7 +342,15 @@ export default function MarketingCommandCenter() {
           )
         );
 
-        setChannels(
+
+          setCampaigns(
+            asArray(
+              campaignsResponse.data,
+              ["campaigns", "items"]
+            )
+          );
+
+          setChannels(
           asArray(
             channelsResponse.data,
             [
@@ -881,6 +897,7 @@ export default function MarketingCommandCenter() {
         <MarketingBudgetsPanel
           budgets={budgets}
           goals={goals}
+                    campaigns={campaigns}
           totalSpend={totalSpend}
           overallRoas={overallRoas}
           onChanged={() =>

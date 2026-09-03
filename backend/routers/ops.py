@@ -38,6 +38,7 @@ from pg_shims import (
 )
 from postgres_db import AsyncSessionLocal
 from repositories import scheduling as sched_repo
+from services.patient_activity import add_patient_activity_message
 
 
 async def _pg_visit_notes_in_window(start, end):
@@ -126,6 +127,95 @@ async def update_inventory(iid: str, payload: InventoryItemIn, request: Request,
                     resource_type="inventory", resource_id=iid,
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     return _strip_id(item)
+
+
+
+@api.delete("/inventory/{iid}")
+async def archive_inventory(
+    iid: str,
+    request: Request,
+    user=Depends(require_roles("admin", "staff")),
+):
+    """Archive an inventory item without removing historical records."""
+    item = await db.inventory_items.find_one({"id": iid})
+
+    if not item:
+        raise HTTPException(
+            status_code=404,
+            detail="Inventory item not found",
+        )
+
+    now = datetime.now(timezone.utc)
+
+    await db.inventory_items.update_one(
+        {"id": iid},
+        {
+            "$set": {
+                "active": False,
+                "archived_at": now,
+                "archived_by": user["id"],
+                "updated_at": now,
+            }
+        },
+    )
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "inventory.archive",
+        resource_type="inventory_item",
+        resource_id=iid,
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    return {"ok": True, "id": iid, "archived": True}
+
+
+@api.post("/inventory/{iid}/restore", response_model=InventoryItemOut)
+async def restore_inventory(
+    iid: str,
+    request: Request,
+    user=Depends(require_roles("admin", "staff")),
+):
+    """Restore a previously archived inventory item."""
+    item = await db.inventory_items.find_one({"id": iid})
+
+    if not item:
+        raise HTTPException(
+            status_code=404,
+            detail="Inventory item not found",
+        )
+
+    now = datetime.now(timezone.utc)
+
+    await db.inventory_items.update_one(
+        {"id": iid},
+        {
+            "$set": {
+                "active": True,
+                "archived_at": None,
+                "archived_by": None,
+                "updated_at": now,
+            }
+        },
+    )
+
+    restored = await db.inventory_items.find_one({"id": iid})
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "inventory.restore",
+        resource_type="inventory_item",
+        resource_id=iid,
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    return _strip_id(restored)
 
 
 @api.post("/inventory/{iid}/adjust", response_model=InventoryItemOut)
@@ -225,11 +315,18 @@ async def pos_checkout(payload: PosCheckoutIn, request: Request,
         "total": total,
         "payment_method": payload.payment_method,
         "payment_ref": payload.payment_ref,
-        "status": "paid" if payload.payment_method != "stripe" else "pending",
-        "paid_at": datetime.now(timezone.utc) if payload.payment_method != "stripe" else None,
+        # A payment method selection is not proof that an electronic
+        # payment actually settled. Cash/check are explicitly received
+        # by staff at checkout; electronic methods remain pending until
+        # processor/manual confirmation.
+        "status": "paid" if payload.payment_method in {"cash", "check"} else "pending",
+        "paid_at": datetime.now(timezone.utc) if payload.payment_method in {"cash", "check"} else None,
         "note": payload.note,
         "created_by": user["id"],
         "created_at": datetime.now(timezone.utc),
+        # Patient Billing notification state.
+        # Only patient-linked transactions participate.
+        "patient_unread": bool(payload.client_id),
     }
     await db.transactions.insert_one(txn)
 
@@ -266,44 +363,208 @@ async def pos_checkout(payload: PosCheckoutIn, request: Request,
                     metadata={"total": total, "method": payload.payment_method},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
 
-    # Accounting event — safe fire-and-forget (never blocks checkout)
-    try:
-        from accounting.events import AccountingEvent, emit
-        ctx_lines = [{
-            "line_type": ln["type"], "ref_id": ln.get("ref_id"),
-            "qty": ln.get("qty") or 1,
-            "unit_price_cents": int(round(float(ln.get("unit_price") or 0) * 100)),
-            "line_total_cents": int(round(float(ln.get("line_total") or 0) * 100)),
-        } for ln in out_lines]
-        await emit(AccountingEvent(
-            event_type="SaleCompleted",
-            occurred_at=txn["created_at"],
-            source_module="pos", source_ref_type="transaction", source_ref_id=txn["id"],
-            idempotency_key=f"transaction:{txn['id']}:SaleCompleted",
-            amount_cents=int(round(total * 100)),
-            context={
-                "payment_method": payload.payment_method,
-                "subtotal_cents": int(round(subtotal * 100)),
-                "discount_cents": int(round(discount * 100)),
-                "tip_cents": int(round(tip * 100)),
-                "tax_cents": int(round(tax * 100)),
-                "lines": ctx_lines,
-            },
-            actor_id=user["id"], actor_role=user["role"],
-        ))
-    except Exception:
-        logger.exception("accounting emit failed for txn %s", txn.get("id"))
+    # Patient Billing activity.
+    # Keep this non-blocking: a messaging failure must never fail checkout.
+    if txn.get("client_id"):
+        try:
+            invoice_no = _invoice_number(txn)
+
+            if txn.get("status") == "paid":
+                body = (
+                    f"Your invoice {invoice_no} is available in Billing. "
+                    "Payment has been recorded."
+                )
+                event_type = "billing_transaction_paid"
+            else:
+                body = (
+                    f"A new invoice {invoice_no} is available in Billing."
+                )
+                event_type = "billing_transaction_created"
+
+            await add_patient_activity_message(
+                client_id=txn["client_id"],
+                body=body,
+                event_type=event_type,
+                source_id=txn["id"],
+                portal_path="/portal/patient/billing",
+                sender_role="staff",
+                sender_name="Billing Team",
+            )
+        except Exception:
+            logger.exception(
+                "patient billing activity failed for txn %s",
+                txn.get("id"),
+            )
+
+    # Accounting event — only a genuinely paid transaction may become
+    # SaleCompleted. Pending Chase/card/online transactions must not hit
+    # revenue/cash accounting until payment is confirmed.
+    if txn.get("status") == "paid":
+        try:
+            from accounting.events import AccountingEvent, emit
+            ctx_lines = [{
+                "line_type": ln["type"], "ref_id": ln.get("ref_id"),
+                "qty": ln.get("qty") or 1,
+                "unit_price_cents": int(round(float(ln.get("unit_price") or 0) * 100)),
+                "line_total_cents": int(round(float(ln.get("line_total") or 0) * 100)),
+            } for ln in out_lines]
+            await emit(AccountingEvent(
+                event_type="SaleCompleted",
+                occurred_at=txn["paid_at"] or txn["created_at"],
+                source_module="pos",
+                source_ref_type="transaction",
+                source_ref_id=txn["id"],
+                idempotency_key=f"transaction:{txn['id']}:SaleCompleted",
+                amount_cents=int(round(total * 100)),
+                context={
+                    "payment_method": payload.payment_method,
+                    "subtotal_cents": int(round(subtotal * 100)),
+                    "discount_cents": int(round(discount * 100)),
+                    "tip_cents": int(round(tip * 100)),
+                    "tax_cents": int(round(tax * 100)),
+                    "lines": ctx_lines,
+                },
+                actor_id=user["id"],
+                actor_role=user["role"],
+            ))
+        except Exception:
+            logger.exception("accounting emit failed for txn %s", txn.get("id"))
     return await _hydrate_txn(txn)
 
 
 @api.get("/transactions", response_model=List[TransactionOut])
-async def list_transactions(client_id: Optional[str] = None, limit: int = 200,
-                            user=Depends(require_roles("admin", "staff"))):
+async def list_transactions(
+    client_id: Optional[str] = None,
+    limit: int = 200,
+    user=Depends(get_current_user),
+):
     q = {}
-    if client_id:
-        q["client_id"] = client_id
-    items = await db.transactions.find(q).sort("created_at", -1).to_list(min(limit, 500))
-    return [await _hydrate_txn(i) for i in items]
+
+    if user["role"] == "client":
+        self_client = await _resolve_self_client(user)
+
+        if not self_client:
+            return []
+
+        # Never honor a client-supplied client_id.
+        # Patients may only list their own transactions.
+        q["client_id"] = self_client["id"]
+
+    elif user["role"] in {"admin", "staff", "practitioner", "auditor"}:
+        if client_id:
+            q["client_id"] = client_id
+
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden",
+        )
+
+    items = await db.transactions.find(q).sort(
+        "created_at",
+        -1,
+    ).to_list(min(limit, 500))
+
+    return [
+        await _hydrate_txn(i)
+        for i in items
+    ]
+
+
+@api.get("/transactions/patient/unread-count")
+async def patient_transaction_unread_count(
+    user=Depends(get_current_user),
+):
+    if user["role"] != "client":
+        raise HTTPException(
+            status_code=403,
+            detail="Patient account required",
+        )
+
+    self_client = await _resolve_self_client(user)
+
+    if not self_client:
+        return {"count": 0}
+
+    count = await db.transactions.count_documents({
+        "client_id": self_client["id"],
+        "patient_unread": True,
+    })
+
+    return {"count": count}
+
+
+@api.post("/transactions/{tid}/view")
+async def mark_patient_transaction_viewed(
+    tid: str,
+    request: Request,
+    user=Depends(get_current_user),
+):
+    if user["role"] != "client":
+        raise HTTPException(
+            status_code=403,
+            detail="Patient account required",
+        )
+
+    self_client = await _resolve_self_client(user)
+
+    if not self_client:
+        raise HTTPException(
+            status_code=404,
+            detail="Client record missing",
+        )
+
+    txn = await db.transactions.find_one({
+        "id": tid,
+        "client_id": self_client["id"],
+    })
+
+    if not txn:
+        raise HTTPException(
+            status_code=404,
+            detail="Transaction not found",
+        )
+
+    was_unread = bool(
+        txn.get("patient_unread")
+    )
+
+    await db.transactions.update_one(
+        {
+            "id": tid,
+            "client_id": self_client["id"],
+        },
+        {
+            "$set": {
+                "patient_unread": False,
+                "patient_viewed_at": datetime.now(
+                    timezone.utc
+                ),
+            }
+        },
+    )
+
+    if was_unread:
+        await log_audit(
+            db,
+            user["id"],
+            user["email"],
+            "transaction.invoice_view",
+            resource_type="transaction",
+            resource_id=tid,
+            metadata={
+                "client_id": self_client["id"],
+            },
+            ip=get_client_ip(request),
+            user_agent=request.headers.get(
+                "user-agent"
+            ),
+        )
+
+    return {
+        "ok": True,
+        "transaction_id": tid,
+    }
 
 
 @api.get("/transactions/{tid}/receipt")
@@ -349,18 +610,23 @@ async def email_invoice(tid: str, payload: InvoiceEmailIn, request: Request,
     buf = await _render_invoice_pdf(t)
     pdf_bytes = buf.getvalue()
     invoice_no = _invoice_number(t)
-    subject = f"Invoice {invoice_no} · Natural Medical Solutions"
-    body_note = f"<p>{payload.note}</p>" if payload.note else ""
-    html = (
-        f"<p>Hello {(client or {}).get('full_name') or 'there'},</p>"
-        f"<p>Please find your invoice ({invoice_no}) attached.</p>"
-        f"{body_note}"
-        "<p>Total: <strong>${:.2f}</strong></p>".format(t.get("total", 0))
-        + "<p>Thank you for choosing Natural Medical Solutions.</p>"
+    from email_templates import invoice_notification
+
+    subject, html, plain = invoice_notification(
+        first_name=(client or {}).get("full_name"),
+        invoice_number=invoice_no,
+        total=t.get("total", 0),
+        note=payload.note,
     )
 
     status = await _send_email_with_attachment(
-        db, target, subject, html, pdf_bytes, filename=f"{invoice_no}.pdf",
+        db,
+        target,
+        subject,
+        html,
+        pdf_bytes,
+        filename=f"{invoice_no}.pdf",
+        plain_text=plain,
     )
     await log_audit(db, user["id"], user["email"], "invoice.email",
                     resource_type="transaction", resource_id=tid,
@@ -430,11 +696,61 @@ async def _render_invoice_pdf(t: dict) -> "io.BytesIO":
     c.setFillColorRGB(0.20, 0.20, 0.20)
     c.setFont("Helvetica", 10)
     c.drawRightString(right, y, invoice_no)
+
+    invoice_paid = t.get("status") == "paid"
+    invoice_status_label = (
+        "PAID"
+        if invoice_paid
+        else "PAYMENT DUE"
+    )
+
     y -= 0.22 * inch
+
+    if invoice_paid:
+        c.setFillColorRGB(0.184, 0.290, 0.227)
+    else:
+        c.setFillColorRGB(0.542, 0.416, 0.235)
+
+    c.setFont("Helvetica-Bold", 10)
+    c.drawRightString(
+        right,
+        y,
+        f"STATUS: {invoice_status_label}"
+    )
+
+    y -= 0.18 * inch
+    c.setFillColorRGB(0.20, 0.20, 0.20)
     c.setFont("Helvetica", 9)
-    c.drawRightString(right, y,
-                       created.strftime("Issued %b %d, %Y · %I:%M %p") if hasattr(created, "strftime") else "")
-    y -= 0.5 * inch
+    c.drawRightString(
+        right,
+        y,
+        created.strftime(
+            "Issued %b %d, %Y · %I:%M %p"
+        ) if hasattr(created, "strftime") else ""
+    )
+
+    if invoice_paid and t.get("paid_at"):
+        paid_at = t.get("paid_at")
+
+        if isinstance(paid_at, str):
+            try:
+                paid_at = datetime.fromisoformat(
+                    paid_at.replace("Z", "+00:00")
+                )
+            except Exception:
+                paid_at = None
+
+        if paid_at and hasattr(paid_at, "strftime"):
+            y -= 0.16 * inch
+            c.drawRightString(
+                right,
+                y,
+                paid_at.strftime(
+                    "Paid %b %d, %Y · %I:%M %p"
+                )
+            )
+
+    y -= 0.42 * inch
 
     # From / To columns
     c.setFillColorRGB(0.542, 0.416, 0.235)  # eyebrow gold
@@ -577,8 +893,16 @@ def _wrap(text: str, width: int) -> list[str]:
     return out or [""]
 
 
-async def _send_email_with_attachment(db, to: str, subject: str, html: str,
-                                       attachment: bytes, *, filename: str) -> str:
+async def _send_email_with_attachment(
+    db,
+    to: str,
+    subject: str,
+    html: str,
+    attachment: bytes,
+    *,
+    filename: str,
+    plain_text: str | None = None,
+) -> str:
     """Send an email with a PDF attachment. Returns delivery status string."""
     import base64
     from notifiers import email_status
@@ -600,10 +924,41 @@ async def _send_email_with_attachment(db, to: str, subject: str, html: str,
     def _blocking() -> int:
         from sendgrid import SendGridAPIClient
         from sendgrid.helpers.mail import (
-            Mail, Attachment, FileContent, FileName, FileType, Disposition,
+            Mail,
+            Attachment,
+            FileContent,
+            FileName,
+            FileType,
+            Disposition,
+            ReplyTo,
+            TrackingSettings,
+            ClickTracking,
+            OpenTracking,
         )
-        msg = Mail(from_email=from_email, to_emails=to, subject=subject,
-                   html_content=html)
+        msg = Mail(
+            from_email=from_email,
+            to_emails=to,
+            subject=subject,
+            plain_text_content=(
+                plain_text
+                or "Your invoice from Natural Medical Solutions "
+                   "is attached to this email."
+            ),
+            html_content=html,
+        )
+
+        reply_to = os.environ.get("SENDGRID_REPLY_TO") or None
+        if reply_to:
+            msg.reply_to = ReplyTo(reply_to)
+
+        tracking = TrackingSettings()
+        tracking.open_tracking = OpenTracking(enable=False)
+        tracking.click_tracking = ClickTracking(
+            enable=False,
+            enable_text=False,
+        )
+        msg.tracking_settings = tracking
+
         att = Attachment(
             FileContent(base64.b64encode(attachment).decode()),
             FileName(filename), FileType("application/pdf"),
@@ -839,61 +1194,650 @@ async def front_desk_update(vid: str, payload: FrontDeskUpdate, request: Request
 
 
 # ---------- Import Clients (CSV) ----------
+_IMPORT_HEADER_ALIASES = {
+    "full_name": {
+        "full_name", "full name", "patient_name", "patient name",
+        "name", "client_name", "client name",
+    },
+    "first_name": {
+        "first_name", "first name", "firstname", "given_name",
+        "given name",
+    },
+    "last_name": {
+        "last_name", "last name", "lastname", "surname",
+        "family_name", "family name",
+    },
+    "email": {
+        "email", "email_address", "email address", "e-mail",
+        "patient_email", "patient email",
+    },
+    "phone": {
+        "phone", "phone_number", "phone number", "mobile",
+        "mobile_phone", "mobile phone", "cell", "cell_phone",
+        "cell phone", "primary_phone", "primary phone",
+    },
+    "alt_phone": {
+        "alt_phone", "alt phone", "alternate_phone",
+        "alternate phone", "secondary_phone", "secondary phone",
+        "home_phone", "home phone",
+    },
+    "dob": {
+        "dob", "date_of_birth", "date of birth", "birth_date",
+        "birth date", "birthday",
+    },
+    "sex": {
+        "sex", "biological_sex", "biological sex",
+        "sex_at_birth", "sex at birth",
+    },
+    "gender_identity": {
+        "gender_identity", "gender identity", "gender",
+    },
+    "pronouns": {
+        "pronouns", "preferred_pronouns", "preferred pronouns",
+    },
+    "address": {
+        "address", "street_address", "street address",
+        "home_address", "home address", "mailing_address",
+        "mailing address",
+    },
+    "city": {"city"},
+    "state": {"state", "province"},
+    "zip": {
+        "zip", "zip_code", "zip code", "postal_code",
+        "postal code",
+    },
+    "emergency_contact": {
+        "emergency_contact", "emergency contact",
+        "emergency_contact_name", "emergency contact name",
+    },
+    "emergency_contact_phone": {
+        "emergency_contact_phone", "emergency contact phone",
+        "emergency_phone", "emergency phone",
+    },
+    "mrn": {
+        "mrn", "medical_record_number", "medical record number",
+        "patient_id", "patient id", "client_id", "client id",
+    },
+    "language": {
+        "language", "preferred_language", "preferred language",
+    },
+    "marital_status": {
+        "marital_status", "marital status",
+    },
+    "referral_source": {
+        "referral_source", "referral source",
+        "referred_by", "referred by", "how_heard",
+        "how heard",
+    },
+    "primary_concern": {
+        "primary_concern", "primary concern",
+        "chief_complaint", "chief complaint", "reason_for_visit",
+        "reason for visit",
+    },
+    "wellness_goals": {
+        "wellness_goals", "wellness goals", "health_goals",
+        "health goals", "goals",
+    },
+    "current_supplements": {
+        "current_supplements", "current supplements",
+        "supplements", "supplement_list", "supplement list",
+    },
+    "dietary_restrictions": {
+        "dietary_restrictions", "dietary restrictions",
+        "diet_restrictions", "diet restrictions",
+    },
+    "allergies": {
+        "allergies", "allergy", "known_allergies",
+        "known allergies", "medication_allergies",
+        "medication allergies",
+    },
+    "comms_pref": {
+        "comms_pref", "communication_preference",
+        "communication preference", "preferred_contact_method",
+        "preferred contact method", "contact_preference",
+        "contact preference",
+    },
+    "notes": {
+        "notes", "patient_notes", "patient notes",
+        "internal_notes", "internal notes",
+    },
+    "tags": {
+        "tags", "labels", "patient_tags", "patient tags",
+    },
+    "consent_telehealth": {
+        "consent_telehealth", "telehealth_consent",
+        "telehealth consent",
+    },
+    "consent_photo": {
+        "consent_photo", "photo_consent", "photo consent",
+    },
+    "consent_marketing": {
+        "consent_marketing", "marketing_consent",
+        "marketing consent",
+    },
+    "assigned_practitioner_id": {
+        "assigned_practitioner_id", "assigned practitioner id",
+        "provider_id", "provider id", "practitioner_id",
+        "practitioner id",
+    },
+}
+
+
+def _normalize_import_header(value: str) -> str:
+    value = str(value or "").replace("\ufeff", "").strip().lower()
+    value = value.replace("-", " ").replace("/", " ")
+    value = "_".join(value.split())
+    return value
+
+
+_IMPORT_HEADER_LOOKUP = {
+    _normalize_import_header(alias): field
+    for field, aliases in _IMPORT_HEADER_ALIASES.items()
+    for alias in aliases
+}
+
+
+def _clean_import_value(value):
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+def _parse_import_bool(value):
+    value = str(value or "").strip().lower()
+    if not value:
+        return None
+    if value in {"1", "true", "yes", "y", "on", "signed"}:
+        return True
+    if value in {"0", "false", "no", "n", "off", "declined"}:
+        return False
+    return None
+
+
+def _parse_import_tags(value):
+    value = _clean_import_value(value)
+    if not value:
+        return None
+    separator = ";" if ";" in value else ","
+    tags = [item.strip() for item in value.split(separator)]
+    return [item for item in tags if item]
+
+
+def _normalize_import_dob(value):
+    from datetime import datetime as _dt
+
+    value = _clean_import_value(value)
+    if not value:
+        return None, None
+
+    formats = (
+        "%Y-%m-%d",
+        "%m/%d/%Y",
+        "%m-%d-%Y",
+        "%Y/%m/%d",
+        "%m/%d/%y",
+        "%m-%d-%y",
+    )
+
+    for fmt in formats:
+        try:
+            parsed = _dt.strptime(value, fmt)
+            return parsed.date().isoformat(), None
+        except ValueError:
+            continue
+
+    return None, f"invalid DOB: {value}"
+
+
+def _mapped_import_row(row):
+    mapped = {}
+
+    for raw_header, raw_value in row.items():
+        normalized = _normalize_import_header(raw_header)
+        field = _IMPORT_HEADER_LOOKUP.get(normalized)
+
+        if not field:
+            continue
+
+        value = _clean_import_value(raw_value)
+
+        if value is not None:
+            mapped[field] = value
+
+    first_name = mapped.pop("first_name", None)
+    last_name = mapped.pop("last_name", None)
+
+    if not mapped.get("full_name"):
+        combined = " ".join(
+            part for part in (first_name, last_name) if part
+        ).strip()
+
+        if combined:
+            mapped["full_name"] = combined
+
+    address_parts = [
+        mapped.pop("address", None),
+        mapped.pop("city", None),
+        mapped.pop("state", None),
+        mapped.pop("zip", None),
+    ]
+    address_parts = [part for part in address_parts if part]
+
+    if address_parts:
+        mapped["address"] = ", ".join(address_parts)
+
+    emergency_name = mapped.pop("emergency_contact", None)
+    emergency_phone = mapped.pop("emergency_contact_phone", None)
+
+    if emergency_name or emergency_phone:
+        mapped["emergency_contact"] = " — ".join(
+            part for part in (emergency_name, emergency_phone) if part
+        )
+
+    return mapped
+
+
+
+@api.post("/clients/import/preview")
+async def preview_client_import(
+    file: UploadFile = File(...),
+    user=Depends(require_roles("admin")),
+):
+    """Validate and preview a patient CSV without creating records."""
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a CSV file.",
+        )
+
+    raw = await file.read()
+
+    if not raw:
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded CSV file is empty.",
+        )
+
+    try:
+        decoded = raw.decode("utf-8-sig")
+        reader = csv.DictReader(_io.StringIO(decoded))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not parse CSV: {exc}",
+        )
+
+    if not reader.fieldnames:
+        raise HTTPException(
+            status_code=400,
+            detail="The CSV has no header row.",
+        )
+
+    header_mappings = {
+        raw_header: _IMPORT_HEADER_LOOKUP.get(
+            _normalize_import_header(raw_header)
+        )
+        for raw_header in reader.fieldnames
+    }
+
+    recognized_headers = {
+        raw_header: mapped
+        for raw_header, mapped in header_mappings.items()
+        if mapped
+    }
+
+    unrecognized_headers = [
+        raw_header
+        for raw_header, mapped in header_mappings.items()
+        if not mapped
+    ]
+
+    if not recognized_headers:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "no_recognized_columns",
+                "message": "None of the CSV headers were recognized.",
+                "headers": reader.fieldnames,
+            },
+        )
+
+    valid_rows = []
+    issues = []
+    seen_emails = set()
+    seen_mrns = set()
+    total_rows = 0
+
+    for row_number, raw_row in enumerate(reader, start=2):
+        total_rows += 1
+        mapped = _mapped_import_row(raw_row)
+
+        full_name = _clean_import_value(mapped.get("full_name"))
+        email = _clean_import_value(mapped.get("email"))
+        email = email.lower() if email else None
+        mrn = _clean_import_value(mapped.get("mrn"))
+
+        row_issues = []
+
+        if not full_name and not email:
+            row_issues.append("Missing patient name and email.")
+
+        if email and "@" not in email:
+            row_issues.append(f"Invalid email: {email}")
+
+        dob, dob_error = _normalize_import_dob(mapped.get("dob"))
+
+        if dob_error:
+            row_issues.append(dob_error)
+
+        if email and email in seen_emails:
+            row_issues.append(
+                f"Duplicate email inside CSV: {email}"
+            )
+
+        if mrn and mrn in seen_mrns:
+            row_issues.append(
+                f"Duplicate MRN inside CSV: {mrn}"
+            )
+
+        if email and await find_client(email=email):
+            row_issues.append(
+                f"Existing patient with email: {email}"
+            )
+
+        if row_issues:
+            issues.append({
+                "row": row_number,
+                "reasons": row_issues,
+                "name": full_name,
+                "email": email,
+            })
+            continue
+
+        if email:
+            seen_emails.add(email)
+
+        if mrn:
+            seen_mrns.add(mrn)
+
+        valid_rows.append({
+            "row": row_number,
+            "full_name": full_name or email,
+            "email": email,
+            "phone": _clean_import_value(
+                mapped.get("phone")
+            ),
+            "dob": dob,
+            "sex": _clean_import_value(
+                mapped.get("sex")
+            ),
+            "mrn": mrn,
+            "allergies": _clean_import_value(
+                mapped.get("allergies")
+            ),
+            "primary_concern": _clean_import_value(
+                mapped.get("primary_concern")
+            ),
+        })
+
+    return {
+        "filename": file.filename,
+        "total_rows": total_rows,
+        "valid_rows": len(valid_rows),
+        "skipped_rows": len(issues),
+        "recognized_headers": recognized_headers,
+        "unrecognized_headers": unrecognized_headers,
+        "sample": valid_rows[:5],
+        "issues": issues[:100],
+        "can_import": len(valid_rows) > 0,
+    }
+
+
 @api.post("/clients/import")
 async def import_clients(
     request: Request,
     file: UploadFile = File(...),
     user=Depends(require_roles("admin")),
 ):
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a CSV file.",
+        )
+
     raw = await file.read()
+
+    if not raw:
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded CSV file is empty.",
+        )
+
     try:
-        reader = csv.DictReader(_io.StringIO(raw.decode("utf-8-sig")))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not parse CSV: {e}")
+        decoded = raw.decode("utf-8-sig")
+        reader = csv.DictReader(_io.StringIO(decoded))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not parse CSV: {exc}",
+        )
+
+    if not reader.fieldnames:
+        raise HTTPException(
+            status_code=400,
+            detail="The CSV has no header row.",
+        )
+
+    recognized_headers = {
+        raw_header: _IMPORT_HEADER_LOOKUP.get(
+            _normalize_import_header(raw_header)
+        )
+        for raw_header in reader.fieldnames
+    }
+    recognized_headers = {
+        raw_header: mapped
+        for raw_header, mapped in recognized_headers.items()
+        if mapped
+    }
+
+    if not recognized_headers:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "no_recognized_columns",
+                "message": "None of the CSV headers were recognized.",
+                "headers": reader.fieldnames,
+            },
+        )
+
     imported = 0
     skipped = 0
     errors = []
-    for row in reader:
-        full_name = (row.get("full_name") or row.get("name") or "").strip()
-        email = (row.get("email") or "").strip().lower() or None
+    seen_emails = set()
+    seen_mrns = set()
+
+    for row_number, raw_row in enumerate(reader, start=2):
+        mapped = _mapped_import_row(raw_row)
+
+        full_name = _clean_import_value(mapped.get("full_name"))
+        email = _clean_import_value(mapped.get("email"))
+        email = email.lower() if email else None
+        mrn = _clean_import_value(mapped.get("mrn"))
+
         if not full_name and not email:
             skipped += 1
-            errors.append({"row": row, "reason": "missing name/email"})
+            errors.append({
+                "row": row_number,
+                "reason": "Missing patient name and email.",
+            })
             continue
-        # dedupe by email if present
+
+        if email and "@" not in email:
+            skipped += 1
+            errors.append({
+                "row": row_number,
+                "reason": f"Invalid email: {email}",
+            })
+            continue
+
+        dob, dob_error = _normalize_import_dob(mapped.get("dob"))
+
+        if dob_error:
+            skipped += 1
+            errors.append({
+                "row": row_number,
+                "reason": dob_error,
+            })
+            continue
+
+        if email and email in seen_emails:
+            skipped += 1
+            errors.append({
+                "row": row_number,
+                "reason": f"Duplicate email inside CSV: {email}",
+            })
+            continue
+
+        if mrn and mrn in seen_mrns:
+            skipped += 1
+            errors.append({
+                "row": row_number,
+                "reason": f"Duplicate MRN inside CSV: {mrn}",
+            })
+            continue
+
         if email and await find_client(email=email):
             skipped += 1
+            errors.append({
+                "row": row_number,
+                "reason": f"Existing patient with email: {email}",
+            })
             continue
+
+        patient_id = new_id()
+
         doc = {
-            "id": new_id(),
+            "id": patient_id,
             "user_id": None,
             "full_name": full_name or email,
             "email": email,
-            "phone": (row.get("phone") or "").strip() or None,
-            "dob": (row.get("dob") or "").strip() or None,
-            "sex": (row.get("sex") or "").strip() or None,
-            "address": (row.get("address") or "").strip() or None,
-            "emergency_contact": (row.get("emergency_contact") or "").strip() or None,
+            "phone": _clean_import_value(mapped.get("phone")),
+            "alt_phone": _clean_import_value(mapped.get("alt_phone")),
+            "dob": dob,
+            "sex": _clean_import_value(mapped.get("sex")),
+            "gender_identity": _clean_import_value(
+                mapped.get("gender_identity")
+            ),
+            "pronouns": _clean_import_value(mapped.get("pronouns")),
+            "language": _clean_import_value(mapped.get("language")),
+            "marital_status": _clean_import_value(
+                mapped.get("marital_status")
+            ),
+            "referral_source": _clean_import_value(
+                mapped.get("referral_source")
+            ),
+            "primary_concern": _clean_import_value(
+                mapped.get("primary_concern")
+            ),
+            "wellness_goals": _clean_import_value(
+                mapped.get("wellness_goals")
+            ),
+            "current_supplements": _clean_import_value(
+                mapped.get("current_supplements")
+            ),
+            "dietary_restrictions": _clean_import_value(
+                mapped.get("dietary_restrictions")
+            ),
+            "allergies": _clean_import_value(mapped.get("allergies")),
+            "comms_pref": _clean_import_value(mapped.get("comms_pref")),
+            "notes": _clean_import_value(mapped.get("notes")),
+            "tags": _parse_import_tags(mapped.get("tags")),
+            "assigned_practitioner_id": _clean_import_value(
+                mapped.get("assigned_practitioner_id")
+            ),
+            "consent_telehealth": _parse_import_bool(
+                mapped.get("consent_telehealth")
+            ),
+            "consent_photo": _parse_import_bool(
+                mapped.get("consent_photo")
+            ),
+            "consent_marketing": _parse_import_bool(
+                mapped.get("consent_marketing")
+            ),
+            "mrn": mrn or f"NMS-{patient_id[:6].upper()}",
             "intake_completed": False,
             "created_at": datetime.now(timezone.utc),
         }
-        # `address` and `emergency_contact` are JSONB in PG; wrap free-text strings.
-        if isinstance(doc.get("address"), str):
-            doc["address"] = {"raw": doc["address"]}
-        if isinstance(doc.get("emergency_contact"), str):
-            doc["emergency_contact"] = {"raw": doc["emergency_contact"]}
-        await insert_client(doc)
-        imported += 1
-    await db.imported_batches.insert_one({
-        "id": new_id(), "filename": file.filename,
-        "imported": imported, "skipped": skipped,
-        "by_user": user["id"], "ts": datetime.now(timezone.utc),
-    })
-    await log_audit(db, user["id"], user["email"], "clients.import",
-                    metadata={"imported": imported, "skipped": skipped, "filename": file.filename},
-                    ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-    return {"imported": imported, "skipped": skipped, "errors": errors[:10]}
 
+        address = _clean_import_value(mapped.get("address"))
+        emergency_contact = _clean_import_value(
+            mapped.get("emergency_contact")
+        )
+
+        doc["address"] = {"raw": address} if address else None
+        doc["emergency_contact"] = (
+            {"raw": emergency_contact}
+            if emergency_contact
+            else None
+        )
+
+        # Do not pass absent optional values into the repository.
+        doc = {
+            key: value
+            for key, value in doc.items()
+            if value is not None
+        }
+
+        try:
+            await insert_client(doc)
+        except Exception as exc:
+            skipped += 1
+            errors.append({
+                "row": row_number,
+                "reason": f"Database insert failed: {type(exc).__name__}",
+            })
+            continue
+
+        imported += 1
+
+        if email:
+            seen_emails.add(email)
+        if doc.get("mrn"):
+            seen_mrns.add(doc["mrn"])
+
+    await db.imported_batches.insert_one({
+        "id": new_id(),
+        "filename": file.filename,
+        "imported": imported,
+        "skipped": skipped,
+        "recognized_headers": recognized_headers,
+        "by_user": user["id"],
+        "ts": datetime.now(timezone.utc),
+    })
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "clients.import",
+        metadata={
+            "imported": imported,
+            "skipped": skipped,
+            "filename": file.filename,
+            "recognized_column_count": len(recognized_headers),
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "errors": errors[:50],
+        "recognized_headers": recognized_headers,
+        "total_rows": imported + skipped,
+    }
 
 
 # ---------- Provider Analytics ----------

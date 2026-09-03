@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { useToast } from "../hooks/use-toast";
 import { Plus, Pill, Apple, Moon, TestTube2, CalendarCheck, Eye, EyeOff, Trash2 } from "lucide-react";
 import { getErrorMessage } from "../lib/errors";
+import { normalizeArray } from "../lib/collections";
 
 const TYPE_META = {
   supplement: { icon: Pill, label: "Supplement" },
@@ -26,7 +27,7 @@ export default function TreatmentPlanBuilder({ clientId, onClose }) {
   const [dialogOpen, setDialogOpen] = React.useState(false);
 
   const load = React.useCallback(() => {
-    api.get("/treatment-plans", { params: { client_id: clientId } }).then((r) => setPlans(r.data || []));
+    api.get("/treatment-plans", { params: { client_id: clientId } }).then((r) => setPlans(normalizeArray(r.data, ["plans"])));
   }, [clientId]);
 
   React.useEffect(() => { load(); }, [load]);
@@ -81,7 +82,7 @@ export default function TreatmentPlanBuilder({ clientId, onClose }) {
 
       {plans.length === 0 && <div className="text-[#6a6a6a] text-sm">No treatment plans yet.</div>}
 
-      {plans.map((p) => (
+      {normalizeArray(plans).map((p) => (
         <div key={p.id} className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5">
           <div className="flex items-center justify-between">
             <div>

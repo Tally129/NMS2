@@ -20,6 +20,7 @@ import { getErrorMessage } from "../../lib/errors";
 import {
   AiGenerateButton, AiDraftModal, AiSectionCard, showAiErrorToast,
 } from "../../components/ai";
+import { normalizeArray } from "../../lib/collections";
 
 const REVIEW_STATUSES = [
   { value: "new", label: "New", color: "bg-[#eaf2ec] text-[#3d6b52]" },
@@ -69,7 +70,7 @@ export default function LabReviewQueue() {
   const load = React.useCallback(async () => {
     try {
       const r = await api.get("/labs/review-queue", { params: filter ? { status: filter } : {} });
-      setRows(r.data || []);
+      setRows(normalizeArray(r.data, ["rows"]));
     } catch (e) {
       toast({ title: "Could not load queue", description: getErrorMessage(e) || "" });
     }
@@ -80,7 +81,7 @@ export default function LabReviewQueue() {
   const filtered = React.useMemo(() => {
     const s = q.trim().toLowerCase();
     if (!s) return rows;
-    return rows.filter((lab) =>
+    return normalizeArray(rows).filter((lab) =>
       (lab.test_name || "").toLowerCase().includes(s) ||
       (lab.client_name || "").toLowerCase().includes(s) ||
       (lab.ordering_provider_name || "").toLowerCase().includes(s) ||
@@ -352,7 +353,7 @@ function ReviewDialog({ lab, onClose, onTransition, onLabUpdate }) {
   const detach = async (f) => {
     try {
       await api.delete(`/labs/${lab.id}/attachments/${f.id}`);
-      const nextIds = attachmentIds.filter((x) => x !== f.id);
+      const nextIds = normalizeArray(attachmentIds).filter((x) => x !== f.id);
       setAttachmentIds(nextIds);
       onLabUpdate?.({ id: lab.id, attachment_file_ids: nextIds });
       loadAttachments(nextIds);
@@ -424,7 +425,7 @@ function ReviewDialog({ lab, onClose, onTransition, onLabUpdate }) {
               <div className="text-xs text-slate-500">No attachments yet.</div>
             ) : (
               <ul className="text-xs space-y-1" data-testid="lab-attachments-list">
-                {attachments.map((f) => (
+                {normalizeArray(attachments).map((f) => (
                   <li key={f.id} className="flex items-center justify-between gap-2 border-t border-[#e2ebe4] pt-1 first:border-t-0 first:pt-0">
                     <button
                       onClick={() => download(f)}

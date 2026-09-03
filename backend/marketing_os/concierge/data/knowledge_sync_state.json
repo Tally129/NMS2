@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "status": "unchanged",
+  "trigger": "scheduler",
+  "started_at": "2026-09-03T09:07:30.844458+00:00",
+  "completed_at": "2026-09-03T09:07:40.753179+00:00",
+  "sitemap_fingerprint": "538b180d60af50b578c40a9eb169079c60827978eef657cea72d31c57621b7ae",
+  "content_fingerprint": "7134c603160c6984db56ac12541659c2a8904778933348bd9dd168dc7399c47f",
+  "knowledge_fingerprint": "7e7e7e510e9ff861350bbcdfc199f528c36c025bafd2f3e15cacf5123fafc9d3",
+  "documents": 116,
+  "failures": 0,
+  "last_success_at": "2026-08-30T22:21:15.745015+00:00"
+}

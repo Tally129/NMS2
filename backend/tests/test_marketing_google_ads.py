@@ -247,3 +247,92 @@ async def test_missing_sdk_or_credentials_is_fail_closed():
             start_date=date(2026, 8, 25),
             end_date=date(2026, 8, 25),
         )
+
+
+@pytest.mark.asyncio
+async def test_verify_access_performs_minimal_read():
+    client = FakeGoogleAdsClient(
+        [ns(customer=ns(id=1234567890))]
+    )
+
+    integration = GoogleAdsIntegration(
+        account=account(),
+        client=client,
+    )
+
+    result = await integration.verify_access()
+
+    assert result == {
+        "status": "verified",
+        "provider": "google_ads",
+        "customer_id": "1234567890",
+        "read_only": True,
+        "verified": True,
+    }
+
+    assert client.services_requested == [
+        "GoogleAdsService"
+    ]
+
+    assert len(client.service.calls) == 1
+
+    call = client.service.calls[0]
+
+    assert call["customer_id"] == "1234567890"
+
+    query = call["query"]
+
+    assert "FROM customer" in query
+    assert "customer.id" in query
+    assert "LIMIT 1" in query
+
+    forbidden = (
+        "UPDATE ",
+        "INSERT ",
+        "DELETE ",
+        "MUTATE",
+        "CREATE ",
+        "REMOVE ",
+    )
+
+    upper_query = query.upper()
+
+    for token in forbidden:
+        assert token not in upper_query
+
+
+@pytest.mark.asyncio
+async def test_verify_access_accepts_empty_read_result():
+    integration = GoogleAdsIntegration(
+        account=account(),
+        client=FakeGoogleAdsClient([]),
+    )
+
+    result = await integration.verify_access()
+
+    assert result["status"] == "verified"
+    assert result["verified"] is True
+    assert result["read_only"] is True
+
+
+@pytest.mark.asyncio
+async def test_verify_access_fails_closed():
+    def unavailable():
+        raise RuntimeError(
+            "Google Ads credentials are not configured"
+        )
+
+    integration = GoogleAdsIntegration(
+        account=account(),
+        client_factory=unavailable,
+    )
+
+    result = await integration.verify_access()
+
+    assert result["status"] == "unavailable"
+    assert result["verified"] is False
+    assert result["read_only"] is True
+    assert (
+        "credentials are not configured"
+        in result["reason"]
+    )

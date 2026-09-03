@@ -4,6 +4,7 @@ import api from "../../lib/api";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
 
 function fmt(ts) {
   if (!ts) return "—";
@@ -56,7 +57,7 @@ export default function AdminSessionExplorer() {
   const filtered = React.useMemo(() => {
     const q = filter.trim().toLowerCase();
     if (!q) return sessions;
-    return sessions.filter((s) =>
+    return normalizeArray(sessions).filter((s) =>
       (s.email || "").toLowerCase().includes(q) ||
       (s.full_name || "").toLowerCase().includes(q) ||
       (s.role || "").toLowerCase().includes(q));

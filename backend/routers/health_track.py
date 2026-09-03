@@ -76,6 +76,8 @@ async def list_symptoms(client_id: Optional[str] = None, symptom: Optional[str] 
         if not self_client:
             return []
         q["client_id"] = self_client["id"]
+        q["verified"] = True
+        q["released_to_patient"] = True
     elif client_id:
         q["client_id"] = client_id
     if symptom:
@@ -112,6 +114,10 @@ async def create_lab(payload: LabValueIn, request: Request, user=Depends(require
     doc["id"] = new_id()
     doc["recorded_by"] = user["id"]
     doc["recorded_by_name"] = user.get("full_name", "")
+    doc["review_status"] = "new"
+    doc["verified"] = False
+    doc["released_to_patient"] = False
+    doc["review_history"] = []
     doc["created_at"] = datetime.now(timezone.utc)
     await db.lab_values.insert_one(doc)
     await log_audit(db, user["id"], user["email"], "lab.create",
@@ -197,20 +203,19 @@ async def _notify_new_secure_message(thread: dict, sender: dict) -> dict:
         portal_url = f"{app_url}{portal_path}" if app_url else portal_path
         sender_label = "your care team" if sender.get("role") != "client" else "a patient"
         try:
+            from email_templates import secure_message_notification
+
+            subject, html, plain_text = secure_message_notification(
+                portal_url=portal_url,
+                sender_label=sender_label,
+            )
+
             email_status = await send_email(
                 db,
                 recipient["email"],
-                "New secure message available",
-                (
-                    "<p>You have a new secure message from " + sender_label + ".</p>"
-                    "<p>For your privacy, message details are not included in this email.</p>"
-                    f'<p><a href="{portal_url}">Sign in to the secure portal</a> to read and respond.</p>'
-                    "<p>This inbox is not monitored for emergencies. Call 911 for an emergency.</p>"
-                ),
-                plain_text=(
-                    "You have a new secure message. For your privacy, message details are not "
-                    f"included in this email. Sign in to the secure portal: {portal_url}"
-                ),
+                subject,
+                html,
+                plain_text=plain_text,
                 action="message.secure_alert",
                 payload_metadata={"thread_id": thread.get("id")},
                 redact_recipient=True,
@@ -268,6 +273,58 @@ async def list_threads(user=Depends(get_current_user)):
         q["practitioner_id"] = user["id"]
     items = await db.message_threads.find(q).sort("last_message_at", -1).to_list(200)
     return [await _hydrate_thread(t, user) for t in items]
+
+
+@api.get("/messages/threads/by-client/{client_id}")
+async def get_thread_by_client(
+    client_id: str,
+    user=Depends(get_current_user),
+):
+    """Resolve the current user's secure-message thread for one patient."""
+    if user.get("role") == "client":
+        raise HTTPException(
+            status_code=403,
+            detail="Workforce access required",
+        )
+
+    client = await find_client(client_id=client_id)
+
+    if not client:
+        raise HTTPException(
+            status_code=404,
+            detail="Client not found",
+        )
+
+    query = {"client_id": client_id}
+
+    # Practitioners should only open their own patient thread. Admin and
+    # operational staff may open the patient's most recent care-team thread.
+    if user.get("role") == "practitioner":
+        query["practitioner_id"] = user["id"]
+
+    thread = await db.message_threads.find_one(
+        query,
+        sort=[("last_message_at", -1), ("created_at", -1)],
+    )
+
+    hydrated = (
+        await _hydrate_thread(thread, user)
+        if thread
+        else None
+    )
+
+    return {
+        "thread": hydrated,
+        "client": {
+            "id": client["id"],
+            "full_name": (
+                client.get("full_name")
+                or client.get("email")
+                or "Patient"
+            ),
+            "email": client.get("email"),
+        },
+    }
 
 
 @api.post("/messages/threads", response_model=ThreadOut)

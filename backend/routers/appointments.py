@@ -13,6 +13,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import func, select, text
 from fastapi import Depends, HTTPException, Query, Request
 
 from audit import get_client_ip, log_audit
@@ -32,7 +33,6 @@ from models import (
 from pg_shims import find_client, find_user_by_id, list_users_by_role
 from postgres_db import AsyncSessionLocal
 from repositories import scheduling as sched_repo
-
 from services.payments import (
     construct_webhook_event,
     create_invoice_payment_intent,
@@ -49,6 +49,11 @@ from services.paypal_payments import (
     order_reference,
     paypal_enabled,
     public_payment_config,
+)
+from postgres_models.clinical_and_messaging import (
+    LiveSoapDraft,
+    VisitChat,
+    VisitNote,
 )
 
 TIER_PRICES = {"essentials": 99.0, "core": 199.0, "vip": 299.0}
@@ -71,7 +76,41 @@ async def _hydrate_appt(a):
         u = await find_user_by_id(a["practitioner_id"])
         if u:
             a["practitioner_name"] = u.get("full_name")
+    # AppointmentOut requires recordings to be a list; legacy rows may contain NULL.
+    a["recordings"] = list(a.get("recordings") or [])
     return a
+
+
+async def _patient_activity(
+    *,
+    client_id: str,
+    body: str,
+    event_type: str,
+    source_id: str,
+    portal_path: str,
+    sender_role: str = "system",
+    sender_name: str = "Natural Medical Solutions",
+):
+    """Best-effort patient account activity; never blocks clinical operations."""
+    try:
+        from services.patient_activity import add_patient_activity_message
+
+        return await add_patient_activity_message(
+            client_id=client_id,
+            body=body,
+            event_type=event_type,
+            source_id=source_id,
+            portal_path=portal_path,
+            sender_role=sender_role,
+            sender_name=sender_name,
+        )
+    except Exception:
+        logger.exception(
+            "Unable to create patient activity message: %s %s",
+            event_type,
+            source_id,
+        )
+        return None
 
 
 # ---------- Appointments ----------
@@ -81,6 +120,7 @@ async def list_appointments(
     end: Optional[datetime] = None,
     practitioner_id: Optional[str] = None,
     client_id: Optional[str] = None,
+    archived: bool = False,
     user=Depends(get_current_user),
 ):
     if user["role"] == "client":
@@ -91,7 +131,7 @@ async def list_appointments(
     async with AsyncSessionLocal() as pg:
         items = await sched_repo.list_appointments(
             pg, client_id=client_id, practitioner_id=practitioner_id,
-            start_gte=start, start_lte=end, limit=1000,
+            start_gte=start, start_lte=end, archived=archived, limit=1000,
         )
     return [await _hydrate_appt(i) for i in items]
 
@@ -116,9 +156,33 @@ async def create_appointment(payload: AppointmentIn, request: Request, user=Depe
     doc["status"] = status_val
     doc["created_at"] = datetime.now(timezone.utc)
     doc["created_by"] = user["id"]
+
+    # A practitioner creating the appointment is the visit provider unless
+    # another practitioner was explicitly selected.
+    if (
+        user.get("role") == "practitioner"
+        and not doc.get("practitioner_id")
+    ):
+        doc["practitioner_id"] = user["id"]
     async with AsyncSessionLocal() as pg:
         async with pg.begin():
             doc = await sched_repo.create_appointment(pg, doc)
+
+            # Assign an unassigned patient to the practitioner establishing
+            # care. Existing assignments are never overwritten.
+            if user.get("role") == "practitioner":
+                await pg.execute(
+                    text("""
+                        UPDATE emr_clients
+                        SET assigned_practitioner_id = :provider_id
+                        WHERE id = :client_id
+                          AND assigned_practitioner_id IS NULL
+                    """),
+                    {
+                        "provider_id": user["id"],
+                        "client_id": payload.client_id,
+                    },
+                )
     # Auto-schedule reminder (stubbed) — fresh session so the read/write
     # cycle above's transaction is fully committed first.
     async with AsyncSessionLocal() as pg:
@@ -144,6 +208,22 @@ async def create_appointment(payload: AppointmentIn, request: Request, user=Depe
                     resource_type="appointment", resource_id=doc["id"],
                     metadata={"client_id": payload.client_id},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+
+    if doc.get("status") == "requested":
+        activity_body = "Your appointment request was received."
+        activity_event = "appointment_requested"
+    else:
+        activity_body = "A new appointment has been scheduled."
+        activity_event = "appointment_scheduled"
+
+    await _patient_activity(
+        client_id=doc["client_id"],
+        body=activity_body,
+        event_type=activity_event,
+        source_id=doc["id"],
+        portal_path="/portal/patient/appointments",
+    )
+
     return await _hydrate_appt(doc)
 
 
@@ -154,6 +234,11 @@ async def update_appointment(appt_id: str, payload: AppointmentUpdate, request: 
         a = await sched_repo.get_appointment(pg, appt_id)
     if not a:
         raise HTTPException(status_code=404, detail="Appointment not found")
+
+    # Preserve the authoritative pre-update state so patient activity can
+    # distinguish a real status/time transition from unrelated edits.
+    previous_appointment = dict(a)
+
     if user["role"] == "client":
         self_client = await _resolve_self_client(user)
         if not self_client or a["client_id"] != self_client["id"]:
@@ -184,6 +269,64 @@ async def update_appointment(appt_id: str, payload: AppointmentUpdate, request: 
                     resource_type="appointment", resource_id=appt_id,
                     metadata={"fields": list(updates.keys())},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+
+    old_status = previous_appointment.get("status")
+    new_status = a.get("status")
+
+    old_start = previous_appointment.get("start")
+    new_start = a.get("start")
+
+    old_end = previous_appointment.get("end")
+    new_end = a.get("end")
+
+    activity_body = None
+    activity_event = None
+    activity_source = None
+
+    # Status transitions take precedence over time changes.
+    if new_status == "canceled" and old_status != "canceled":
+        activity_body = "Your appointment has been canceled."
+        activity_event = "appointment_canceled"
+        activity_source = f"{appt_id}:canceled"
+
+    elif (
+        new_status in {"confirmed", "scheduled"}
+        and old_status not in {"confirmed", "scheduled"}
+    ):
+        activity_body = "Your appointment has been confirmed."
+        activity_event = "appointment_confirmed"
+        activity_source = f"{appt_id}:{new_status}"
+
+    elif new_status == "in_session" and old_status != "in_session":
+        activity_body = "Your provider is ready for your telehealth visit."
+        activity_event = "telehealth_ready"
+        activity_source = f"{appt_id}:in_session"
+
+    elif old_start != new_start or old_end != new_end:
+        activity_body = "Your appointment has been rescheduled."
+        activity_event = "appointment_rescheduled"
+
+        # Include the resulting timestamps in the idempotency source so a
+        # future legitimate second reschedule can create another update.
+        activity_source = (
+            f"{appt_id}:"
+            f"{new_start.isoformat() if hasattr(new_start, 'isoformat') else new_start}:"
+            f"{new_end.isoformat() if hasattr(new_end, 'isoformat') else new_end}"
+        )
+
+    if activity_body:
+        await _patient_activity(
+            client_id=a["client_id"],
+            body=activity_body,
+            event_type=activity_event,
+            source_id=activity_source,
+            portal_path=(
+                f"/portal/visit/{appt_id}"
+                if activity_event == "telehealth_ready"
+                else "/portal/patient/appointments"
+            ),
+        )
+
     return await _hydrate_appt(a)
 
 
@@ -314,25 +457,27 @@ async def create_membership(payload: MembershipIn, request: Request, user=Depend
             raise HTTPException(status_code=400, detail="client_id required")
         client_id = payload.client_id
 
-    # If stripe - create stubbed subscription id
+    # Membership activation must never be inferred from the
+    # presence or absence of Stripe credentials. A real Stripe
+    # subscription workflow has not been implemented here yet.
     stripe_sub = None
     status_val = "pending"
+
     if payload.billing_method == "stripe":
-        if not os.environ.get("STRIPE_SECRET_KEY"):
-            # Stub flow
-            stripe_sub = f"sub_stub_{new_id()[:8]}"
-            await db.integration_log.insert_one({
-                "id": new_id(), "service": "stripe", "action": "subscription.create",
-                "payload": {"client_id": client_id, "tier": payload.tier},
-                "_stubbed": True, "ts": datetime.now(timezone.utc),
-            })
-            status_val = "active"
-        else:
-            # Real wire-up point (left as stub entry for now)
-            stripe_sub = f"sub_pending_{new_id()[:8]}"
-            status_val = "pending"
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "stripe_memberships_not_configured",
+                "message": (
+                    "Stripe membership subscriptions are not "
+                    "available yet."
+                ),
+            },
+        )
     else:
-        status_val = "active"  # chase_pos / manual — recorded, staff reconciles payment
+        # Non-Stripe membership behavior is intentionally
+        # preserved by this Stripe hardening patch.
+        status_val = "active"
 
     now = datetime.now(timezone.utc)
     doc = {
@@ -358,12 +503,23 @@ async def create_membership(payload: MembershipIn, request: Request, user=Depend
         "description": f"Membership: {payload.tier.capitalize()} Wellness (first month)",
         "amount": TIER_PRICES[payload.tier],
         "status": "due",
+        "patient_unread": True,
         "paid_at": None,
         "payment_method": None,
         "external_ref": None,
         "created_at": now,
     }
     await db.invoices.insert_one(inv)
+
+    await _patient_activity(
+        client_id=inv["client_id"],
+        body="A new invoice is available in Billing.",
+        event_type="invoice_created",
+        source_id=inv["id"],
+        portal_path="/portal/patient/billing",
+        sender_role="staff",
+        sender_name="Billing Team",
+    )
 
     await log_audit(db, user["id"], user["email"], "membership.create",
                     resource_type="membership", resource_id=doc["id"],
@@ -411,12 +567,97 @@ async def list_invoices(client_id: Optional[str] = None, user=Depends(get_curren
     return [await _hydrate_invoice(i) for i in items]
 
 
+@api.get("/invoices/unread-count")
+async def invoice_unread_count(user=Depends(get_current_user)):
+    """Count new invoices the authenticated patient has not opened."""
+    self_client = await _resolve_self_client(user)
+
+    if not self_client:
+        raise HTTPException(status_code=404, detail="Client record missing")
+
+    invoices = await db.invoices.find(
+        {"client_id": self_client["id"]}
+    ).to_list(1000)
+
+    count = 0
+
+    for invoice in invoices:
+        # Only invoices explicitly created as unread participate.
+        # Existing historical invoices therefore do not suddenly generate
+        # notification badges when this feature is deployed.
+        if not invoice.get("patient_unread"):
+            continue
+
+        viewed = await db.patient_invoice_views.find_one({
+            "invoice_id": invoice["id"],
+            "client_id": self_client["id"],
+        })
+
+        if not viewed:
+            count += 1
+
+    return {"count": count}
+
+
+@api.post("/invoices/{invoice_id}/view")
+async def mark_invoice_viewed(
+    invoice_id: str,
+    request: Request,
+    user=Depends(get_current_user),
+):
+    """Record that the authenticated patient opened an invoice."""
+    self_client = await _resolve_self_client(user)
+
+    if not self_client:
+        raise HTTPException(status_code=404, detail="Client record missing")
+
+    invoice = await db.invoices.find_one({
+        "id": invoice_id,
+        "client_id": self_client["id"],
+    })
+
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+
+    now = datetime.now(timezone.utc)
+
+    existing = await db.patient_invoice_views.find_one({
+        "invoice_id": invoice_id,
+        "client_id": self_client["id"],
+    })
+
+    if not existing:
+        await db.patient_invoice_views.insert_one({
+            "id": new_id(),
+            "invoice_id": invoice_id,
+            "client_id": self_client["id"],
+            "user_id": user["id"],
+            "viewed_at": now,
+            "created_at": now,
+        })
+
+        await log_audit(
+            db,
+            user["id"],
+            user["email"],
+            "invoice.view",
+            resource_type="invoice",
+            resource_id=invoice_id,
+            metadata={"client_id": self_client["id"]},
+            ip=get_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
+
+    return {"ok": True, "invoice_id": invoice_id}
+
+
 @api.post("/invoices", response_model=InvoiceOut)
 async def create_invoice(payload: InvoiceIn, request: Request,
                          user=Depends(require_roles("admin", "staff", "practitioner"))):
     doc = payload.dict()
     doc["id"] = new_id()
     doc["status"] = "due"
+    doc["patient_unread"] = True
     doc["paid_at"] = None
     doc["payment_method"] = None
     doc["external_ref"] = None
@@ -426,6 +667,17 @@ async def create_invoice(payload: InvoiceIn, request: Request,
                     resource_type="invoice", resource_id=doc["id"],
                     metadata={"client_id": payload.client_id, "amount": payload.amount},
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+
+    await _patient_activity(
+        client_id=doc["client_id"],
+        body="A new invoice is available in Billing.",
+        event_type="invoice_created",
+        source_id=doc["id"],
+        portal_path="/portal/patient/billing",
+        sender_role="staff",
+        sender_name="Billing Team",
+    )
+
     return await _hydrate_invoice(doc)
 
 
@@ -460,36 +712,19 @@ async def mark_paid(inv_id: str, payload: MarkPaidIn, request: Request,
     except Exception:
         pass
     inv = await db.invoices.find_one({"id": inv_id})
+
+    await _patient_activity(
+        client_id=inv["client_id"],
+        body="Your payment was received. Thank you.",
+        event_type="invoice_paid",
+        source_id=inv_id,
+        portal_path="/portal/patient/billing",
+        sender_role="staff",
+        sender_name="Billing Team",
+    )
+
     return await _hydrate_invoice(inv)
 
-
-async def _patient_activity(
-    *,
-    client_id: str,
-    body: str,
-    event_type: str,
-    source_id: str,
-    portal_path: str,
-    sender_role: str = "system",
-    sender_name: str = "Natural Medical Solutions",
-):
-    """Best-effort patient account activity; never blocks clinical operations."""
-    try:
-        from services.patient_activity import add_patient_activity_message
-
-        return await add_patient_activity_message(
-            client_id=client_id,
-            body=body,
-            event_type=event_type,
-            source_id=source_id,
-            portal_path=portal_path,
-            sender_role=sender_role,
-            sender_name=sender_name,
-        )
-    except Exception:
-        # Patient activity is best-effort and must never block
-        # authoritative payment settlement.
-        return None
 
 
 async def _settle_stripe_invoice_from_webhook(
@@ -776,6 +1011,7 @@ async def stripe_intent(
         "publishable_key": stripe_publishable_key(),
     }
 
+
 @api.post("/payments/stripe/webhook")
 async def stripe_payment_webhook(request: Request):
     """
@@ -1003,6 +1239,9 @@ async def stripe_payment_webhook(request: Request):
         ),
     }
 
+
+# ---------- Patient Online Payments ----------
+
 async def _patient_owned_invoice(
     inv_id: str,
     user: dict,
@@ -1048,6 +1287,25 @@ async def _patient_owned_invoice(
         )
 
     return inv, client
+
+
+@api.get("/payments/config")
+async def patient_payment_config(
+    user=Depends(get_current_user),
+):
+    """
+    Browser-safe payment capability information.
+
+    Secrets are never returned.
+    """
+    if user.get("role") != "client":
+        raise HTTPException(
+            status_code=403,
+            detail="Patient account required",
+        )
+
+    return public_payment_config()
+
 
 @api.post(
     "/invoices/{inv_id}/paypal/order"
@@ -1470,6 +1728,7 @@ async def capture_paypal_invoice_order(
     }
 
 
+
 @api.get("/payments/apple-pay/status")
 async def patient_apple_pay_status(
     user=Depends(get_current_user),
@@ -1675,4 +1934,281 @@ async def run_reminders(user=Depends(require_roles("admin"))):
                 await sched_repo.mark_reminder_sent(pg, r["id"], now)
         sent += 1
     return {"processed": sent}
+
+
+
+@api.post("/appointments/{appt_id}/archive")
+async def archive_appointment(
+    appt_id: str,
+    request: Request,
+    user=Depends(
+        require_roles(
+            "admin",
+            "practitioner",
+            "medical_assistant",
+        )
+    ),
+):
+    """Archive an appointment without deleting its clinical history."""
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            appt = await sched_repo.get_appointment(
+                pg,
+                appt_id,
+            )
+
+            if not appt:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Appointment not found",
+                )
+
+            if appt.get("archived_at"):
+                return {
+                    "ok": True,
+                    "already_archived": True,
+                }
+
+            # Practitioners may archive only visits they created or own.
+            if (
+                user.get("role") == "practitioner"
+                and user["id"] not in {
+                    appt.get("practitioner_id"),
+                    appt.get("created_by"),
+                }
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Forbidden",
+                )
+
+            archived_at = datetime.now(timezone.utc)
+
+            updated = await sched_repo.update_appointment(
+                pg,
+                appt_id,
+                {
+                    "archived_at": archived_at,
+                },
+            )
+
+            if not updated:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Appointment could not be archived",
+                )
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "appointment.archive",
+        resource_type="appointment",
+        resource_id=appt_id,
+        metadata={
+            "client_id": appt.get("client_id"),
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    return {
+        "ok": True,
+        "archived_at": archived_at.isoformat(),
+    }
+
+
+@api.post("/appointments/{appt_id}/restore")
+async def restore_appointment(
+    appt_id: str,
+    request: Request,
+    user=Depends(
+        require_roles(
+            "admin",
+            "practitioner",
+            "medical_assistant",
+        )
+    ),
+):
+    """Restore a previously archived appointment."""
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            appt = await sched_repo.get_appointment(
+                pg,
+                appt_id,
+            )
+
+            if not appt:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Appointment not found",
+                )
+
+            if not appt.get("archived_at"):
+                return {
+                    "ok": True,
+                    "already_restored": True,
+                }
+
+            if (
+                user.get("role") == "practitioner"
+                and user["id"] not in {
+                    appt.get("practitioner_id"),
+                    appt.get("created_by"),
+                }
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Forbidden",
+                )
+
+            updated = await sched_repo.update_appointment(
+                pg,
+                appt_id,
+                {
+                    "archived_at": None,
+                },
+            )
+
+            if not updated:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Appointment could not be restored",
+                )
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "appointment.restore",
+        resource_type="appointment",
+        resource_id=appt_id,
+        metadata={
+            "client_id": appt.get("client_id"),
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    return {
+        "ok": True,
+        "restored": True,
+    }
+
+
+
+@api.delete("/appointments/{appt_id}")
+async def delete_appointment_endpoint(
+    appt_id: str,
+    request: Request,
+    user=Depends(
+        require_roles(
+            "admin",
+            "practitioner",
+            "medical_assistant",
+        )
+    ),
+):
+    """Delete only unused appointments with no clinical or financial data."""
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            appt = await sched_repo.get_appointment(
+                pg,
+                appt_id,
+            )
+
+            if not appt:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Appointment not found",
+                )
+
+            if (
+                user.get("role") == "practitioner"
+                and user["id"] not in {
+                    appt.get("practitioner_id"),
+                    appt.get("created_by"),
+                }
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Forbidden",
+                )
+
+            blockers = []
+
+            note_count = await pg.scalar(
+                select(func.count(VisitNote.id)).where(
+                    VisitNote.appointment_id == appt_id
+                )
+            )
+            if note_count:
+                blockers.append("soap_notes")
+
+            draft_count = await pg.scalar(
+                select(func.count(LiveSoapDraft.id)).where(
+                    LiveSoapDraft.appointment_id == appt_id
+                )
+            )
+            if draft_count:
+                blockers.append("live_soap_draft")
+
+            chat_count = await pg.scalar(
+                select(func.count(VisitChat.id)).where(
+                    VisitChat.appointment_id == appt_id
+                )
+            )
+            if chat_count:
+                blockers.append("visit_chat")
+
+            if appt.get("recordings"):
+                blockers.append("recordings")
+
+            if appt.get("transaction_id"):
+                blockers.append("billing_transaction")
+
+            if blockers:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "clinical_data_exists",
+                        "message": (
+                            "This visit contains clinical or financial "
+                            "records and cannot be deleted. Archive it instead."
+                        ),
+                        "blockers": blockers,
+                    },
+                )
+
+            deleted = await sched_repo.delete_appointment(
+                pg,
+                appt_id,
+            )
+
+            if not deleted:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Appointment could not be deleted",
+                )
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "appointment.delete",
+        resource_type="appointment",
+        resource_id=appt_id,
+        severity="high",
+        metadata={
+            "client_id": appt.get("client_id"),
+            "visit_mode": appt.get("visit_mode"),
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    return {
+        "ok": True,
+        "deleted_id": appt_id,
+    }
 

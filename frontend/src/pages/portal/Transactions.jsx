@@ -6,6 +6,7 @@ import { Input } from "../../components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
 import { useToast } from "../../hooks/use-toast";
 import { Download, Wallet, TrendingUp, FileText, FileBarChart, Printer, Mail } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 const METHOD_LABELS = {
   chase_pos: "Chase POS", cash: "Cash", check: "Check", card_other: "Card", stripe: "Stripe",
@@ -18,10 +19,10 @@ export default function Transactions() {
   const [methodFilter, setMethodFilter] = React.useState("all");
   const [search, setSearch] = React.useState("");
 
-  const load = () => api.get("/transactions?limit=500").then((r) => setRows(r.data || [])).finally(() => setLoading(false));
+  const load = () => api.get("/transactions?limit=500").then((r) => setRows(normalizeArray(r.data, ["rows"]))).finally(() => setLoading(false));
   React.useEffect(() => { load(); }, []);
 
-  const filtered = rows.filter((t) => {
+  const filtered = normalizeArray(rows).filter((t) => {
     if (methodFilter !== "all" && t.payment_method !== methodFilter) return false;
     if (search && !((t.client_name || "").toLowerCase().includes(search.toLowerCase()) ||
                      t.id.toLowerCase().includes(search.toLowerCase()))) return false;
@@ -29,7 +30,7 @@ export default function Transactions() {
   });
 
   const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-  const today = rows.filter((t) => t.created_at && new Date(t.created_at) >= todayStart);
+  const today = normalizeArray(rows).filter((t) => t.created_at && new Date(t.created_at) >= todayStart);
   const todayTotal = today.reduce((s, t) => s + (t.total || 0), 0);
   const allTotal = filtered.reduce((s, t) => s + (t.total || 0), 0);
 
@@ -69,19 +70,35 @@ export default function Transactions() {
   };
 
   const emailReceipt = async (t) => {
-    const recipient = window.prompt(
-      "Send invoice to which email?",
-      t.client_email || "",
-    );
-    if (recipient === null) return;
     try {
-      const r = await api.post(`/transactions/${t.id}/email`, {
-        to: recipient || undefined,
+      const r = await api.post(
+        `/transactions/${t.id}/email`,
+        {}
+      );
+
+      toast({
+        title:
+          r.data.delivery === "sent"
+            ? "Invoice sent"
+            : r.data.delivery === "sent_stub"
+            ? "Invoice queued (simulated)"
+            : "Invoice attempted",
+        description:
+          `${r.data.invoice_number} → ${r.data.recipient}`,
       });
-      toast({ title: `Invoice ${r.data.delivery === "sent" ? "sent" : r.data.delivery === "sent_stub" ? "queued (simulated)" : "attempted"}`,
-              description: `${r.data.invoice_number} → ${r.data.recipient}` });
     } catch (e) {
-      toast({ title: "Email failed", description: e?.response?.data?.detail?.message || e.message });
+      const detail = e?.response?.data?.detail;
+
+      toast({
+        title: "Email failed",
+        description:
+          typeof detail === "string"
+            ? detail
+            : detail?.message ||
+              e.message ||
+              "The invoice could not be emailed.",
+        variant: "destructive",
+      });
     }
   };
 

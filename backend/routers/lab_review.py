@@ -24,9 +24,89 @@ from deps import _strip_id, api, db, require_roles
 from models import new_id
 from pg_shims import find_client, find_user_by_id
 
+def _parse_lab_report_date(value):
+    """Best-effort date parser for AI-extracted report dates."""
+    if value in (None, ""):
+        return None
+
+    raw = str(value).strip()
+
+    for fmt in (
+        "%Y-%m-%d",
+        "%m/%d/%Y",
+        "%m/%d/%y",
+        "%Y/%m/%d",
+        "%m-%d-%Y",
+        "%m-%d-%y",
+    ):
+        try:
+            parsed = datetime.strptime(raw[:10], fmt)
+            return parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+
+    try:
+        parsed = datetime.fromisoformat(
+            raw.replace("Z", "+00:00")
+        )
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except ValueError:
+        return None
+
+
+def _lab_report_to_dict(report) -> dict:
+    """Serialize a SQLAlchemy LabReport row for API responses."""
+    payload = dict(report.payload or {})
+
+    output = {
+        "id": report.id,
+        "client_id": report.client_id,
+        "original_file_id": report.original_file_id,
+        "source_filename": report.source_filename,
+        "mime_type": report.mime_type,
+        "report_title": report.report_title,
+        "laboratory_name": report.laboratory_name,
+        "patient_name_on_report": report.patient_name_on_report,
+        "patient_dob_on_report": report.patient_dob_on_report,
+        "ordering_provider": report.ordering_provider,
+        "accession_number": report.accession_number,
+        "collection_date": report.collection_date,
+        "reported_date": report.reported_date,
+        "review_status": report.review_status,
+        "assigned_provider_id": report.assigned_provider_id,
+        "assigned_provider_name": report.assigned_provider_name,
+        "review_priority": report.review_priority,
+        "review_due_date": report.review_due_date,
+        "document_confidence": report.document_confidence,
+        "verified": report.verified,
+        "released_to_patient": report.released_to_patient,
+        "approved_by": report.approved_by,
+        "approved_at": report.approved_at,
+        "rejected_by": report.rejected_by,
+        "rejected_at": report.rejected_at,
+        "created_by": report.created_by,
+        "created_by_name": report.created_by_name,
+        "created_at": report.created_at,
+        "updated_at": report.updated_at,
+    }
+
+    output.update(payload)
+    return output
+
+
 REVIEW_STATUSES = (
-    "new", "waiting_for_review", "reviewed",
-    "patient_notified", "follow_up_needed",
+    "new",
+    "ai_transcribed",
+    "pending_assignment",
+    "assigned_for_review",
+    "provider_reviewing",
+    "needs_correction",
+    "approved",
+    "rejected",
+    "patient_notified",
+    "follow_up_needed",
 )
 
 
@@ -34,6 +114,26 @@ class ReviewPatch(BaseModel):
     review_status: str
     review_notes: Optional[str] = Field(default=None, max_length=1000)
     ordering_provider_id: Optional[str] = None
+
+
+class LabAssignIn(BaseModel):
+    client_id: Optional[str] = None
+    assigned_provider_id: str
+    priority: str = "normal"
+    due_date: Optional[datetime] = None
+    assignment_note: Optional[str] = Field(default=None, max_length=1000)
+
+
+class LabProviderReviewIn(BaseModel):
+    review_notes: Optional[str] = Field(default=None, max_length=4000)
+    patient_summary: Optional[str] = Field(default=None, max_length=4000)
+    release_to_patient: bool = True
+    notify_patient: bool = True
+
+
+class LabRejectIn(BaseModel):
+    reason: str = Field(min_length=3, max_length=2000)
+    needs_correction: bool = False
 
 
 class LabTaskShortcut(BaseModel):
@@ -61,6 +161,282 @@ async def _can_transition(user: dict, lab: dict) -> bool:
     return False
 
 
+@api.post("/labs/process-file/{file_id}")
+async def process_lab_report_file(
+    file_id: str,
+    request: Request,
+    user=Depends(
+        require_roles(
+            "practitioner",
+            "admin",
+            "medical_assistant",
+            "staff",
+        )
+    ),
+):
+    """Convert a clean secure-vault file into an unverified LabReport.
+
+    This endpoint never creates patient-visible LabValue rows.
+    """
+    file_meta = await db.files.find_one({
+        "id": file_id,
+        "deleted_at": None,
+    })
+
+    if not file_meta:
+        raise HTTPException(
+            status_code=404,
+            detail="File not found",
+        )
+
+    if file_meta.get("category") != "lab":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "not_a_lab_file",
+                "message": (
+                    "Upload the document with category=lab before "
+                    "processing it as a lab report."
+                ),
+            },
+        )
+
+    scan_status = str(
+        file_meta.get("scan_status") or "pending"
+    ).lower()
+
+    if scan_status == "pending":
+        raise HTTPException(
+            status_code=425,
+            detail={
+                "code": "scan_pending",
+                "message": "The file is awaiting malware scanning.",
+            },
+        )
+
+    if scan_status == "infected":
+        raise HTTPException(
+            status_code=451,
+            detail={
+                "code": "file_quarantined",
+                "message": "The file is quarantined.",
+            },
+        )
+
+    if scan_status == "error":
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "scan_error",
+                "message": "The malware scan did not complete.",
+            },
+        )
+
+    if scan_status != "clean":
+        raise HTTPException(
+            status_code=403,
+            detail="The file is not available for processing.",
+        )
+
+    client_id = file_meta.get("client_id")
+
+    if client_id:
+        client = await find_client(client_id=client_id)
+        if not client:
+            raise HTTPException(
+                status_code=404,
+                detail="Assigned patient was not found.",
+            )
+
+    from sqlalchemy import select
+    from postgres_db import AsyncSessionLocal
+    from postgres_models import LabReport
+
+    # Idempotency: the same uploaded file creates only one LabReport.
+    async with AsyncSessionLocal() as pg:
+        existing = (
+            await pg.execute(
+                select(LabReport).where(
+                    LabReport.original_file_id == file_id
+                )
+            )
+        ).scalar_one_or_none()
+
+    if existing:
+        return _lab_report_to_dict(existing)
+
+    storage_key = file_meta.get("storage_key")
+
+    if not storage_key:
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "code": "storage_not_migrated",
+                "message": (
+                    "This file does not have a supported secure-storage key."
+                ),
+            },
+        )
+
+    from storage import get_storage
+
+    try:
+        content = await get_storage().get_bytes(storage_key)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "stored_file_missing",
+                "message": "The uploaded file could not be retrieved.",
+            },
+        ) from exc
+
+    from services.document_text import extract_document_text
+
+    extracted_text = extract_document_text(
+        file_meta.get("filename") or "lab-report",
+        content,
+    )
+
+    if len(extracted_text.strip()) < 30:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "ocr_required",
+                "message": (
+                    "The report contains too little readable text. "
+                    "It may be scanned and require OCR."
+                ),
+            },
+        )
+
+    from services.lab_ai import transcribe_lab_report
+
+    extraction = await transcribe_lab_report(
+        extracted_text=extracted_text,
+        source_filename=(
+            file_meta.get("filename") or "lab-report"
+        ),
+        session_id=f"lab-report-{file_id[:16]}",
+    )
+
+    now = datetime.now(timezone.utc)
+    report_id = new_id()
+
+    payload = {
+        "raw_extracted_text": extraction.get(
+            "raw_extracted_text",
+            "",
+        ),
+        "full_report_text": extraction.get(
+            "full_report_text",
+            "",
+        ),
+        "report_sections": extraction.get(
+            "report_sections",
+            [],
+        ),
+        "results": extraction.get("results", []),
+        "critical_or_abnormal_text": extraction.get(
+            "critical_or_abnormal_text",
+            [],
+        ),
+        "unparsed_lines": extraction.get(
+            "unparsed_lines",
+            [],
+        ),
+        "warnings": extraction.get("warnings", []),
+        "provider_review_required": True,
+        "extraction_status": "ai_transcribed",
+        "extracted_at": extraction.get("extracted_at"),
+        "source_file": {
+            "id": file_id,
+            "filename": file_meta.get("filename"),
+            "sha256": file_meta.get("sha256"),
+            "size": file_meta.get("size"),
+            "mime": file_meta.get("mime"),
+        },
+        "review_history": [
+            {
+                "event": "ai_transcribed",
+                "actor_id": user["id"],
+                "actor_name": (
+                    user.get("full_name") or user.get("email")
+                ),
+                "result_count": len(
+                    extraction.get("results") or []
+                ),
+                "ts": now.isoformat(),
+            }
+        ],
+    }
+
+    report = LabReport(
+        id=report_id,
+        client_id=client_id,
+        original_file_id=file_id,
+        source_filename=file_meta.get("filename"),
+        mime_type=file_meta.get("mime"),
+        report_title=extraction.get("report_title"),
+        laboratory_name=extraction.get("laboratory_name"),
+        patient_name_on_report=extraction.get(
+            "patient_name_on_report"
+        ),
+        patient_dob_on_report=extraction.get(
+            "patient_dob_on_report"
+        ),
+        ordering_provider=extraction.get("ordering_provider"),
+        accession_number=extraction.get("accession_number"),
+        collection_date=_parse_lab_report_date(
+            extraction.get("collection_date")
+        ),
+        reported_date=_parse_lab_report_date(
+            extraction.get("reported_date")
+        ),
+        review_status="pending_assignment",
+        document_confidence=extraction.get(
+            "document_confidence"
+        ),
+        verified=False,
+        released_to_patient=False,
+        created_by=user["id"],
+        created_by_name=(
+            user.get("full_name") or user.get("email")
+        ),
+        created_at=now,
+        updated_at=now,
+        payload=payload,
+    )
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            pg.add(report)
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "lab_report.ai_transcribed",
+        resource_type="lab_report",
+        resource_id=report_id,
+        metadata={
+            "file_id": file_id,
+            "client_id": client_id,
+            "result_count": len(
+                extraction.get("results") or []
+            ),
+            "document_confidence": extraction.get(
+                "document_confidence"
+            ),
+            # Do not store extracted report text in audit metadata.
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    return _lab_report_to_dict(report)
+
+
 @api.get("/labs/review-queue")
 async def review_queue(
     status: Optional[str] = None,
@@ -84,6 +460,17 @@ async def review_queue(
         q["client_id"] = client_id
     if ordering_provider_id:
         q["ordering_provider_id"] = ordering_provider_id
+
+    # Providers default to their own assigned queue. Admin and delegated
+    # clinical support roles may see the broader routing queue.
+    if user.get("role") == "practitioner":
+        q["$or"] = [
+            {"assigned_provider_id": user["id"]},
+            {
+                "assigned_provider_id": {"$exists": False},
+                "ordering_provider_id": user["id"],
+            },
+        ]
 
     rows = await db.lab_values.find(q).sort("created_at", -1).to_list(limit)
     out = []
@@ -153,6 +540,112 @@ async def patch_review_status(lab_id: str, payload: ReviewPatch, request: Reques
                     ip=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     updated = await db.lab_values.find_one({"id": lab_id})
     updated["review_status"] = _default_status(updated)
+    return _strip_id(updated)
+
+
+@api.put("/labs/{lab_id}/assign")
+async def assign_lab_for_review(
+    lab_id: str,
+    payload: LabAssignIn,
+    request: Request,
+    user=Depends(
+        require_roles(
+            "practitioner",
+            "admin",
+            "medical_assistant",
+            "staff",
+        )
+    ),
+):
+    """Assign an uploaded or transcribed lab to a provider review queue."""
+    lab = await db.lab_values.find_one({"id": lab_id})
+
+    if not lab:
+        raise HTTPException(status_code=404, detail="Lab not found")
+
+    provider = await find_user_by_id(payload.assigned_provider_id)
+
+    if (
+        not provider
+        or provider.get("role") != "practitioner"
+        or not provider.get("is_active", True)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Select an active practitioner.",
+        )
+
+    client_id = payload.client_id or lab.get("client_id")
+
+    if not client_id:
+        raise HTTPException(
+            status_code=400,
+            detail="A patient must be assigned before provider review.",
+        )
+
+    client = await find_client(client_id=client_id)
+
+    if not client:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    now = datetime.now(timezone.utc)
+    actor_name = user.get("full_name") or user.get("email")
+
+    updates = {
+        "client_id": client_id,
+        "assigned_provider_id": provider["id"],
+        "assigned_provider_name": (
+            provider.get("full_name") or provider.get("email")
+        ),
+        "review_status": "assigned_for_review",
+        "review_priority": payload.priority,
+        "review_due_date": payload.due_date,
+        "assignment_note": (
+            payload.assignment_note or ""
+        ).strip() or None,
+        "assigned_at": now,
+        "assigned_by": user["id"],
+        "assigned_by_name": actor_name,
+        "review_status_updated_at": now,
+        "review_status_updated_by": user["id"],
+    }
+
+    history_event = {
+        "event": "assigned_for_review",
+        "actor_id": user["id"],
+        "actor_name": actor_name,
+        "provider_id": provider["id"],
+        "provider_name": updates["assigned_provider_name"],
+        "client_id": client_id,
+        "priority": payload.priority,
+        "ts": now,
+    }
+
+    await db.lab_values.update_one(
+        {"id": lab_id},
+        {
+            "$set": updates,
+            "$push": {"review_history": history_event},
+        },
+    )
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "lab.assigned_for_review",
+        resource_type="lab",
+        resource_id=lab_id,
+        metadata={
+            "client_id": client_id,
+            "assigned_provider_id": provider["id"],
+            "priority": payload.priority,
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    updated = await db.lab_values.find_one({"id": lab_id})
     return _strip_id(updated)
 
 
@@ -498,6 +991,220 @@ def _validate_lab_ai_response(data: Optional[dict]) -> dict:
         # Always true regardless of what the model says. Guardrail.
         "provider_review_required": True,
     }
+
+
+@api.post("/labs/{lab_id}/approve")
+async def approve_lab_for_patient(
+    lab_id: str,
+    payload: LabProviderReviewIn,
+    request: Request,
+    user=Depends(require_roles("practitioner")),
+):
+    """Approve a reviewed lab for the patient chart.
+
+    AI transcription remains unverified until this endpoint is completed
+    by the assigned practitioner.
+    """
+    lab = await db.lab_values.find_one({"id": lab_id})
+
+    if not lab:
+        raise HTTPException(status_code=404, detail="Lab not found")
+
+    assigned_provider_id = (
+        lab.get("assigned_provider_id")
+        or lab.get("ordering_provider_id")
+    )
+
+    if assigned_provider_id and assigned_provider_id != user["id"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the assigned provider may approve this lab.",
+        )
+
+    client_id = lab.get("client_id")
+
+    if not client_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Assign this report to a patient before approval.",
+        )
+
+    client = await find_client(client_id=client_id)
+
+    if not client:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    now = datetime.now(timezone.utc)
+    actor_name = user.get("full_name") or user.get("email")
+
+    updates = {
+        "review_status": "approved",
+        "verified": True,
+        "approved_by": user["id"],
+        "approved_by_name": actor_name,
+        "approved_at": now,
+        "reviewed_by": user["id"],
+        "reviewed_by_name": actor_name,
+        "reviewed_at": now,
+        "provider_review_notes": (
+            payload.review_notes or ""
+        ).strip() or None,
+        "patient_summary": (
+            payload.patient_summary or ""
+        ).strip() or None,
+        "released_to_patient": bool(payload.release_to_patient),
+        "released_to_patient_at": (
+            now if payload.release_to_patient else None
+        ),
+        "review_status_updated_at": now,
+        "review_status_updated_by": user["id"],
+    }
+
+    history_event = {
+        "event": "approved",
+        "actor_id": user["id"],
+        "actor_name": actor_name,
+        "client_id": client_id,
+        "released_to_patient": bool(payload.release_to_patient),
+        "ts": now,
+    }
+
+    await db.lab_values.update_one(
+        {"id": lab_id},
+        {
+            "$set": updates,
+            "$push": {"review_history": history_event},
+        },
+    )
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "lab.approved",
+        resource_type="lab",
+        resource_id=lab_id,
+        severity="high",
+        outcome="success",
+        metadata={
+            "client_id": client_id,
+            "released_to_patient": bool(payload.release_to_patient),
+            "attachment_count": len(
+                lab.get("attachment_file_ids") or []
+            ),
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    # Patient notification must remain generic and contain no lab values.
+    if payload.release_to_patient and payload.notify_patient:
+        try:
+            from notifiers import send_generic_portal_update_email
+
+            patient_user = None
+            if client.get("user_id"):
+                patient_user = await find_user_by_id(client["user_id"])
+
+            if patient_user and patient_user.get("email"):
+                await send_generic_portal_update_email(
+                    db,
+                    patient_user["email"],
+                    first_name=(
+                        patient_user.get("full_name") or ""
+                    ).split(" ")[0] or None,
+                    subject="A new portal update is available",
+                    heading="New information is available in your portal",
+                    message=(
+                        "Your care team has added new information to "
+                        "your secure patient portal."
+                    ),
+                    portal_path="/portal/patient/labs",
+                )
+        except Exception:
+            # Notification failure must not roll back clinical approval.
+            pass
+
+    updated = await db.lab_values.find_one({"id": lab_id})
+    return _strip_id(updated)
+
+
+@api.post("/labs/{lab_id}/reject")
+async def reject_lab_report(
+    lab_id: str,
+    payload: LabRejectIn,
+    request: Request,
+    user=Depends(require_roles("practitioner")),
+):
+    lab = await db.lab_values.find_one({"id": lab_id})
+
+    if not lab:
+        raise HTTPException(status_code=404, detail="Lab not found")
+
+    assigned_provider_id = (
+        lab.get("assigned_provider_id")
+        or lab.get("ordering_provider_id")
+    )
+
+    if assigned_provider_id and assigned_provider_id != user["id"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the assigned provider may reject this lab.",
+        )
+
+    now = datetime.now(timezone.utc)
+    actor_name = user.get("full_name") or user.get("email")
+    status = (
+        "needs_correction"
+        if payload.needs_correction
+        else "rejected"
+    )
+
+    await db.lab_values.update_one(
+        {"id": lab_id},
+        {
+            "$set": {
+                "review_status": status,
+                "verified": False,
+                "rejection_reason": payload.reason.strip(),
+                "rejected_by": user["id"],
+                "rejected_by_name": actor_name,
+                "rejected_at": now,
+                "released_to_patient": False,
+                "review_status_updated_at": now,
+                "review_status_updated_by": user["id"],
+            },
+            "$push": {
+                "review_history": {
+                    "event": status,
+                    "actor_id": user["id"],
+                    "actor_name": actor_name,
+                    "reason": payload.reason.strip()[:500],
+                    "ts": now,
+                }
+            },
+        },
+    )
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "lab.rejected",
+        resource_type="lab",
+        resource_id=lab_id,
+        severity="high",
+        outcome="success",
+        metadata={
+            "client_id": lab.get("client_id"),
+            "status": status,
+        },
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    updated = await db.lab_values.find_one({"id": lab_id})
+    return _strip_id(updated)
 
 
 @api.post("/labs/{lab_id}/ai-review")

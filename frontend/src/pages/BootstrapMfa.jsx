@@ -6,6 +6,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { useToast } from "../hooks/use-toast";
 import { ShieldCheck, Copy, KeyRound } from "lucide-react";
+import { normalizeArray } from "../lib/collections";
 
 function clearBootstrapState() {
   sessionStorage.removeItem("nms_bootstrap_token");
@@ -150,7 +151,7 @@ export default function BootstrapMfa() {
           </p>
 
           <div className="mt-5 grid grid-cols-2 gap-2 rounded-xl bg-[#fbf7ee] border border-[#e0d6bc] p-4 font-mono text-sm">
-            {recoveryCodes.map((item) => (
+            {normalizeArray(recoveryCodes).map((item) => (
               <div key={item}>{item}</div>
             ))}
           </div>

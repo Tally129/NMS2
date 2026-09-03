@@ -179,14 +179,33 @@ async def reset_password(payload: dict, request: Request):
 
     token_hash = _hash_token(raw_token)
 
-    # Atomic single-use consume in PostgreSQL.
+    # Atomic single-use consume in PostgreSQL. Normal forgot-password tokens
+    # live in auth_password_reset_tokens. Admin-issued account invitations
+    # live in emr_legacy_password_reset_tokens.
+    token_source = "password_reset"
+
     async with AsyncSessionLocal() as pg:
         async with pg.begin():
             row = await pr_repo.consume_token(pg, token_hash, ip)
+
+    if not row:
+        from repositories import legacy_password_reset as invite_repo
+
+        async with AsyncSessionLocal() as pg:
+            async with pg.begin():
+                row = await invite_repo.consume(pg, token_hash)
+
+        if row:
+            token_source = "account_invitation"
+
     if not row:
         await log_audit(
-            db, user_id=None, user_email=None, action="auth.password_reset_denied",
-            metadata={"reason": "invalid_or_expired"}, ip=ip,
+            db,
+            user_id=None,
+            user_email=None,
+            action="auth.password_reset_denied",
+            metadata={"reason": "invalid_or_expired"},
+            ip=ip,
             user_agent=request.headers.get("user-agent"),
         )
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
@@ -198,31 +217,93 @@ async def reset_password(payload: dict, request: Request):
 
     reason = validate_password_strength(new_pw, email=user["email"], full_name=user.get("full_name") or "")
     if reason:
-        # Roll back the token consumption so the user can try again.
+        # Roll back consumption so the user can correct the password without
+        # requiring a new email. Use the appropriate token table.
         async with AsyncSessionLocal() as pg:
             async with pg.begin():
                 from sqlalchemy import update
-                from postgres_models import PasswordResetToken
-                await pg.execute(
-                    update(PasswordResetToken)
-                    .where(PasswordResetToken.id == row["id"])
-                    .values(consumed_at=None, consumed_ip=None)
-                )
+
+                if token_source == "account_invitation":
+                    from postgres_models import LegacyPasswordResetToken
+
+                    await pg.execute(
+                        update(LegacyPasswordResetToken)
+                        .where(LegacyPasswordResetToken.id == row["id"])
+                        .values(used_at=None)
+                    )
+                else:
+                    from postgres_models import PasswordResetToken
+
+                    await pg.execute(
+                        update(PasswordResetToken)
+                        .where(PasswordResetToken.id == row["id"])
+                        .values(consumed_at=None, consumed_ip=None)
+                    )
+
         raise HTTPException(status_code=400, detail=reason)
 
     now = datetime.now(timezone.utc)
+
+    workforce_roles = {
+        "admin",
+        "practitioner",
+        "staff",
+        "front_desk",
+        "frontdesk",
+        "medical_assistant",
+        "auditor",
+    }
+
+    # An invitation-created account is identified by its onboarding state,
+    # regardless of whether the token came from the primary or legacy table.
+    is_invited_account = (
+        user.get("onboarding_status") == "password_change_required"
+        or user.get("must_change_password", False)
+    )
+
+    is_workforce_invitation = (
+        is_invited_account
+        and user.get("role") in workforce_roles
+    )
+
+    updates = {
+        "password_hash": hash_password(new_pw),
+        "password_changed_at": now,
+    }
+
+    if is_invited_account:
+        updates.update({
+            # The password just created is the permanent password.
+            "must_change_password": False,
+            "temporary_password_expires_at": None,
+
+            # Workforce continues to MFA enrollment.
+            # Clients complete onboarding and proceed to patient login.
+            "onboarding_status": (
+                "mfa_enrollment_required"
+                if is_workforce_invitation
+                else None
+            ),
+        })
+
     async with AsyncSessionLocal() as pg:
         async with pg.begin():
-            await users_repo.update_fields(pg, user["id"], {
-                "password_hash": hash_password(new_pw),
-                "password_changed_at": now,
-            })
+            await users_repo.update_fields(pg, user["id"], updates)
     revoked_ct = await _revoke_all_sessions(user["id"], reason="password_reset")
 
     await log_audit(
         db, user["id"], user_email=None, action="auth.password_reset_completed",
         resource_type="user", resource_id=user["id"],
-        metadata={"revoked_sessions": revoked_ct}, ip=ip,
+        metadata={
+            "revoked_sessions": revoked_ct,
+            "token_source": token_source,
+            "next_step": (
+                "mfa_enrollment"
+                if is_workforce_invitation
+                else "login"
+            ),
+        },
+        ip=ip,
         user_agent=request.headers.get("user-agent"),
     )
     # Password-changed alert. Fire AFTER the DB commit so a mail-provider
@@ -232,7 +313,15 @@ async def reset_password(payload: dict, request: Request):
         db, user["email"],
         first_name=(user.get("full_name") or "").split(" ")[0] or None,
     )
-    return {"ok": True, "must_relogin": True}
+    return {
+        "ok": True,
+        "must_relogin": True,
+        "next_step": (
+            "mfa_enrollment"
+            if is_workforce_invitation
+            else "login"
+        ),
+    }
 
 
 # --------------------------------------------------------------------------- #

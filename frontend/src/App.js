@@ -10,6 +10,7 @@ import PatientDashboard from "./pages/patient/PatientDashboard";
 import PatientIntake from "./pages/patient/PatientIntake";
 import PatientChart from "./pages/patient/PatientChart";
 import PatientFiles from "./pages/patient/PatientFiles";
+import PatientForms from "./pages/patient/PatientForms";
 import PatientAppointments from "./pages/patient/PatientAppointments";
 import PatientBilling from "./pages/patient/PatientBilling";
 import PatientPlan from "./pages/patient/PatientPlan";
@@ -121,6 +122,7 @@ function App() {
             <Route path="/portal/staff/campaigns" element={<Protected roles={["staff", "admin", "practitioner", "front_desk", "frontdesk"]}><CampaignCenter /></Protected>} />
             <Route path="/portal/marketing" element={<Protected roles={["admin", "practitioner"]}><MarketingCommandCenter /></Protected>} />
             <Route path="/portal/staff/content-strategist" element={<Protected roles={["staff", "admin", "practitioner", "medical_assistant", "front_desk", "frontdesk", "auditor"]}><ContentStrategist /></Protected>} />
+            <Route path="/portal/marketing" element={<Protected roles={["admin", "practitioner"]}><MarketingCommandCenter /></Protected>} />
             <Route path="/portal/admin/accounting" element={<Protected roles={["admin", "auditor"]}><Accounting /></Protected>} />
             <Route path="/portal/admin/telehealth" element={<Protected roles={["admin"]}><TelehealthHub /></Protected>} />
 
@@ -142,6 +144,7 @@ function App() {
             <Route path="/portal/patient/intake" element={<Protected roles={["client"]}><PatientIntake /></Protected>} />
             <Route path="/portal/patient/chart" element={<Protected roles={["client"]}><PatientChart /></Protected>} />
             <Route path="/portal/patient/files" element={<Protected roles={["client"]}><PatientFiles /></Protected>} />
+            <Route path="/portal/patient/forms" element={<Protected roles={["client"]}><PatientForms /></Protected>} />
             <Route path="/portal/patient/appointments" element={<Protected roles={["client"]}><PatientAppointments /></Protected>} />
             <Route path="/portal/patient/billing" element={<Protected roles={["client"]}><PatientBilling /></Protected>} />
             <Route path="/portal/patient/plan" element={<Protected roles={["client"]}><PatientPlan /></Protected>} />

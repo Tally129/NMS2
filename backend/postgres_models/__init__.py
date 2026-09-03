@@ -12,6 +12,7 @@ from .patient_profile import (  # noqa: F401
     SupplementSheet,
     ClientSupplementAssignment,
     LegacyPasswordResetToken,
+    VitalRecord,
 )
 from .scheduling import (  # noqa: F401
     Appointment,
@@ -21,14 +22,19 @@ from .scheduling import (  # noqa: F401
     ReminderSettings,
 )
 from .clinical_and_messaging import (  # noqa: F401
-    VisitNote, TreatmentPlan, Treatment, LabValue, LiveSoapDraft, VisitChat,
+    VisitNote, TreatmentPlan, Treatment, LabValue, LabReport, LiveSoapDraft, VisitChat,
     ClinicalDelegation,
     MessageThread, Message, FormTemplate, FormSubmission, SoapTemplate,
     PushSubscription,
 )
 from .crm_and_ops import (  # noqa: F401
-    Campaign, FrontDeskVisit, InternalTask, IntegrationLog,
+    Campaign, ContentStrategy, ContentAsset,
+    PublishingQueue,
+    FrontDeskVisit, InternalTask, IntegrationLog,
     ProtocolEnrollment, ProtocolTemplate, FileMeta,
+)
+from .payment_methods import (  # noqa: F401
+    PaymentCustomer, SavedPaymentMethod,
 )
 from .structured_rest import (  # noqa: F401
     ChartOfAccount, JournalEntry, TransactionRow, Expense, Invoice,
@@ -41,10 +47,6 @@ from .structured_rest import (  # noqa: F401
     BreakglassSession,
     PostingDeadLetter, VipListEntry, WsTicket, UserSessionCompat,
     Membership, CampaignTemplate, CampaignUnsubscribe, LegacyForm, SymptomLog,
-)
-
-from .payment_methods import (  # noqa: F401
-    PaymentCustomer, SavedPaymentMethod,
 )
 
 from postgres_models.terminals import PaymentTerminal, TerminalPaymentAttempt

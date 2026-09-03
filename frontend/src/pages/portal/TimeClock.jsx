@@ -7,6 +7,7 @@ import { useToast } from "../../hooks/use-toast";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../../components/ui/tabs";
 import { Play, Pause, Square, Coffee, Timer as TimerIcon, History } from "lucide-react";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
 
 function formatMin(mins) {
   if (mins == null) return "—";
@@ -41,10 +42,10 @@ export default function TimeClock() {
   const load = async () => {
     try {
       const r = await api.get("/time-clock/me");
-      setMine(r.data || []);
+      setMine(normalizeArray(r.data, ["mine"]));
       if (isAdmin) {
         const a = await api.get("/time-clock/all");
-        setAllEntries(a.data || []);
+        setAllEntries(normalizeArray(a.data, ["allEntries"]));
       }
     } catch (e) {
       toast({ title: "Failed to load", description: getErrorMessage(e) || "" });
@@ -58,7 +59,7 @@ export default function TimeClock() {
     return () => clearInterval(t);
   }, []);
 
-  const open = mine.find((e) => !e.clock_out) || null;
+  const open = normalizeArray(mine).find((e) => !e.clock_out) || null;
   const onBreak = !!(open && (open.breaks || []).length && !(open.breaks[open.breaks.length - 1].end));
 
   const punchIn = async () => {
@@ -100,8 +101,7 @@ export default function TimeClock() {
 
   // weekly minutes (last 7 days)
   const weekMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  const weekMins = mine
-    .filter((e) => new Date(e.clock_in).getTime() >= weekMs && e.total_minutes != null)
+  const weekMins = normalizeArray(mine).filter((e) => new Date(e.clock_in).getTime() >= weekMs && e.total_minutes != null)
     .reduce((s, e) => s + e.total_minutes, 0);
 
   return (

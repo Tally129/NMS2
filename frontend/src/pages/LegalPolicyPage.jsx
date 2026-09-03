@@ -6,6 +6,7 @@ import { LegalFooter } from "./LegalHub";
 import { useAuth } from "../lib/auth";
 import { Button } from "../components/ui/button";
 import { ArrowLeft, Printer, Download } from "lucide-react";
+import { normalizeArray } from "../lib/collections";
 
 function formatDate(iso) {
   if (!iso) return "—";
@@ -98,7 +99,7 @@ export default function LegalPolicyPage() {
               <nav className="hidden lg:block lg:sticky lg:top-6 self-start text-sm space-y-1 print:hidden"
                    data-testid="legal-toc">
                 <div className="eyebrow text-[#8a6a3c] mb-2">Contents</div>
-                {toc.map((row) => (
+                {normalizeArray(toc).map((row) => (
                   <a key={row.id} href={`#${row.id}`}
                      className={`block hover:text-[#2f6a4a] ${row.level === 3 ? "ml-3 text-slate-500" : "text-[#1f2a22]"}`}>
                     {row.text}

@@ -199,6 +199,107 @@ async def list_clients(*, sort_desc: bool = True, limit: int = 500,
         return [clients_repo._client_to_dict(c) for c in (await s.execute(stmt)).scalars().all()]
 
 
+async def list_clients_paginated(
+    *,
+    page: int = 1,
+    page_size: int = 50,
+    q: Optional[str] = None,
+    sort_by: str = "created_at",
+    sort_dir: str = "desc",
+    practitioner_id: Optional[str] = None,
+    assigned_only: bool = False,
+) -> Dict[str, Any]:
+    """Return one page of patients plus the total matching row count."""
+    page = max(int(page or 1), 1)
+    page_size = min(max(int(page_size or 50), 1), 200)
+
+    async with AsyncSessionLocal() as session:
+        conditions = []
+
+        if assigned_only and practitioner_id:
+            conditions.append(
+                Client.assigned_practitioner_id == practitioner_id
+            )
+
+        query = (q or "").strip()
+
+        if query:
+            like = f"%{query}%"
+            conditions.append(
+                or_(
+                    func.lower(Client.full_name).like(
+                        func.lower(like)
+                    ),
+                    func.lower(Client.email).like(
+                        func.lower(like)
+                    ),
+                    func.lower(Client.mrn).like(
+                        func.lower(like)
+                    ),
+                    Client.phone.like(like),
+                )
+            )
+
+        count_stmt = select(func.count(Client.id))
+
+        if conditions:
+            count_stmt = count_stmt.where(and_(*conditions))
+
+        total = int(
+            (await session.execute(count_stmt)).scalar_one()
+        )
+
+        stmt = select(Client)
+
+        if conditions:
+            stmt = stmt.where(and_(*conditions))
+
+        sort_columns = {
+            "created_at": Client.created_at,
+            "full_name": Client.full_name,
+            "mrn": Client.mrn,
+            "dob": Client.dob,
+        }
+
+        sort_column = sort_columns.get(
+            sort_by,
+            Client.created_at,
+        )
+
+        order = (
+            sort_column.asc().nulls_last()
+            if sort_dir == "asc"
+            else sort_column.desc().nulls_last()
+        )
+
+        # Stable secondary ordering prevents records from shifting between
+        # pages when the primary sort field contains duplicate values.
+        stmt = (
+            stmt.order_by(order, Client.id.asc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+
+        rows = (
+            await session.execute(stmt)
+        ).scalars().all()
+
+        return {
+            "items": [
+                clients_repo._client_to_dict(row)
+                for row in rows
+            ],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": (
+                (total + page_size - 1) // page_size
+                if total
+                else 0
+            ),
+        }
+
+
 async def search_clients(query: str, limit: int = 25) -> List[Dict[str, Any]]:
     q = (query or "").strip()
     if not q:

@@ -8,6 +8,7 @@ import { useToast } from "../../hooks/use-toast";
 import { Leaf, CheckCircle2, XCircle, Loader2, Sparkles, Clock, ListChecks } from "lucide-react";
 import { EnrollmentDialog } from "../portal/Protocols";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
 
 /**
  * Patient view of their proposed and active protocols.
@@ -26,14 +27,14 @@ export default function PatientProtocols() {
 
   const load = async () => {
     setLoading(true);
-    try { const r = await api.get("/protocols/enrollments"); setEnrollments(r.data || []); }
+    try { const r = await api.get("/protocols/enrollments"); setEnrollments(normalizeArray(r.data, ["enrollments"])); }
     finally { setLoading(false); }
   };
   React.useEffect(() => { load(); }, []);
 
-  const proposed = enrollments.filter((e) => e.status === "proposed");
-  const active = enrollments.filter((e) => e.status === "active" || e.status === "accepted");
-  const past = enrollments.filter((e) => e.status === "completed" || e.status === "declined" || e.status === "canceled");
+  const proposed = normalizeArray(enrollments).filter((e) => e.status === "proposed");
+  const active = normalizeArray(enrollments).filter((e) => e.status === "active" || e.status === "accepted");
+  const past = normalizeArray(enrollments).filter((e) => e.status === "completed" || e.status === "declined" || e.status === "canceled");
 
   const decide = async () => {
     if (!decideTarget) return;

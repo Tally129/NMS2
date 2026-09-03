@@ -4,6 +4,7 @@ import api from "../lib/api";
 import PortalLayout, { PortalHeader } from "./PortalLayout";
 import { useAuth } from "../lib/auth";
 import { Shield, Scale, FileText, BadgeCheck, Mail, Video, Receipt, Accessibility, ArrowRight } from "lucide-react";
+import { normalizeArray } from "../lib/collections";
 
 const ICONS = {
   shield: Shield, scale: Scale, "file-text": FileText, "badge-check": BadgeCheck,
@@ -28,7 +29,7 @@ export default function LegalHub() {
 
   React.useEffect(() => {
     api.get("/legal/policies")
-      .then((r) => setPolicies(r.data || []))
+      .then((r) => setPolicies(normalizeArray(r.data, ["policies"])))
       .catch(() => setPolicies([]))
       .finally(() => setLoading(false));
   }, []);
@@ -43,7 +44,7 @@ export default function LegalHub() {
         <div className="text-[#6a6a6a]">Loading policies…</div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {policies.map((p) => {
+          {normalizeArray(policies).map((p) => {
             const Icon = ICONS[p.icon] || FileText;
             return (
               <Link

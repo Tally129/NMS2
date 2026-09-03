@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useToast } from "../../hooks/use-toast";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
 
 const fmt = (cents) => {
   const n = Number(cents || 0) / 100;
@@ -258,7 +259,7 @@ export default function HealthTab() {
             </tr>
           </thead>
           <tbody>
-            {runs.map((r) => (
+            {normalizeArray(runs).map((r) => (
               <tr key={r.id} className="border-t border-[#e2ebe4]" data-testid={`run-${r.id}`}>
                 <td className="p-3 text-xs">{new Date(r.started_at).toLocaleString()}</td>
                 <td className="p-3 text-xs">{(r.sources || []).join(", ")}</td>

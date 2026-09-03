@@ -643,6 +643,7 @@ export default function MarketingExecutionQueue() {
 
   const [creating, setCreating] = React.useState(false);
   const operationTokenRef = React.useRef(null);
+  const operationFingerprintRef = React.useRef(null);
 
   const [form, setForm] = React.useState({
     provider: "google_ads",
@@ -730,14 +731,34 @@ export default function MarketingExecutionQueue() {
         );
       }
 
+      const operationFingerprint = JSON.stringify({
+        provider: form.provider,
+        action_type: form.action_type,
+        target_type: form.target_type,
+        target_id: form.target_id.trim() || null,
+        payload,
+      });
+
+      if (
+        operationFingerprintRef.current !== null &&
+        operationFingerprintRef.current !== operationFingerprint
+      ) {
+        operationTokenRef.current = null;
+      }
+
       if (!operationTokenRef.current) {
-        operationTokenRef.current =
-          typeof crypto !== "undefined" &&
-          typeof crypto.randomUUID === "function"
-            ? crypto.randomUUID()
-            : `exec-${Date.now()}-${Math.random()
-                .toString(36)
-                .slice(2)}`;
+        if (
+          typeof crypto === "undefined" ||
+          typeof crypto.randomUUID !== "function"
+        ) {
+          throw new Error(
+            "Secure operation token generation is unavailable."
+          );
+        }
+
+        operationTokenRef.current = crypto.randomUUID();
+        operationFingerprintRef.current =
+          operationFingerprint;
       }
 
       await api.post(
@@ -758,6 +779,7 @@ export default function MarketingExecutionQueue() {
       // The operation completed successfully. A future
       // intentional create must receive a fresh token.
       operationTokenRef.current = null;
+      operationFingerprintRef.current = null;
 
       setShowCreate(false);
 

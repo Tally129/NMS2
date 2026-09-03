@@ -85,6 +85,7 @@ from routers import campaign_extras as _campaign_extras_routes  # noqa: F401 —
 from routers import campaigns as _campaigns_routes  # noqa: F401
 from routers import content_strategist as _content_strategist_routes  # noqa: F401
 from marketing_os.routers import core as _marketing_os_core_routes  # noqa: F401
+from marketing_os.routers import concierge as _marketing_os_concierge_routes  # noqa: F401
 from routers import accounting as _accounting_routes  # noqa: F401
 from routers import portal_ops as _portal_ops_routes  # noqa: F401
 from routers import legal as _legal_routes  # noqa: F401
@@ -104,473 +105,149 @@ app = FastAPI(title="NatMedSol EMR API")
 
 # =================== PUBLIC ENDPOINTS ===================
 @api.post("/public/appointment-request")
-async def public_appointment_request(payload: AppointmentRequestIn, request: Request):
-    doc = payload.dict()
-    doc["id"] = new_id()
-    doc["status"] = "new"
-    doc["ip"] = get_client_ip(request)
-
-    async with AsyncSessionLocal() as pg:
-        async with pg.begin():
-            doc = await sched_repo.create_appointment_request(pg, doc)
-
-    # ---------------------------------------------------------------
-    # First-party Marketing OS attribution bridge.
-    #
-    # Marketing metadata arrives separately from the appointment
-    # payload so contact/clinical fields never enter Marketing OS.
-    #
-    # Attribution is best-effort: a marketing measurement failure
-    # must never cause a successfully stored appointment request to
-    # fail.
-    # ---------------------------------------------------------------
-    marketing_header = request.headers.get(
-        "X-NMS-Marketing-Attribution"
+async def public_appointment_request(
+    payload: AppointmentRequestIn,
+    request: Request,
+):
+    from appointment_requests import (
+        create_appointment_request_workflow,
     )
 
-    if marketing_header:
-        try:
-            import json as _json
+    return await create_appointment_request_workflow(
+        payload,
+        client_ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        marketing_attribution=request.headers.get(
+            "X-NMS-Marketing-Attribution"
+        ),
+    )
 
-            from marketing_os.services.persistence import (
-                persist_conversion_and_attribution,
-            )
-
-            raw_marketing = _json.loads(marketing_header)
-
-            if not isinstance(raw_marketing, dict):
-                raise ValueError(
-                    "marketing attribution must be an object"
-                )
-
-            allowed = {
-                "session_id",
-                "external_click_id",
-                "source",
-                "medium",
-                "campaign",
-                "content",
-                "term",
-                "click_id_type",
-            }
-
-            marketing = {
-                key: value
-                for key, value in raw_marketing.items()
-                if key in allowed
-            }
-
-            properties = {}
-
-            click_id_type = marketing.pop(
-                "click_id_type",
-                None,
-            )
-
-            if click_id_type:
-                properties["click_id_type"] = (
-                    str(click_id_type)[:32]
-                )
-
-            conversion_payload = {
-                "event_type": "lead_submit",
-                **marketing,
-                "properties": properties,
-            }
-
-            async with AsyncSessionLocal() as marketing_pg:
-                async with marketing_pg.begin():
-                    await persist_conversion_and_attribution(
-                        marketing_pg,
-                        payload=conversion_payload,
-                        idempotency_key=(
-                            "appointment-request:"
-                            + str(doc["id"])
-                        ),
-                        provider="first_party",
-                    )
-
-        except Exception as exc:
-            # Do not log appointment/contact payload values.
-            logger.warning(
-                "Marketing attribution capture failed for "
-                "appointment request %s: %s",
-                doc.get("id"),
-                type(exc).__name__,
-            )
-
-    from notifiers import send_email as _send_email
-
-    notification_email = os.environ.get(
-        "APPOINTMENT_REQUEST_NOTIFICATION_EMAIL",
-        ""
-    ).strip()
-
-    if not notification_email:
-        logger.error(
-            "Appointment request notification email is not configured"
-        )
-        _delivery = "not_configured"
-    else:
-        _delivery = await _send_email(
-            db=db,
-            to=notification_email,
-            subject=(
-                "New Appointment Request | "
-                "Natural Medical Solutions"
-            ),
-            html="""
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1"
-  >
-  <title>New Appointment Request</title>
-</head>
-
-<body
-  style="
-    margin:0;
-    padding:0;
-    background:#f4f1e8;
-    font-family:Arial,Helvetica,sans-serif;
-    color:#34382f;
-  "
->
-  <table
-    role="presentation"
-    width="100%"
-    cellspacing="0"
-    cellpadding="0"
-    border="0"
-    style="background:#f4f1e8;"
-  >
-    <tr>
-      <td
-        align="center"
-        style="padding:40px 16px;"
-      >
-
-        <table
-          role="presentation"
-          width="100%"
-          cellspacing="0"
-          cellpadding="0"
-          border="0"
-          style="
-            max-width:620px;
-            background:#ffffff;
-            border:1px solid #e4dfd2;
-            border-radius:18px;
-            overflow:hidden;
-          "
-        >
-
-          <!-- NMS BRAND HEADER -->
-          <tr>
-            <td
-              align="center"
-              style="
-                padding:30px 28px 26px;
-                background:#66705a;
-              "
-            >
-
-              <img
-                src="https://preview.natmedsol.org/nms-logo.png"
-                width="155"
-                alt="Natural Medical Solutions"
-                style="
-                  display:block;
-                  width:155px;
-                  max-width:100%;
-                  height:auto;
-                  margin:0 auto 18px;
-                  border:0;
-                  outline:none;
-                  text-decoration:none;
-                "
-              >
-
-              <div
-                style="
-                  font-size:11px;
-                  line-height:18px;
-                  letter-spacing:2.7px;
-                  text-transform:uppercase;
-                  color:#eee6c7;
-                  font-weight:bold;
-                "
-              >
-                Natural Medical Solutions
-              </div>
-
-              <div
-                style="
-                  margin-top:5px;
-                  font-family:Georgia,'Times New Roman',serif;
-                  font-size:22px;
-                  line-height:30px;
-                  color:#ffffff;
-                "
-              >
-                Wellness Center
-              </div>
-
-            </td>
-          </tr>
-
-          <!-- GOLD ACCENT -->
-          <tr>
-            <td
-              style="
-                height:5px;
-                background:#c6a968;
-                font-size:0;
-                line-height:0;
-              "
-            >
-              &nbsp;
-            </td>
-          </tr>
-
-          <!-- MAIN MESSAGE -->
-          <tr>
-            <td
-              style="
-                padding:40px 38px 34px;
-              "
-            >
-
-              <div
-                style="
-                  margin-bottom:9px;
-                  font-size:11px;
-                  line-height:18px;
-                  font-weight:bold;
-                  letter-spacing:1.8px;
-                  text-transform:uppercase;
-                  color:#9a8149;
-                "
-              >
-                Appointment Notification
-              </div>
-
-              <h1
-                style="
-                  margin:0 0 20px;
-                  font-family:Georgia,'Times New Roman',serif;
-                  font-size:30px;
-                  line-height:38px;
-                  font-weight:normal;
-                  color:#34382f;
-                "
-              >
-                New Appointment Request
-              </h1>
-
-              <p
-                style="
-                  margin:0 0 18px;
-                  font-size:16px;
-                  line-height:26px;
-                  color:#55584f;
-                "
-              >
-                A new appointment request has been submitted
-                through the Natural Medical Solutions
-                appointment portal.
-              </p>
-
-              <p
-                style="
-                  margin:0 0 28px;
-                  font-size:16px;
-                  line-height:26px;
-                  color:#55584f;
-                "
-              >
-                Please sign in to the secure staff portal to
-                review and process the request.
-              </p>
-
-              <!-- CTA BUTTON -->
-              <table
-                role="presentation"
-                cellspacing="0"
-                cellpadding="0"
-                border="0"
-                style="margin:0 0 30px;"
-              >
-                <tr>
-                  <td
-                    align="center"
-                    style="
-                      background:#66705a;
-                      border-radius:999px;
-                    "
-                  >
-                    <a
-                      href="https://app.natmedsol.org/"
-                      style="
-                        display:inline-block;
-                        padding:15px 28px;
-                        font-size:15px;
-                        line-height:20px;
-                        font-weight:bold;
-                        color:#ffffff;
-                        text-decoration:none;
-                      "
-                    >
-                      Review Appointment Requests
-                    </a>
-                  </td>
-                </tr>
-              </table>
-
-              <!-- PRIVACY CARD -->
-              <table
-                role="presentation"
-                width="100%"
-                cellspacing="0"
-                cellpadding="0"
-                border="0"
-                style="
-                  background:#f8f6ef;
-                  border-left:4px solid #c6a968;
-                  border-radius:8px;
-                "
-              >
-                <tr>
-                  <td
-                    style="
-                      padding:18px 20px;
-                      font-size:13px;
-                      line-height:21px;
-                      color:#68695f;
-                    "
-                  >
-                    <strong
-                      style="color:#4f5248;"
-                    >
-                      Privacy &amp; Security
-                    </strong>
-
-                    <br>
-
-                    For patient privacy, personal information
-                    and appointment details are not included
-                    in this notification. Review request
-                    information only through the secure
-                    staff portal.
-                  </td>
-                </tr>
-              </table>
-
-            </td>
-          </tr>
-
-          <!-- FOOTER -->
-          <tr>
-            <td
-              align="center"
-              style="
-                padding:24px 30px 28px;
-                border-top:1px solid #eee9dd;
-                font-size:12px;
-                line-height:20px;
-                color:#89897f;
-              "
-            >
-              <strong
-                style="color:#62665a;"
-              >
-                Natural Medical Solutions Wellness Center
-              </strong>
-
-              <br>
-
-              Automated staff appointment notification
-            </td>
-          </tr>
-
-        </table>
-
-        <div
-          style="
-            max-width:620px;
-            padding:17px 20px 0;
-            font-size:11px;
-            line-height:18px;
-            color:#99988f;
-            text-align:center;
-          "
-        >
-          This operational notification was generated by
-          the Natural Medical Solutions secure appointment
-          system.
-        </div>
-
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-""",
-            action="appointment_request.new",
-        )
-
-    await db.integration_log.insert_one({
-        "id": new_id(),
-        "service": "sendgrid",
-        "action": "appointment_request_notification",
-        "payload": {
-            "to": notification_email or None,
-            "request_id": doc["id"],
-        },
-        "_stubbed": _delivery == "sent_stub",
-        "delivery_status": _delivery,
-        "ts": datetime.now(timezone.utc),
-    })
-    await log_audit(db, None, payload.email, "appointment_request.create",
-                    resource_type="appointment_request", resource_id=doc["id"],
-                    metadata={"name": payload.fullName},
-                    ip=get_client_ip(request),
-                    user_agent=request.headers.get("user-agent"))
-    return {"ok": True, "id": doc["id"]}
-
-
-# =================== STAFF REVIEW WORKFLOW ===================
 @api.get("/appointment-requests")
-async def list_appointment_requests(status: Optional[str] = None,
-                                    user=Depends(require_roles("admin", "staff", "front_desk", "frontdesk"))):
+async def list_appointment_requests(
+    status: Optional[str] = None,
+    archived: bool = False,
+    user=Depends(require_roles("admin", "staff", "front_desk", "frontdesk")),
+):
     async with AsyncSessionLocal() as pg:
-        rows = await sched_repo.list_appointment_requests(pg, status=status, limit=200)
+        rows = await sched_repo.list_appointment_requests(
+            pg,
+            status=status,
+            archived=archived,
+            limit=200,
+        )
     return rows
 
 
-async def _notify_patient(req_row: dict, action: str, extra: dict | None = None):
+@api.post("/appointment-requests/{req_id}/archive")
+async def archive_appointment_request(
+    req_id: str,
+    request: Request,
+    user=Depends(require_roles("admin", "staff", "front_desk", "frontdesk")),
+):
+    async with AsyncSessionLocal() as pg:
+        req = await sched_repo.get_appointment_request(pg, req_id)
+
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    if req.get("archived_at"):
+        return {"ok": True, "already_archived": True}
+
+    now = datetime.now(timezone.utc)
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.update_appointment_request(
+                pg,
+                req_id,
+                {
+                    "archived_at": now,
+                    "archived_by": user["id"],
+                },
+            )
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "appointment_request.archive",
+        resource_type="appointment_request",
+        resource_id=req_id,
+        metadata={"status": req.get("status")},
+        severity="info",
+        outcome="success",
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    return {"ok": True}
+
+
+@api.post("/appointment-requests/{req_id}/restore")
+async def restore_appointment_request(
+    req_id: str,
+    request: Request,
+    user=Depends(require_roles("admin", "staff", "front_desk", "frontdesk")),
+):
+    async with AsyncSessionLocal() as pg:
+        req = await sched_repo.get_appointment_request(pg, req_id)
+
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    if not req.get("archived_at"):
+        return {"ok": True, "already_active": True}
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            await sched_repo.update_appointment_request(
+                pg,
+                req_id,
+                {
+                    "archived_at": None,
+                    "archived_by": None,
+                },
+            )
+
+    await log_audit(
+        db,
+        user["id"],
+        user["email"],
+        "appointment_request.restore",
+        resource_type="appointment_request",
+        resource_id=req_id,
+        metadata={"status": req.get("status")},
+        severity="info",
+        outcome="success",
+        ip=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    return {"ok": True}
+
+
+async def _notify_patient(
+    req_row: dict,
+    action: str,
+    extra: dict | None = None,
+):
+    from email_templates import appointment_status_notification
     from notifiers import send_email as _send_email
-    subj_map = {
-        "approve": "Your appointment request has been approved",
-        "decline": "Update on your appointment request",
-        "reschedule": "Alternative time for your appointment",
-    }
-    body_map = {
-        "approve": "Great news — your appointment request has been approved. Our staff will contact you shortly with confirmation details.",
-        "decline": "Unfortunately we cannot accommodate your request at this time. Please reply to explore alternative options.",
-        "reschedule": f"We'd like to propose a different time. Suggested: {(extra or {}).get('suggested_time', 'staff will follow up')}.",
-    }
+
+    subject, html, plain_text = appointment_status_notification(
+        action=action,
+        suggested_time=(extra or {}).get("suggested_time"),
+    )
+
     delivery = await _send_email(
         db=db,
         to=req_row.get("email") or "",
-        subject=subj_map.get(action, "Appointment update"),
-        html=body_map.get(action, "Update on your appointment request."),
+        subject=subject,
+        html=html,
+        plain_text=plain_text,
         action=f"appointment_request.{action}",
     )
+
     return delivery
 
 
@@ -1267,6 +944,32 @@ async def _start_campaign_scheduler():
 
     scheduler.add_job(_tick, "interval", minutes=5, id="campaign_scheduler_tick",
                       replace_existing=True, coalesce=True, max_instances=1)
+
+    try:
+        from marketing_os.concierge.scheduler import (
+            reconcile_concierge_knowledge,
+        )
+
+        scheduler.add_job(
+            reconcile_concierge_knowledge,
+            "interval",
+            minutes=15,
+            id="concierge_knowledge_sync",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
+        logger.info(
+            "Concierge knowledge sync scheduled "
+            "(interval=15min)"
+        )
+
+    except Exception:
+        logger.exception(
+            "Failed to register Concierge knowledge sync"
+        )
+
     scheduler.start()
     _campaign_scheduler = scheduler
     logger.info("Campaign scheduler started (interval=5min, mode=internal)")

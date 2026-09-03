@@ -15,6 +15,7 @@ import {
   Video, Calendar, Clock, History, Settings2, Loader2, Play, Mic, MicOff, VideoOff,
   Lock, FileVideo, ExternalLink, Plus, Sparkles, Phone, Wifi, DoorOpen, UserCheck, UserX,
 } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 /**
  * Telehealth Hub — single-purpose page for all telehealth activity.
@@ -28,12 +29,15 @@ export default function TelehealthHub() {
   const [loading, setLoading] = React.useState(true);
   const [filter, setFilter] = React.useState("all");
   const [showInstant, setShowInstant] = React.useState(false);
+  const [historyPage, setHistoryPage] = React.useState(1);
+  const [historySearch, setHistorySearch] = React.useState("");
+  const historyPageSize = 25;
 
   const load = async () => {
     setLoading(true);
     try {
       const r = await api.get("/appointments");
-      setAppts((r.data || []).filter((a) => a.visit_mode === "telehealth"));
+      setAppts(normalizeArray(r.data, ["appts"]).filter((a) => a.visit_mode === "telehealth"));
     } finally { setLoading(false); }
   };
   React.useEffect(() => { load(); const t = setInterval(load, 30_000); return () => clearInterval(t); }, []);
@@ -52,9 +56,19 @@ export default function TelehealthHub() {
     new Date(a.start) >= now &&
     !["completed", "canceled", "no_show"].includes(a.status);
 
-  const isActive = (a) =>
-    !isEnded(a) &&
-    (a.status === "in_session" || a.status === "arrived");
+  const isActive = (a) => {
+    const waitingState = a.waiting_room?.state;
+
+    return (
+      !["ended", "expired", "declined"].includes(
+        waitingState
+      ) &&
+      (
+        a.status === "in_session" ||
+        a.status === "arrived"
+      )
+    );
+  };
 
   const isHistory = (a) =>
     isEnded(a) ||
@@ -65,9 +79,55 @@ export default function TelehealthHub() {
     list.filter((a) => filter === "today" ? new Date(a.start).toDateString() === now.toDateString() :
                        filter === "week" ? (new Date(a.start) - now) / 86_400_000 <= 7 : true);
 
-  const upcoming = filtered(appts.filter(isUpcoming).sort((a, b) => new Date(a.start) - new Date(b.start)));
-  const active = appts.filter(isActive);
-  const history = filtered(appts.filter(isHistory).sort((a, b) => new Date(b.start) - new Date(a.start))).slice(0, 50);
+  const upcoming = filtered(
+    normalizeArray(appts)
+      .filter(isUpcoming)
+      .sort((a, b) => new Date(a.start) - new Date(b.start))
+  );
+
+  const active = normalizeArray(appts).filter(isActive);
+
+  const historyAll = filtered(
+    normalizeArray(appts)
+      .filter(isHistory)
+      .sort((a, b) => new Date(b.start) - new Date(a.start))
+  ).filter((appointment) => {
+    const search = historySearch.trim().toLowerCase();
+
+    if (!search) return true;
+
+    return [
+      appointment.client_name,
+      appointment.practitioner_name,
+      appointment.visit_type,
+      appointment.reason,
+      appointment.status,
+    ].some((value) =>
+      String(value || "").toLowerCase().includes(search)
+    );
+  });
+
+  const historyPageCount = Math.max(
+    1,
+    Math.ceil(historyAll.length / historyPageSize)
+  );
+
+  const safeHistoryPage = Math.min(
+    historyPage,
+    historyPageCount
+  );
+
+  const historyStart =
+    (safeHistoryPage - 1) * historyPageSize;
+
+  const history = historyAll.slice(
+    historyStart,
+    historyStart + historyPageSize
+  );
+
+  React.useEffect(() => {
+    setHistoryPage(1);
+  }, [filter, historySearch]);
 
   return (
     <PortalLayout>
@@ -95,7 +155,7 @@ export default function TelehealthHub() {
 
       <div className="grid sm:grid-cols-3 gap-4 mb-8">
         <StatCard label="Active now" value={active.length} icon={Video} accent={active.length ? "text-[#2f4a3a]" : undefined} />
-        <StatCard label="Starting within 1h" value={appts.filter(inAnHourFromStart).length} icon={Clock} />
+        <StatCard label="Starting within 1h" value={normalizeArray(appts).filter(inAnHourFromStart).length} icon={Clock} />
         <StatCard label="Upcoming total" value={upcoming.length} icon={Calendar} />
       </div>
 
@@ -115,18 +175,84 @@ export default function TelehealthHub() {
         </TabsContent>
 
         <TabsContent value="active" className="mt-4">
-          <VisitList rows={active} loading={false} emptyMsg="No active visits." active />
+          <VisitList
+            rows={active}
+            loading={false}
+            emptyMsg="No active visits."
+            active
+            onChanged={load}
+          />
         </TabsContent>
 
         <TabsContent value="history" className="mt-4">
+          <div className="mb-4 flex flex-col gap-3 rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-4 sm:flex-row sm:items-center sm:justify-between">
+            <Input
+              value={historySearch}
+              onChange={(event) =>
+                setHistorySearch(event.target.value)
+              }
+              placeholder="Search patient, provider, visit type, reason, or status…"
+              className="max-w-xl bg-[#f6f1e6] border-[#e0d6bc]"
+              data-testid="th-history-search"
+            />
+
+            <div className="text-xs text-[#6a6a6a]">
+              {historyAll.length} historical{" "}
+              {historyAll.length === 1 ? "visit" : "visits"}
+            </div>
+          </div>
+
           <VisitList
             rows={history}
             loading={false}
-            emptyMsg="No past telehealth visits yet."
+            emptyMsg="No past telehealth visits match these filters."
             showRecordings={isProvider}
             canArchive={isProvider}
             onChanged={load}
           />
+
+          {historyAll.length > historyPageSize && (
+            <div className="mt-5 flex flex-col items-center justify-between gap-3 rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-4 sm:flex-row">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={safeHistoryPage <= 1}
+                onClick={() =>
+                  setHistoryPage((page) =>
+                    Math.max(1, page - 1)
+                  )
+                }
+                className="rounded-full border-[#8a6a3c] text-[#8a6a3c]"
+                data-testid="th-history-prev"
+              >
+                Previous
+              </Button>
+
+              <div className="text-sm text-[#6a6a6a]">
+                Page {safeHistoryPage} of {historyPageCount}
+              </div>
+
+              <Button
+                type="button"
+                variant="outline"
+                disabled={
+                  safeHistoryPage >= historyPageCount
+                }
+                onClick={() =>
+                  setHistoryPage((page) =>
+                    Math.min(
+                      historyPageCount,
+                      page + 1
+                    )
+                  )
+                }
+                className="rounded-full border-[#8a6a3c] text-[#8a6a3c]"
+                data-testid="th-history-next"
+              >
+                Next
+              </Button>
+            </div>
+          )}
         </TabsContent>
 
         <TabsContent value="equipment" className="mt-4">
@@ -168,6 +294,60 @@ function VisitList({
   );
 }
 
+function DocumentationBadge({ appointment }) {
+  const status =
+    appointment?.telehealth?.documentation_status || "";
+
+  const config = {
+    transcribing: {
+      label: "Transcribing",
+      className:
+        "border-[#8a6a3c] bg-[#f8f1df] text-[#6f542d]",
+    },
+    recording_saved: {
+      label: "Recording saved",
+      className:
+        "border-[#8a6a3c] bg-[#f8f1df] text-[#6f542d]",
+    },
+    soap_review_required: {
+      label: "SOAP Review Required",
+      className:
+        "border-[#c19a4b] bg-[#fff4d8] text-[#7c5a16]",
+    },
+    transcription_failed: {
+      label: "Transcription Failed",
+      className:
+        "border-[#b16a6a] bg-[#fff0f0] text-[#7a2a2a]",
+    },
+    recording_exception: {
+      label: "Recording Exception",
+      className:
+        "border-[#b16a6a] bg-[#fff0f0] text-[#7a2a2a]",
+    },
+    complete: {
+      label: "Documentation Complete",
+      className:
+        "border-[#719078] bg-[#edf6ef] text-[#2f4a3a]",
+    },
+  };
+
+  if (!status || !config[status]) {
+    return null;
+  }
+
+  const item = config[status];
+
+  return (
+    <span
+      className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium ${item.className}`}
+      data-testid={`telehealth-documentation-${status}`}
+    >
+      {item.label}
+    </span>
+  );
+}
+
+
 function VisitCard({
   a,
   canJoin,
@@ -177,13 +357,88 @@ function VisitCard({
   onChanged,
 }) {
   const { toast } = useToast();
+  const navigate = useNavigate();
   const [archiving, setArchiving] = React.useState(false);
+  const [ending, setEnding] = React.useState(false);
+  const [reviewingSoap, setReviewingSoap] =
+    React.useState(false);
   const start = new Date(a.start);
   const now = new Date();
   const minsUntil = Math.round((start - now) / 60_000);
   const joinable = active || (minsUntil >= -10 && minsUntil <= 60);  // 10-min grace, 1h pre
   const dateLabel = start.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
   const timeLabel = start.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+  const endSession = async () => {
+    const confirmed = window.confirm(
+      "End this telehealth session? The visit will move to History and the patient will no longer be able to remain in the active room."
+    );
+
+    if (!confirmed) return;
+
+    setEnding(true);
+
+    try {
+      await api.post(
+        `/appointments/${a.id}/telehealth/end`
+      );
+
+      toast({
+        title: "Telehealth session ended",
+        description:
+          "The visit was moved to History.",
+      });
+
+      await onChanged?.();
+    } catch (error) {
+      toast({
+        title: "Could not end session",
+        description:
+          getErrorMessage(error) || "Try again.",
+      });
+    } finally {
+      setEnding(false);
+    }
+  };
+
+  const reviewSoap = async () => {
+    setReviewingSoap(true);
+
+    try {
+      const response = await api.post(
+        `/visits/${a.id}/promote-soap`
+      );
+
+      const noteId = response?.data?.note_id;
+
+      toast({
+        title: "SOAP ready for review",
+        description:
+          response?.data?.created === false
+            ? "Opening the existing visit note."
+            : "The HealthScribe draft was moved into the permanent clinical-note workflow.",
+      });
+
+      // Open the patient's chart at the Notes section.
+      // The note remains a draft until the assigned provider
+      // explicitly finalizes it.
+      navigate(
+        `/portal/provider/patients/${a.client_id}` +
+          `?note_id=${encodeURIComponent(
+            noteId || ""
+          )}#notes`
+      );
+    } catch (error) {
+      toast({
+        title: "Could not open SOAP review",
+        description:
+          getErrorMessage(error) ||
+          "The SOAP draft could not be promoted.",
+      });
+    } finally {
+      setReviewingSoap(false);
+    }
+  };
 
   const archiveVisit = async () => {
     const confirmed = window.confirm(
@@ -220,9 +475,19 @@ function VisitCard({
         <div className="font-medium text-[#1f2a22]">{a.client_name || a.practitioner_name || "—"}</div>
         <div className="text-sm text-[#6a6a6a] mt-0.5">{a.visit_type || "Telehealth visit"}</div>
         {a.reason && <div className="text-xs text-[#8a6a3c] mt-1 italic truncate">{a.reason}</div>}
-        <div className="flex items-center gap-3 mt-2 text-xs">
-          <span className="inline-flex items-center gap-1 text-[#2f4a3a]"><Lock size={11} /> End-to-end · self-hosted</span>
-          {a.consent_telehealth && <span className="text-[#5b6f5b]">✓ consent on file</span>}
+        <div className="flex flex-wrap items-center gap-3 mt-2 text-xs">
+          <span className="inline-flex items-center gap-1 text-[#2f4a3a]">
+            <Lock size={11} />
+            End-to-end · self-hosted
+          </span>
+
+          {a.consent_telehealth && (
+            <span className="text-[#5b6f5b]">
+              ✓ consent on file
+            </span>
+          )}
+
+          <DocumentationBadge appointment={a} />
         </div>
       </div>
       <div className="flex flex-col items-end gap-2 md:w-44">
@@ -235,6 +500,61 @@ function VisitCard({
             <Video size={14} className="mr-2" /> {active ? "Rejoin" : "Join visit"}
           </Button>
         </Link>
+        {active && (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={endSession}
+            disabled={ending}
+            className="rounded-full h-9 w-full border-[#7a2a2a] text-[#7a2a2a] hover:bg-[#fff5f5]"
+            data-testid={`th-end-${a.id}`}
+          >
+            {ending ? (
+              <>
+                <Loader2
+                  size={13}
+                  className="mr-2 animate-spin"
+                />
+                Ending…
+              </>
+            ) : (
+              <>
+                <DoorOpen size={13} className="mr-2" />
+                End session
+              </>
+            )}
+          </Button>
+        )}
+
+        {a?.telehealth?.documentation_status ===
+          "soap_review_required" && (
+          <Button
+            type="button"
+            onClick={reviewSoap}
+            disabled={reviewingSoap}
+            className="rounded-full h-9 w-full bg-[#c19a4b] hover:bg-[#a8853f] text-[#1f2a22]"
+            data-testid={`telehealth-review-soap-${a.id}`}
+          >
+            {reviewingSoap ? (
+              <>
+                <Loader2
+                  size={13}
+                  className="mr-2 animate-spin"
+                />
+                Opening SOAP…
+              </>
+            ) : (
+              <>
+                <FileText
+                  size={13}
+                  className="mr-2"
+                />
+                Review SOAP
+              </>
+            )}
+          </Button>
+        )}
+
         {showRecordings && (a.recordings || []).length > 0 && (
           <span className="text-xs text-[#6a6a6a] flex items-center gap-1"><FileVideo size={11} /> {a.recordings.length} recording(s)</span>
         )}
@@ -297,7 +617,7 @@ function EquipmentTest() {
   const toggleMic = () => { if (stream) { stream.getAudioTracks().forEach((t) => (t.enabled = !micOn)); setMicOn((v) => !v); } };
   const toggleCam = () => { if (stream) { stream.getVideoTracks().forEach((t) => (t.enabled = !camOn)); setCamOn((v) => !v); } };
 
-  const hasTurn = iceServers.some((s) => (s.urls || "").startsWith("turn:") || (s.urls || "").startsWith("turns:"));
+  const hasTurn = normalizeArray(iceServers).some((s) => (s.urls || "").startsWith("turn:") || (s.urls || "").startsWith("turns:"));
 
   return (
     <div className="grid lg:grid-cols-[2fr_1fr] gap-6" data-testid="equipment-panel">
@@ -325,7 +645,7 @@ function EquipmentTest() {
       <div className="space-y-4">
         <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5">
           <div className="eyebrow text-[#8a6a3c] mb-3">Network</div>
-          <Diag label="STUN servers" value={`${iceServers.filter((s) => (s.urls || "").startsWith("stun")).length} configured`} ok />
+          <Diag label="STUN servers" value={`${normalizeArray(iceServers).filter((s) => (s.urls || "").startsWith("stun")).length} configured`} ok />
           <Diag label="TURN relay" value={hasTurn ? "configured" : "not configured (STUN only)"} ok={hasTurn} warn={!hasTurn} />
           <Diag label="Browser" value={navigator.userAgent.split(" ").slice(-2)[0]} ok />
           <div className="text-xs text-[#6a6a6a] mt-3 flex items-center gap-1">
@@ -463,7 +783,7 @@ function InstantVisitDialog({ open, onOpenChange, onCreated }) {
   const [form, setForm] = React.useState({ client_id: "", reason: "", duration: 30 });
   const [submitting, setSubmitting] = React.useState(false);
 
-  React.useEffect(() => { if (open) api.get("/clients").then((r) => setClients(r.data || [])); }, [open]);
+  React.useEffect(() => { if (open) api.get("/clients").then((r) => setClients(normalizeArray(r.data, ["clients"]))); }, [open]);
 
   const submit = async () => {
     if (!form.client_id) { toast({ title: "Select a patient" }); return; }
@@ -513,7 +833,7 @@ function InstantVisitDialog({ open, onOpenChange, onCreated }) {
             <Label>Patient</Label>
             <Select value={form.client_id} onValueChange={(v) => setForm({ ...form, client_id: v })}>
               <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="th-instant-client"><SelectValue placeholder="Select patient…" /></SelectTrigger>
-              <SelectContent>{clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}</SelectContent>
+              <SelectContent>{normalizeArray(clients).map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}</SelectContent>
             </Select>
           </div>
           <div><Label>Reason</Label><Input className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} placeholder="Optional" /></div>
@@ -542,7 +862,7 @@ function WaitingRoomQueue() {
   const load = React.useCallback(async () => {
     try {
       const r = await api.get("/telehealth/waiting-room/queue");
-      setQueue(r.data || []);
+      setQueue(normalizeArray(r.data, ["queue"]));
     } catch {
       // 403 for staff/etc — silently ignore
     }
@@ -592,7 +912,7 @@ function WaitingRoomQueue() {
         <div className="eyebrow text-[#8a6a3c]">Waiting room ({queue.length})</div>
       </div>
       <div className="space-y-3">
-        {queue.map((q) => (
+        {normalizeArray(queue).map((q) => (
           <div key={q.appointment_id} className="flex flex-col md:flex-row md:items-center gap-3 border-t border-[#e7dfc9] pt-3 first:border-t-0 first:pt-0" data-testid={`waiting-row-${q.appointment_id}`}>
             <div className="flex-1 min-w-0">
               <div className="font-medium text-[#1f2a22]">{q.client_name || "Patient"}</div>

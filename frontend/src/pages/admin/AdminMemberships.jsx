@@ -5,11 +5,12 @@ import { Button } from "../../components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
 import { useToast } from "../../hooks/use-toast";
 import { Crown } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 export default function AdminMemberships() {
   const { toast } = useToast();
   const [items, setItems] = React.useState([]);
-  const load = () => api.get("/memberships").then((r) => setItems(r.data || []));
+  const load = () => api.get("/memberships").then((r) => setItems(normalizeArray(r.data, ["items"])));
   React.useEffect(() => { load(); }, []);
 
   const setStatus = async (m, status) => {
@@ -42,7 +43,7 @@ export default function AdminMemberships() {
               </tr>
             </thead>
             <tbody>
-              {items.map((m) => (
+              {normalizeArray(items).map((m) => (
                 <tr key={m.id} className="border-t border-[#e7dfc9]">
                   <td className="py-3 px-4">{m.client_name || "—"}</td>
                   <td className="py-3 px-4 capitalize">{m.tier}</td>

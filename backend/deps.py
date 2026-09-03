@@ -87,6 +87,8 @@ def to_user_out(user) -> dict:
         "mfa_enabled": user.get("mfa_enabled", False),
         "is_active": user.get("is_active", True),
         "must_change_password": user.get("must_change_password", False),
+        "onboarding_status": user.get("onboarding_status"),
+        "temporary_password_expires_at": user.get("temporary_password_expires_at"),
         "created_at": user.get("created_at"),
         "last_login_at": user.get("last_login_at"),
     }

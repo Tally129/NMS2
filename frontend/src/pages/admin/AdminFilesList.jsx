@@ -4,6 +4,7 @@ import PortalLayout, { PortalHeader } from "../PortalLayout";
 import api from "../../lib/api";
 import { Input } from "../../components/ui/input";
 import { FileText, Search, Loader2, Download } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 export default function AdminFilesList() {
   const [rows, setRows] = React.useState([]);
@@ -14,12 +15,12 @@ export default function AdminFilesList() {
     setLoading(true);
     try {
       const r = await api.get("/files");
-      setRows(r.data || []);
+      setRows(normalizeArray(r.data, ["rows"]));
     } finally { setLoading(false); }
   };
   React.useEffect(() => { load(); }, []);
 
-  const filtered = rows.filter((f) =>
+  const filtered = normalizeArray(rows).filter((f) =>
     !search ||
     (f.filename || "").toLowerCase().includes(search.toLowerCase()) ||
     (f.uploaded_by_name || "").toLowerCase().includes(search.toLowerCase())

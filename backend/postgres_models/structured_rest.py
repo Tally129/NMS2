@@ -77,7 +77,7 @@ class AccountingBackfillRun(_Ph36Base, Base):
 class AccountingEvent(_Ph36Base, Base):
     __tablename__ = "emr_accounting_events"
     idempotency_key: Mapped[Optional[str]] = mapped_column(
-        String(200), nullable=True, index=True,
+        String(200), nullable=True, index=True, unique=True,
     )
 
 

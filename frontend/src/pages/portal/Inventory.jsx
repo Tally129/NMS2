@@ -6,8 +6,20 @@ import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../../components/ui/dialog";
 import { useToast } from "../../hooks/use-toast";
-import { Plus, Pencil, AlertTriangle, Boxes, Sliders, Calendar as CalendarIcon, Search } from "lucide-react";
+import {
+  Plus,
+  Pencil,
+  AlertTriangle,
+  Boxes,
+  Sliders,
+  Calendar as CalendarIcon,
+  Search,
+  Archive,
+  RotateCcw,
+  Trash2,
+} from "lucide-react";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
 
 const empty = { name: "", sku: "", category: "", stock: 0, unit_price: 0, low_stock_threshold: 5, active: true };
 const emptyLot = { lot_number: "", qty: 1, expires_on: "", note: "" };
@@ -24,24 +36,59 @@ export default function Inventory() {
   const [lotForm, setLotForm] = React.useState(emptyLot);
   const [expiring, setExpiring] = React.useState([]);
   const [q, setQ] = React.useState("");
+  const [categoryFilter, setCategoryFilter] = React.useState("all");
+  const [statusFilter, setStatusFilter] = React.useState("active");
+  const [archiveTarget, setArchiveTarget] = React.useState(null);
+  const [archiving, setArchiving] = React.useState(false);
 
   const load = () => {
-    api.get("/inventory").then((r) => setItems(r.data || [])).finally(() => setLoading(false));
-    api.get("/inventory/expiring?days=60").then((r) => setExpiring(r.data || [])).catch(() => {});
+    api.get("/inventory").then((r) => setItems(normalizeArray(r.data, ["items"]))).finally(() => setLoading(false));
+    api.get("/inventory/expiring?days=60").then((r) => setExpiring(normalizeArray(r.data, ["expiring"]))).catch(() => {});
   };
   React.useEffect(() => { load(); }, []);
 
-  const filtered = React.useMemo(() => {
-    const s = q.trim().toLowerCase();
-    if (!s) return items;
-    return items.filter((i) =>
-      (i.name || "").toLowerCase().includes(s) ||
-      (i.sku || "").toLowerCase().includes(s) ||
-      (i.category || "").toLowerCase().includes(s)
-    );
-  }, [items, q]);
+  const categories = React.useMemo(() => {
+    return [...new Set(
+      normalizeArray(items)
+        .map((item) => (item.category || "").trim())
+        .filter(Boolean)
+    )].sort((a, b) => a.localeCompare(b));
+  }, [items]);
 
-  const lowStock = items.filter((i) => (i.stock || 0) <= (i.low_stock_threshold || 5));
+  const filtered = React.useMemo(() => {
+    const search = q.trim().toLowerCase();
+
+    return normalizeArray(items).filter((item) => {
+      const matchesSearch =
+        !search ||
+        (item.name || "").toLowerCase().includes(search) ||
+        (item.sku || "").toLowerCase().includes(search) ||
+        (item.category || "").toLowerCase().includes(search);
+
+      const matchesCategory =
+        categoryFilter === "all" ||
+        item.category === categoryFilter;
+
+      const isArchived = item.active === false;
+
+      const matchesStatus =
+        statusFilter === "all" ||
+        (statusFilter === "active" && !isArchived) ||
+        (statusFilter === "archived" && isArchived);
+
+      return matchesSearch && matchesCategory && matchesStatus;
+    });
+  }, [items, q, categoryFilter, statusFilter]);
+
+  const activeItems = normalizeArray(items).filter(
+    (item) => item.active !== false
+  );
+
+  const lowStock = activeItems.filter(
+    (item) =>
+      (item.stock || 0) <=
+      (item.low_stock_threshold || 5)
+  );
 
   const openNew = () => { setEdit("new"); setForm(empty); };
   const openEdit = (i) => { setEdit(i.id); setForm({ ...empty, ...i }); };
@@ -95,6 +142,49 @@ export default function Inventory() {
     } catch (e) { toast({ title: "Failed", description: getErrorMessage(e) || "" }); }
   };
 
+  const archiveItem = async () => {
+    if (!archiveTarget) return;
+
+    setArchiving(true);
+
+    try {
+      await api.delete(`/inventory/${archiveTarget.id}`);
+
+      toast({
+        title: "Item archived",
+        description: `${archiveTarget.name} was removed from active inventory.`,
+      });
+
+      setArchiveTarget(null);
+      load();
+    } catch (error) {
+      toast({
+        title: "Archive failed",
+        description: getErrorMessage(error) || "",
+      });
+    } finally {
+      setArchiving(false);
+    }
+  };
+
+  const restoreItem = async (item) => {
+    try {
+      await api.post(`/inventory/${item.id}/restore`);
+
+      toast({
+        title: "Item restored",
+        description: `${item.name} is active again.`,
+      });
+
+      load();
+    } catch (error) {
+      toast({
+        title: "Restore failed",
+        description: getErrorMessage(error) || "",
+      });
+    }
+  };
+
   return (
     <PortalLayout>
       <PortalHeader
@@ -110,7 +200,7 @@ export default function Inventory() {
       <div className="grid sm:grid-cols-3 gap-4 mb-6">
         <StatCard label="Total items" value={items.length} icon={Boxes} />
         <StatCard label="Low stock" value={lowStock.length} icon={AlertTriangle} accent={lowStock.length ? "text-[#7a2a2a]" : ""} />
-        <StatCard label="Stock value" value={`$${items.reduce((s, i) => s + (i.stock || 0) * (i.unit_price || 0), 0).toFixed(2)}`} icon={Boxes} />
+        <StatCard label="Stock value" value={`$${normalizeArray(items).reduce((s, i) => s + (i.stock || 0) * (i.unit_price || 0), 0).toFixed(2)}`} icon={Boxes} />
       </div>
 
       {lowStock.length > 0 && (
@@ -132,22 +222,52 @@ export default function Inventory() {
             <CalendarIcon size={16} /> Expiring within 60 days
           </div>
           <div className="text-[#6a4f1d] space-y-1">
-            {expiring.map((i) => (
+            {normalizeArray(expiring).map((i) => (
               <div key={i.id}>· <strong>{i.name}</strong> · lot {i.expiring_lot?.lot_number || "—"} · qty {i.expiring_lot?.qty} · expires {i.expiring_lot?.expires_on}</div>
             ))}
           </div>
         </div>
       )}
 
-      <div className="mb-4 relative max-w-md">
-        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8a6a3c]" />
-        <Input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search by name, SKU, or category…"
-          className="pl-9 bg-[#fbf7ee] border-[#e0d6bc]"
-          data-testid="inventory-search-input"
-        />
+      <div className="mb-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_220px_180px]">
+        <div className="relative">
+          <Search
+            size={16}
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8a6a3c]"
+          />
+          <Input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search by name, SKU, or category…"
+            className="pl-9 bg-[#fbf7ee] border-[#e0d6bc]"
+            data-testid="inventory-search-input"
+          />
+        </div>
+
+        <select
+          value={categoryFilter}
+          onChange={(e) => setCategoryFilter(e.target.value)}
+          className="h-10 rounded-md border border-[#e0d6bc] bg-[#fbf7ee] px-3 text-sm text-[#1f2a22]"
+          data-testid="inventory-category-filter"
+        >
+          <option value="all">All categories</option>
+          {categories.map((category) => (
+            <option key={category} value={category}>
+              {category}
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          className="h-10 rounded-md border border-[#e0d6bc] bg-[#fbf7ee] px-3 text-sm text-[#1f2a22]"
+          data-testid="inventory-status-filter"
+        >
+          <option value="active">Active items</option>
+          <option value="archived">Archived items</option>
+          <option value="all">All statuses</option>
+        </select>
       </div>
 
       <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] overflow-hidden" data-testid="inventory-table">
@@ -185,9 +305,39 @@ export default function Inventory() {
                     <Button size="sm" variant="outline" className="h-7 rounded-full text-xs border-[#c19a4b] text-[#8a6a3c]" onClick={() => setAdjust(i)} data-testid={`inv-adjust-${i.id}`}>
                       <Sliders size={12} className="mr-1" /> Adjust
                     </Button>
-                    <Button size="sm" variant="outline" className="h-7 rounded-full text-xs border-[#2f4a3a] text-[#2f4a3a]" onClick={() => openEdit(i)} data-testid={`inv-edit-${i.id}`}>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 rounded-full text-xs border-[#2f4a3a] text-[#2f4a3a]"
+                      onClick={() => openEdit(i)}
+                      data-testid={`inv-edit-${i.id}`}
+                    >
                       <Pencil size={12} />
                     </Button>
+
+                    {i.active === false ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 rounded-full text-xs border-[#2f4a3a] text-[#2f4a3a]"
+                        onClick={() => restoreItem(i)}
+                        data-testid={`inv-restore-${i.id}`}
+                      >
+                        <RotateCcw size={12} className="mr-1" />
+                        Restore
+                      </Button>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 rounded-full text-xs border-[#7a2a2a] text-[#7a2a2a]"
+                        onClick={() => setArchiveTarget(i)}
+                        data-testid={`inv-archive-${i.id}`}
+                      >
+                        <Archive size={12} className="mr-1" />
+                        Archive
+                      </Button>
+                    )}
                   </td>
                 </tr>
               );

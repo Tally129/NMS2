@@ -9,6 +9,7 @@ import { useToast } from "../hooks/use-toast";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceArea } from "recharts";
 import { Plus, Trash2 } from "lucide-react";
 import { getErrorMessage } from "../lib/errors";
+import { normalizeArray } from "../lib/collections";
 
 export default function LabsPanel({ clientId }) {
   const { toast } = useToast();
@@ -25,7 +26,7 @@ export default function LabsPanel({ clientId }) {
   });
 
   const load = React.useCallback(() => {
-    api.get("/lab-values", { params: { client_id: clientId } }).then((r) => setLabs(r.data || []));
+    api.get("/lab-values", { params: { client_id: clientId } }).then((r) => setLabs(normalizeArray(r.data, ["labs"])));
   }, [clientId]);
 
   React.useEffect(() => {
@@ -92,11 +93,11 @@ export default function LabsPanel({ clientId }) {
           <div className="md:col-span-2">
             <Label>Test</Label>
             <Select value={form.test_name} onValueChange={(v) => {
-              const p = presets.find((x) => x.test_name === v);
+              const p = normalizeArray(presets).find((x) => x.test_name === v);
               if (p) applyPreset(p); else setForm({ ...form, test_name: v });
             }}>
               <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]"><SelectValue /></SelectTrigger>
-              <SelectContent>{presets.map((p) => <SelectItem key={p.test_name} value={p.test_name}>{p.test_name}</SelectItem>)}</SelectContent>
+              <SelectContent>{normalizeArray(presets).map((p) => <SelectItem key={p.test_name} value={p.test_name}>{p.test_name}</SelectItem>)}</SelectContent>
             </Select>
           </div>
           <div><Label>Value</Label><Input className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" type="number" step="any" value={form.value} onChange={(e) => setForm({ ...form, value: e.target.value })} /></div>

@@ -1,5 +1,5 @@
 import React from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useSearchParams } from "react-router-dom";
 import PortalLayout, { PortalHeader } from "../PortalLayout";
 import api, { downloadBlob } from "../../lib/api";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../../components/ui/tabs";
@@ -16,9 +16,13 @@ import { AuthorizationBadge, useDelegatedEdit } from "../../components/Authoriza
 import PortalAccessPanel from "../../components/PortalAccessPanel";
 import { useAuth } from "../../lib/auth";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
+import PatientVitalsPanel from "../../components/clinical/PatientVitalsPanel";
 
 export default function PatientChart() {
   const { id } = useParams();
+  const [searchParams] = useSearchParams();
+  const requestedNoteId = searchParams.get("note_id") || "";
   const { toast } = useToast();
   const { user } = useAuth();
   const role = user?.role;
@@ -41,6 +45,16 @@ export default function PatientChart() {
   const [amending, setAmending] = React.useState({});
   const [showNew, setShowNew] = React.useState(false);
   const [newNote, setNewNote] = React.useState({ subjective: "", objective: "", assessment: "", plan: "" });
+  const [editingNoteId, setEditingNoteId] = React.useState("");
+  const [editNote, setEditNote] = React.useState({
+    subjective: "",
+    objective: "",
+    assessment: "",
+    plan: "",
+  });
+  const [savingNoteId, setSavingNoteId] = React.useState("");
+  const [finalizingNoteId, setFinalizingNoteId] =
+    React.useState("");
   const [uploading, setUploading] = React.useState(false);
   const fileRef = React.useRef(null);
 
@@ -232,6 +246,100 @@ export default function PatientChart() {
     }
   };
 
+  const beginEditNote = (note) => {
+    setEditingNoteId(note.id);
+    setEditNote({
+      subjective: note.subjective || "",
+      objective: note.objective || "",
+      assessment: note.assessment || "",
+      plan: note.plan || "",
+    });
+  };
+
+  const cancelEditNote = () => {
+    setEditingNoteId("");
+    setEditNote({
+      subjective: "",
+      objective: "",
+      assessment: "",
+      plan: "",
+    });
+  };
+
+  const saveDraftNote = async (note) => {
+    setSavingNoteId(note.id);
+
+    try {
+      await api.put(`/notes/${note.id}`, {
+        ...editNote,
+      });
+
+      toast({
+        title: "SOAP draft saved",
+        description:
+          "The note remains a draft until the assigned provider finalizes it.",
+      });
+
+      setEditingNoteId("");
+      await loadAll();
+    } catch (error) {
+      toast({
+        title: "Could not save SOAP draft",
+        description:
+          getErrorMessage(error) || "Try again.",
+      });
+    } finally {
+      setSavingNoteId("");
+    }
+  };
+
+  const finalizeNote = async (note) => {
+    if (!isProvider) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Finalize and sign this SOAP note? " +
+        "After finalization, the original note becomes immutable " +
+        "and future changes must be entered as amendments."
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setFinalizingNoteId(note.id);
+
+    try {
+      // Save any open edits before signing.
+      if (editingNoteId === note.id) {
+        await api.put(`/notes/${note.id}`, {
+          ...editNote,
+        });
+      }
+
+      await api.post(`/notes/${note.id}/finalize`);
+
+      toast({
+        title: "SOAP note finalized",
+        description: note.appointment_id
+          ? "The note is signed and the telehealth documentation workflow has been completed."
+          : "The clinical note is now finalized and immutable.",
+      });
+
+      setEditingNoteId("");
+      await loadAll();
+    } catch (error) {
+      toast({
+        title: "Could not finalize SOAP note",
+        description:
+          getErrorMessage(error) || "Try again.",
+      });
+    } finally {
+      setFinalizingNoteId("");
+    }
+  };
+
   const addAmendment = async (noteId) => {
     const content = amending[noteId];
     if (!content) return;
@@ -283,6 +391,50 @@ export default function PatientChart() {
       ?.click();
   };
 
+  React.useEffect(() => {
+    if (!requestedNoteId || loading) {
+      return;
+    }
+
+    openChartTab("notes");
+
+    const requestedNote = normalizeArray(
+      notes,
+      ["notes", "items"]
+    ).find(
+      (note) =>
+        String(note.id) === String(requestedNoteId)
+    );
+
+    // Telehealth Review SOAP should open the exact promoted
+    // VisitNote directly into edit mode while it is still a draft.
+    if (
+      requestedNote &&
+      requestedNote.status !== "finalized" &&
+      editingNoteId !== requestedNote.id
+    ) {
+      beginEditNote(requestedNote);
+    }
+
+    const timer = window.setTimeout(() => {
+      document
+        .getElementById(
+          `soap-note-${requestedNoteId}`
+        )
+        ?.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+    }, 150);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    requestedNoteId,
+    loading,
+    notes,
+    editingNoteId,
+  ]);
+
   const now = new Date();
 
   const nextAppointment = [...summaryData.appointments]
@@ -321,7 +473,7 @@ export default function PatientChart() {
       )
   )[0];
 
-  const balanceDue = summaryData.invoices
+  const balanceDue = normalizeArray(summaryData.invoices)
     .filter((invoice) => invoice.status !== "paid")
     .reduce(
       (total, invoice) =>
@@ -384,6 +536,7 @@ export default function PatientChart() {
         <TabsList className="bg-[#f1ead8] p-1 rounded-full flex-wrap h-auto">
           <TabsTrigger value="summary" className="rounded-full px-4">Summary</TabsTrigger>
           <TabsTrigger value="timeline" className="rounded-full px-4">Timeline</TabsTrigger>
+          <TabsTrigger value="vitals" className="rounded-full px-4">Vitals</TabsTrigger>
           <TabsTrigger value="intake" className="rounded-full px-4">Intake</TabsTrigger>
           <TabsTrigger value="notes" className="rounded-full px-4">SOAP Notes</TabsTrigger>
           <TabsTrigger value="plan" className="rounded-full px-4">Treatment Plan</TabsTrigger>
@@ -443,7 +596,9 @@ export default function PatientChart() {
                 </Button>
               </Link>
 
-              <Link to="/portal/messages">
+              <Link
+                to={`/portal/provider/messages?client_id=${encodeURIComponent(id)}`}
+              >
                 <Button
                   type="button"
                   variant="outline"
@@ -651,7 +806,7 @@ export default function PatientChart() {
             <div className="relative space-y-4">
               <div className="absolute left-[19px] top-5 bottom-5 w-px bg-[#e0d6bc]" />
 
-              {timeline.map((item) => {
+              {normalizeArray(timeline).map((item) => {
                 const labels = {
                   appointment: "Appointment",
                   soap: "SOAP note",
@@ -792,6 +947,19 @@ export default function PatientChart() {
           )}
         </TabsContent>
 
+        <TabsContent value="vitals" className="mt-6">
+          <PatientVitalsPanel
+            clientId={id}
+            editable={[
+              "admin",
+              "practitioner",
+              "medical_assistant",
+              "staff",
+            ].includes(role)}
+            variant="light"
+          />
+        </TabsContent>
+
         <TabsContent value="intake" className="mt-6">
           {!intake ? (
             <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-8 text-[#6a6a6a]">No intake submitted yet.</div>
@@ -840,16 +1008,181 @@ export default function PatientChart() {
 
           {notes.length === 0 && <div className="text-[#6a6a6a] text-sm">No notes yet.</div>}
 
-          {notes.map((n) => (
-            <article key={n.id} className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-6">
+          {normalizeArray(notes).map((n) => (
+            <article
+              key={n.id}
+              id={`soap-note-${n.id}`}
+              className={`rounded-2xl border bg-[#fbf7ee] p-6 ${
+                requestedNoteId === n.id
+                  ? "border-[#c19a4b] ring-2 ring-[#c19a4b]/30"
+                  : "border-[#e7dfc9]"
+              }`}
+              data-testid={`soap-note-${n.id}`}
+            >
               <header className="flex flex-col md:flex-row md:items-center md:justify-between mb-3">
                 <div className="text-xs tracking-widest uppercase text-[#8a6a3c]">{new Date(n.created_at).toLocaleString()}</div>
                 <div className="text-sm text-[#3a3a3a]">By {n.practitioner_name || "Practitioner"}</div>
               </header>
-              <SoapDisplay label="Subjective" value={n.subjective} />
-              <SoapDisplay label="Objective" value={n.objective} />
-              <SoapDisplay label="Assessment" value={n.assessment} />
-              <SoapDisplay label="Plan" value={n.plan} />
+              <div className="mb-4 flex flex-wrap items-center gap-2">
+                <span
+                  className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium ${
+                    n.status === "finalized"
+                      ? "border-[#719078] bg-[#edf6ef] text-[#2f4a3a]"
+                      : "border-[#c19a4b] bg-[#fff4d8] text-[#7c5a16]"
+                  }`}
+                >
+                  {n.status === "finalized"
+                    ? "Finalized"
+                    : "Draft"}
+                </span>
+
+                {n.appointment_id && (
+                  <span className="text-xs text-[#6a6a6a]">
+                    Linked to visit
+                  </span>
+                )}
+              </div>
+
+              {editingNoteId === n.id &&
+              n.status !== "finalized" ? (
+                <div className="space-y-3">
+                  <SoapInput
+                    label="Subjective"
+                    value={editNote.subjective}
+                    onChange={(value) =>
+                      setEditNote({
+                        ...editNote,
+                        subjective: value,
+                      })
+                    }
+                  />
+
+                  <SoapInput
+                    label="Objective"
+                    value={editNote.objective}
+                    onChange={(value) =>
+                      setEditNote({
+                        ...editNote,
+                        objective: value,
+                      })
+                    }
+                  />
+
+                  <SoapInput
+                    label="Assessment"
+                    value={editNote.assessment}
+                    onChange={(value) =>
+                      setEditNote({
+                        ...editNote,
+                        assessment: value,
+                      })
+                    }
+                  />
+
+                  <SoapInput
+                    label="Plan"
+                    value={editNote.plan}
+                    onChange={(value) =>
+                      setEditNote({
+                        ...editNote,
+                        plan: value,
+                      })
+                    }
+                  />
+
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={cancelEditNote}
+                      disabled={savingNoteId === n.id}
+                      className="rounded-full"
+                    >
+                      Cancel
+                    </Button>
+
+                    <Button
+                      type="button"
+                      onClick={() => saveDraftNote(n)}
+                      disabled={savingNoteId === n.id}
+                      className="rounded-full bg-[#c19a4b] hover:bg-[#a8853f] text-[#1f2a22]"
+                      data-testid={`soap-save-draft-${n.id}`}
+                    >
+                      <Save size={15} className="mr-2" />
+                      {savingNoteId === n.id
+                        ? "Saving…"
+                        : "Save Draft"}
+                    </Button>
+
+                    {isProvider && (
+                      <Button
+                        type="button"
+                        onClick={() => finalizeNote(n)}
+                        disabled={
+                          savingNoteId === n.id ||
+                          finalizingNoteId === n.id
+                        }
+                        className="rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]"
+                        data-testid={`soap-finalize-${n.id}`}
+                      >
+                        {finalizingNoteId === n.id
+                          ? "Finalizing…"
+                          : "Finalize & Sign"}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <SoapDisplay
+                    label="Subjective"
+                    value={n.subjective}
+                  />
+                  <SoapDisplay
+                    label="Objective"
+                    value={n.objective}
+                  />
+                  <SoapDisplay
+                    label="Assessment"
+                    value={n.assessment}
+                  />
+                  <SoapDisplay
+                    label="Plan"
+                    value={n.plan}
+                  />
+
+                  {n.status !== "finalized" && (
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => beginEditNote(n)}
+                        disabled={!canEdit}
+                        className="rounded-full border-[#8a6a3c] text-[#8a6a3c]"
+                        data-testid={`soap-edit-${n.id}`}
+                      >
+                        Edit Draft
+                      </Button>
+
+                      {isProvider && (
+                        <Button
+                          type="button"
+                          onClick={() => finalizeNote(n)}
+                          disabled={
+                            finalizingNoteId === n.id
+                          }
+                          className="rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]"
+                          data-testid={`soap-finalize-${n.id}`}
+                        >
+                          {finalizingNoteId === n.id
+                            ? "Finalizing…"
+                            : "Finalize & Sign"}
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
 
               {(n.amendments || []).length > 0 && (
                 <div className="mt-4 border-t border-[#e7dfc9] pt-3">
@@ -923,7 +1256,7 @@ export default function PatientChart() {
                   </tr>
                 </thead>
                 <tbody>
-                  {files.map((f) => (
+                  {normalizeArray(files).map((f) => (
                     <tr key={f.id} className="border-t border-[#e7dfc9]">
                       <td className="py-3 px-4">{f.filename}</td>
                       <td className="py-3 px-4 capitalize text-[#6a6a6a]">{f.category}</td>
@@ -992,7 +1325,7 @@ function PatientBillingTab({ clientId }) {
   const [form, setForm] = React.useState({ description: "", amount: "" });
 
   const load = React.useCallback(() => {
-    api.get("/invoices", { params: { client_id: clientId } }).then((r) => setInvoices(r.data || []));
+    api.get("/invoices", { params: { client_id: clientId } }).then((r) => setInvoices(normalizeArray(r.data, ["invoices"])));
   }, [clientId]);
   React.useEffect(() => { load(); }, [load]);
 
@@ -1052,7 +1385,7 @@ function PatientBillingTab({ clientId }) {
               </tr>
             </thead>
             <tbody>
-              {invoices.map((i) => (
+              {normalizeArray(invoices).map((i) => (
                 <tr key={i.id} className="border-t border-[#e7dfc9]">
                   <td className="py-3 px-4 text-[#6a6a6a]">{new Date(i.created_at).toLocaleDateString()}</td>
                   <td className="py-3 px-4">{i.description}</td>

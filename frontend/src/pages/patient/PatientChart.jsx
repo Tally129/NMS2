@@ -2,6 +2,7 @@ import React from "react";
 import PortalLayout, { PortalHeader } from "../PortalLayout";
 import api from "../../lib/api";
 import { FileText } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 export default function PatientChart() {
   const [client, setClient] = React.useState(null);
@@ -14,7 +15,7 @@ export default function PatientChart() {
         const me = await api.get("/clients/me");
         setClient(me.data);
         const n = await api.get("/notes", { params: { client_id: me.data.id } });
-        setNotes(n.data || []);
+        setNotes(normalizeArray(n.data, ["notes"]));
       } finally {
         setLoading(false);
       }
@@ -33,7 +34,7 @@ export default function PatientChart() {
         </div>
       ) : (
         <div className="space-y-4">
-          {notes.map((n) => (
+          {normalizeArray(notes).map((n) => (
             <article key={n.id} className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-6">
               <header className="flex flex-col md:flex-row md:items-center md:justify-between mb-3">
                 <div className="text-xs tracking-widest uppercase text-[#8a6a3c]">

@@ -21,6 +21,7 @@ import {
   Sparkles,
   Target,
 } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 const INITIAL_FORM = {
   name: "",
@@ -28,7 +29,7 @@ const INITIAL_FORM = {
   services: "",
   audiences: "",
   brand_voice: "Educational, professional, premium, warm, non-pushy",
-  channels: "email, instagram, facebook, blog",
+  channels: "email, instagram, facebook, tiktok, blog",
   duration_days: 30,
   posts_per_week: 4,
   emails_per_month: 2,
@@ -337,7 +338,7 @@ export default function ContentStrategist() {
               </div>
             )}
 
-            {strategies.map((strategy) => {
+            {normalizeArray(strategies).map((strategy) => {
               const active =
                 selected?.id === strategy.id &&
                 !showCreate;
@@ -534,7 +535,7 @@ function CreateStrategyForm({
               update("channels", event.target.value)
             }
             rows={3}
-            placeholder="email, instagram, facebook, blog"
+            placeholder="email, instagram, facebook, tiktok, blog"
           />
         </Field>
 
@@ -933,6 +934,756 @@ function StrategyPlan({ plan, strategyId }) {
   const [draftLoading, setDraftLoading] = React.useState(false);
   const [savingDraft, setSavingDraft] = React.useState(false);
   const [selectedVariation, setSelectedVariation] = React.useState(0);
+
+  const [contentAssets, setContentAssets] = React.useState([]);
+  const [loadingAssets, setLoadingAssets] = React.useState(false);
+  const [assetActionId, setAssetActionId] = React.useState(null);
+  const [editingAsset, setEditingAsset] = React.useState(null);
+  const [generatingWeek, setGeneratingWeek] = React.useState(false);
+
+  // Content Library review controls.
+  const [libraryWeekFilter, setLibraryWeekFilter] =
+    React.useState("all");
+  const [libraryTypeFilter, setLibraryTypeFilter] =
+    React.useState("all");
+  const [libraryStatusFilter, setLibraryStatusFilter] =
+    React.useState("all");
+  const [selectedAssetIds, setSelectedAssetIds] =
+    React.useState([]);
+  const [bulkAssetAction, setBulkAssetAction] =
+    React.useState(null);
+
+  // Publishing Queue controls.
+  const [publishingQueue, setPublishingQueue] =
+    React.useState([]);
+  const [
+    loadingPublishingQueue,
+    setLoadingPublishingQueue,
+  ] = React.useState(false);
+  const [
+    publishingQueueActionId,
+    setPublishingQueueActionId,
+  ] = React.useState(null);
+
+  const [
+    publishingScheduleInputs,
+    setPublishingScheduleInputs,
+  ] = React.useState({});
+
+  const [
+    publishingStatusFilter,
+    setPublishingStatusFilter,
+  ] = React.useState("all");
+
+  const [
+    publishingPlatformFilter,
+    setPublishingPlatformFilter,
+  ] = React.useState("all");
+
+  const filteredPublishingQueue = React.useMemo(
+    () =>
+      normalizeArray(publishingQueue).filter(
+        (item) => {
+          const statusMatches =
+            publishingStatusFilter === "all" ||
+            item?.status ===
+              publishingStatusFilter;
+
+          const platformMatches =
+            publishingPlatformFilter === "all" ||
+            String(
+              item?.platform || ""
+            ).toLowerCase() ===
+              publishingPlatformFilter;
+
+          return (
+            statusMatches &&
+            platformMatches
+          );
+        }
+      ),
+    [
+      publishingQueue,
+      publishingStatusFilter,
+      publishingPlatformFilter,
+    ]
+  );
+
+  const loadPublishingQueue = React.useCallback(
+    async () => {
+      setLoadingPublishingQueue(true);
+
+      try {
+        const response = await api.get(
+          "/publishing-queue",
+          {
+            params: {
+              strategy_id: strategyId,
+              limit: 200,
+            },
+          }
+        );
+
+        setPublishingQueue(
+          normalizeArray(response.data)
+        );
+      } catch (error) {
+        toast({
+          title: "Could not load Publishing Queue",
+          description:
+            getErrorMessage(error) ||
+            "Publishing Queue could not be loaded.",
+          variant: "destructive",
+        });
+      } finally {
+        setLoadingPublishingQueue(false);
+      }
+    },
+    [strategyId, toast]
+  );
+
+  const sendAssetToPublishingQueue = async (
+    asset
+  ) => {
+    if (
+      !asset?.id ||
+      publishingQueueActionId
+    ) {
+      return;
+    }
+
+    setPublishingQueueActionId(asset.id);
+
+    try {
+      const response = await api.post(
+        `/content-assets/${asset.id}/publishing-queue`,
+        {
+          platform:
+            asset.platform ||
+            asset.metadata?.strategy_source
+              ?.channel ||
+            null,
+        }
+      );
+
+      toast({
+        title: "Added to Publishing Queue",
+        description:
+          asset.title ||
+          "Approved content was added to the queue.",
+      });
+
+      await loadPublishingQueue();
+
+      if (response.data) {
+        setTab("publishing");
+      }
+    } catch (error) {
+      toast({
+        title: "Could not add to Publishing Queue",
+        description:
+          getErrorMessage(error) ||
+          "The approved content could not be queued.",
+        variant: "destructive",
+      });
+    } finally {
+      setPublishingQueueActionId(null);
+    }
+  };
+
+  const publishingLocalDateTime = (
+    value
+  ) => {
+    if (!value) return "";
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+      return "";
+    }
+
+    const offset =
+      date.getTimezoneOffset() * 60 * 1000;
+
+    return new Date(
+      date.getTime() - offset
+    )
+      .toISOString()
+      .slice(0, 16);
+  };
+
+  const schedulePublishingItem = async (
+    queueItem,
+    scheduledAt
+  ) => {
+    if (
+      !queueItem?.id ||
+      !scheduledAt ||
+      publishingQueueActionId
+    ) {
+      return;
+    }
+
+    setPublishingQueueActionId(queueItem.id);
+
+    try {
+      const scheduledDate = new Date(scheduledAt);
+
+      if (Number.isNaN(scheduledDate.getTime())) {
+        throw new Error(
+          "Please choose a valid publishing date and time."
+        );
+      }
+
+      if (scheduledDate.getTime() <= Date.now()) {
+        throw new Error(
+          "Publishing must be scheduled for a future date and time."
+        );
+      }
+
+      await api.patch(
+        `/publishing-queue/${queueItem.id}/schedule`,
+        {
+          scheduled_at: scheduledDate.toISOString(),
+        }
+      );
+
+      toast({
+        title: "Publishing scheduled",
+        description:
+          queueItem.title ||
+          "The content has been scheduled.",
+      });
+
+      setPublishingScheduleInputs(
+        (current) => {
+          const next = { ...current };
+          delete next[queueItem.id];
+          return next;
+        }
+      );
+
+      await loadPublishingQueue();
+    } catch (error) {
+      toast({
+        title: "Could not schedule content",
+        description:
+          getErrorMessage(error) ||
+          "The publishing date could not be saved.",
+        variant: "destructive",
+      });
+    } finally {
+      setPublishingQueueActionId(null);
+    }
+  };
+
+  const retryFailedPublishingItem = async (
+    queueItem
+  ) => {
+    if (
+      !queueItem?.id ||
+      publishingQueueActionId
+    ) {
+      return;
+    }
+
+    setPublishingQueueActionId(queueItem.id);
+
+    try {
+      await api.post(
+        `/publishing-queue/${queueItem.id}/retry`
+      );
+
+      toast({
+        title: "Publishing retry scheduled",
+        description:
+          queueItem.title ||
+          "The failed item has been returned to the publishing worker.",
+      });
+
+      await loadPublishingQueue();
+    } catch (error) {
+      toast({
+        title: "Could not retry publishing",
+        description:
+          getErrorMessage(error) ||
+          "The failed publishing item could not be retried.",
+        variant: "destructive",
+      });
+    } finally {
+      setPublishingQueueActionId(null);
+    }
+  };
+
+  const requeuePublishingItem = async (
+    queueItem
+  ) => {
+    if (
+      !queueItem?.id ||
+      publishingQueueActionId
+    ) {
+      return;
+    }
+
+    setPublishingQueueActionId(queueItem.id);
+
+    try {
+      await api.post(
+        `/publishing-queue/${queueItem.id}/requeue`
+      );
+
+      toast({
+        title: "Content returned to queue",
+        description:
+          queueItem.title ||
+          "The cancelled item is ready to schedule again.",
+      });
+
+      await loadPublishingQueue();
+    } catch (error) {
+      toast({
+        title: "Could not requeue content",
+        description:
+          getErrorMessage(error) ||
+          "The cancelled publishing item could not be restored.",
+        variant: "destructive",
+      });
+    } finally {
+      setPublishingQueueActionId(null);
+    }
+  };
+
+  const cancelPublishingItem = async (
+    queueItem
+  ) => {
+    if (
+      !queueItem?.id ||
+      publishingQueueActionId
+    ) {
+      return;
+    }
+
+    setPublishingQueueActionId(queueItem.id);
+
+    try {
+      await api.post(
+        `/publishing-queue/${queueItem.id}/cancel`
+      );
+
+      toast({
+        title: "Publishing item cancelled",
+        description:
+          "The content remains available in the Content Library.",
+      });
+
+      await loadPublishingQueue();
+    } catch (error) {
+      toast({
+        title: "Could not cancel publishing item",
+        description:
+          getErrorMessage(error) ||
+          "The publishing item could not be cancelled.",
+        variant: "destructive",
+      });
+    } finally {
+      setPublishingQueueActionId(null);
+    }
+  };
+
+  const filteredContentAssets = React.useMemo(() => {
+    return normalizeArray(contentAssets).filter((asset) => {
+      const source =
+        asset?.metadata?.strategy_source || {};
+
+      const rawWeekIndex =
+        asset?.generated_from_week_index ??
+        source?.week_index;
+
+      const weekMatches =
+        libraryWeekFilter === "all" ||
+        String(rawWeekIndex) === libraryWeekFilter;
+
+      const typeMatches =
+        libraryTypeFilter === "all" ||
+        asset?.content_type === libraryTypeFilter;
+
+      const statusMatches =
+        libraryStatusFilter === "all" ||
+        (asset?.status || "draft") ===
+          libraryStatusFilter;
+
+      return (
+        weekMatches &&
+        typeMatches &&
+        statusMatches
+      );
+    });
+  }, [
+    contentAssets,
+    libraryWeekFilter,
+    libraryTypeFilter,
+    libraryStatusFilter,
+  ]);
+
+  const visibleAssetIds = React.useMemo(
+    () =>
+      filteredContentAssets
+        .map((asset) => asset?.id)
+        .filter(Boolean),
+    [filteredContentAssets]
+  );
+
+  const allVisibleAssetsSelected =
+    visibleAssetIds.length > 0 &&
+    visibleAssetIds.every((id) =>
+      selectedAssetIds.includes(id)
+    );
+
+  const toggleAssetSelection = (assetId) => {
+    if (!assetId || bulkAssetAction) return;
+
+    setSelectedAssetIds((current) =>
+      current.includes(assetId)
+        ? current.filter((id) => id !== assetId)
+        : [...current, assetId]
+    );
+  };
+
+  const toggleAllVisibleAssets = () => {
+    if (bulkAssetAction) return;
+
+    if (allVisibleAssetsSelected) {
+      setSelectedAssetIds((current) =>
+        current.filter(
+          (id) => !visibleAssetIds.includes(id)
+        )
+      );
+      return;
+    }
+
+    setSelectedAssetIds((current) =>
+      Array.from(
+        new Set([
+          ...current,
+          ...visibleAssetIds,
+        ])
+      )
+    );
+  };
+
+  const clearAssetSelection = () => {
+    if (bulkAssetAction) return;
+    setSelectedAssetIds([]);
+  };
+
+
+  React.useEffect(() => {
+    setSelectedAssetIds([]);
+  }, [
+    libraryWeekFilter,
+    libraryTypeFilter,
+    libraryStatusFilter,
+  ]);
+
+  const bulkUpdateAssetStatus = async (status) => {
+    if (
+      bulkAssetAction ||
+      selectedAssetIds.length === 0
+    ) {
+      return;
+    }
+
+    const ids = [...selectedAssetIds];
+    setBulkAssetAction(status);
+
+    let succeeded = 0;
+    const failed = [];
+
+    try {
+      for (const assetId of ids) {
+        try {
+          await api.patch(
+            `/content-assets/${assetId}/status`,
+            { status }
+          );
+          succeeded += 1;
+        } catch (error) {
+          failed.push({
+            assetId,
+            error: getErrorMessage(error),
+          });
+        }
+      }
+
+      toast({
+        title:
+          status === "approved"
+            ? "Selected content approved"
+            : "Selected content rejected",
+        description:
+          `${succeeded} updated` +
+          (failed.length
+            ? `, ${failed.length} failed.`
+            : "."),
+        variant:
+          failed.length > 0
+            ? "destructive"
+            : undefined,
+      });
+
+      setSelectedAssetIds(
+        failed.map((item) => item.assetId)
+      );
+
+      await loadContentAssets();
+    } finally {
+      setBulkAssetAction(null);
+    }
+  };
+
+  const generateCurrentWeek = async () => {
+    if (generatingWeek) return;
+
+    setGeneratingWeek(true);
+
+    try {
+      const response = await api.post(
+        `/content-strategies/${strategyId}/generate-week`,
+        {
+          week_index: weekIndex,
+        }
+      );
+
+      const result = response.data || {};
+
+      toast({
+        title: "Weekly drafts generated",
+        description:
+          `${result.created_count || 0} created, ` +
+          `${result.skipped_count || 0} skipped, ` +
+          `${result.error_count || 0} errors.`,
+      });
+
+      await loadContentAssets();
+      setTab("library");
+    } catch (error) {
+      toast({
+        title: "Could not generate weekly drafts",
+        description:
+          getErrorMessage(error) ||
+          "The weekly content batch could not be generated.",
+        variant: "destructive",
+      });
+    } finally {
+      setGeneratingWeek(false);
+    }
+  };
+
+  const loadContentAssets = React.useCallback(async () => {
+    if (!strategyId) return;
+
+    setLoadingAssets(true);
+
+    try {
+      const response = await api.get(
+        "/content-assets",
+        {
+          params: {
+            strategy_id: strategyId,
+            limit: 200,
+          },
+        }
+      );
+
+      setContentAssets(
+        Array.isArray(response.data)
+          ? response.data
+          : []
+      );
+    } catch (error) {
+      toast({
+        title: "Could not load Content Library",
+        description:
+          getErrorMessage(error) ||
+          "The saved content drafts could not be loaded.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoadingAssets(false);
+    }
+  }, [strategyId, toast]);
+
+  const updateAssetStatus = async (assetId, status) => {
+    if (!assetId || assetActionId) return;
+
+    setAssetActionId(assetId);
+
+    try {
+      await api.patch(
+        `/content-assets/${assetId}/status`,
+        { status }
+      );
+
+      toast({
+        title:
+          status === "approved"
+            ? "Content approved"
+            : "Content rejected",
+        description:
+          status === "approved"
+            ? "This draft is approved and can now be prepared for the website."
+            : "This draft has been marked as rejected.",
+      });
+
+      await loadContentAssets();
+    } catch (error) {
+      toast({
+        title: "Could not update content",
+        description:
+          getErrorMessage(error) ||
+          "The content status could not be updated.",
+        variant: "destructive",
+      });
+    } finally {
+      setAssetActionId(null);
+    }
+  };
+
+  const prepareAssetForWebsite = async (assetId) => {
+    if (!assetId || assetActionId) return;
+
+    setAssetActionId(assetId);
+
+    try {
+      const response = await api.post(
+        `/content-assets/${assetId}/website-export`
+      );
+
+      toast({
+        title: "Prepared for website",
+        description:
+          response.data?.batch_id
+            ? `S3 batch ${response.data.batch_id} was created.`
+            : "The approved content was written to the website handoff bucket.",
+      });
+
+      await loadContentAssets();
+    } catch (error) {
+      toast({
+        title: "Could not prepare website content",
+        description:
+          getErrorMessage(error) ||
+          "The content could not be written to the website handoff bucket.",
+        variant: "destructive",
+      });
+    } finally {
+      setAssetActionId(null);
+    }
+  };
+
+  const openAssetEditor = (asset) => {
+    const metadata = asset?.metadata || {};
+    const seo = metadata?.seo || {};
+
+    setEditingAsset({
+      id: asset.id,
+      title: asset.title || "",
+      body: asset.body || "",
+      subject: asset.subject || "",
+      platform: asset.platform || "",
+      tags: Array.isArray(asset.tags)
+        ? asset.tags.join(", ")
+        : "",
+      metadata: {
+        ...metadata,
+        slug: metadata.slug || "",
+        summary: metadata.summary || "",
+        category: metadata.category || "",
+        publish_date: metadata.publish_date || "",
+        seo: {
+          ...seo,
+          title: seo.title || "",
+          description: seo.description || "",
+        },
+      },
+    });
+  };
+
+  const closeAssetEditor = () => {
+    if (assetActionId) return;
+    setEditingAsset(null);
+  };
+
+  const saveAssetEdits = async () => {
+    if (!editingAsset?.id || assetActionId) return;
+
+    if (!editingAsset.title.trim()) {
+      toast({
+        title: "Title required",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (!editingAsset.body.trim()) {
+      toast({
+        title: "Content required",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setAssetActionId(editingAsset.id);
+
+    try {
+      const response = await api.patch(
+        `/content-assets/${editingAsset.id}`,
+        {
+          title: editingAsset.title.trim(),
+          body: editingAsset.body,
+          subject:
+            editingAsset.subject.trim() || null,
+          platform:
+            editingAsset.platform.trim() || null,
+          tags: editingAsset.tags
+            .split(",")
+            .map((value) => value.trim())
+            .filter(Boolean),
+          metadata: editingAsset.metadata,
+        }
+      );
+
+      toast({
+        title: "Content updated",
+        description:
+          "Your changes were saved. The asset returned to draft status for review.",
+      });
+
+      setEditingAsset(null);
+      await loadContentAssets();
+
+      return response.data;
+    } catch (error) {
+      toast({
+        title: "Could not save changes",
+        description:
+          getErrorMessage(error) ||
+          "The content could not be updated.",
+        variant: "destructive",
+      });
+    } finally {
+      setAssetActionId(null);
+    }
+  };
+
+  React.useEffect(() => {
+    loadContentAssets();
+  }, [loadContentAssets]);
+
+
+  React.useEffect(() => {
+    loadPublishingQueue();
+  }, [loadPublishingQueue]);
   const weeks = Array.isArray(plan.weekly_plan)
     ? plan.weekly_plan
     : [];
@@ -971,12 +1722,14 @@ function StrategyPlan({ plan, strategyId }) {
     contentType,
     platform,
     callToAction,
+    calendarIndex = null,
   }) => {
     setDraftRequest({
       topic: String(topic || "").trim(),
       contentType: contentType || "social_post",
       platform: platform || "",
       callToAction: callToAction || "",
+      calendarIndex,
     });
     setGeneratedDraft(null);
     setSelectedVariation(0);
@@ -996,35 +1749,126 @@ function StrategyPlan({ plan, strategyId }) {
     setGeneratedDraft(null);
 
     try {
+      const rawType = String(
+        draftRequest.contentType || ""
+      ).toLowerCase();
+
+      const rawPlatform = String(
+        draftRequest.platform || ""
+      ).toLowerCase();
+
+      let canonicalAssetType = null;
+
+      if (
+        rawType.includes("blog") ||
+        rawPlatform === "blog"
+      ) {
+        canonicalAssetType = "blog_post";
+      } else if (
+        rawType.includes("newsletter") ||
+        rawType === "email" ||
+        rawPlatform === "email"
+      ) {
+        canonicalAssetType =
+          "newsletter_spotlight";
+      } else if (
+        rawType.includes("package")
+      ) {
+        canonicalAssetType = "package";
+      }
+
+      const hasCalendarIndex =
+        Number.isInteger(
+          draftRequest.calendarIndex
+        );
+
+      if (
+        canonicalAssetType &&
+        hasCalendarIndex
+      ) {
+        const response = await api.post(
+          `/content-strategies/${strategyId}/generate-asset`,
+          {
+            calendar_index:
+              draftRequest.calendarIndex,
+            asset_type:
+              canonicalAssetType,
+          }
+        );
+
+        const asset =
+          response.data?.asset || null;
+
+        if (!asset?.id) {
+          throw new Error(
+            "The content draft was not saved."
+          );
+        }
+
+        setGeneratedDraft({
+          canonicalAsset: true,
+          asset,
+          title: asset.title || "",
+          draft: asset.body || "",
+          variations: [],
+          subject_lines:
+            asset.subject
+              ? [asset.subject]
+              : [],
+          hashtags: [],
+        });
+
+        setSelectedVariation(0);
+
+        toast({
+          title: "Content draft created",
+          description:
+            "Saved to the Content Library as a draft for human review.",
+        });
+
+        return;
+      }
+
       const response = await api.post(
         "/campaigns/ai-draft",
         {
-          content_type: draftRequest.contentType,
-          service_or_topic: draftRequest.topic,
-          platform: draftRequest.platform || undefined,
+          content_type:
+            draftRequest.contentType,
+          service_or_topic:
+            draftRequest.topic,
+          platform:
+            draftRequest.platform ||
+            undefined,
           objective:
             "Create an implementation-ready content draft from the approved content strategy.",
           call_to_action:
-            draftRequest.callToAction || undefined,
+            draftRequest.callToAction ||
+            undefined,
           requested_length:
-            draftRequest.contentType === "video_prompt"
+            draftRequest.contentType ===
+            "video_prompt"
               ? "60 to 90 seconds with 6 to 10 detailed scenes"
               : undefined,
           tone:
             "Professional, educational, warm, premium, and non-pushy",
           compliance_notes:
-            draftRequest.contentType === "video_prompt"
+            draftRequest.contentType ===
+            "video_prompt"
               ? "Create a full scene-by-scene AI video-generation prompt. Include timestamps, setting, action, camera direction, lighting, voiceover, on-screen text, sound, transitions, CTA, and a negative prompt. Avoid guarantees, cure claims, testimonials, invented outcomes, and individualized medical advice."
               : "Avoid guarantees, cure claims, invented statistics, individualized medical advice, and unapproved pricing or promotions.",
           number_of_variations:
-            draftRequest.contentType === "video_prompt"
+            draftRequest.contentType ===
+            "video_prompt"
               ? 2
               : 3,
         }
       );
 
-      setGeneratedDraft(response.data || null);
+      setGeneratedDraft(
+        response.data || null
+      );
       setSelectedVariation(0);
+
     } catch (error) {
       toast({
         title: "Could not generate draft",
@@ -1056,6 +1900,17 @@ function StrategyPlan({ plan, strategyId }) {
 
   const saveGeneratedAsset = async () => {
     if (!generatedDraft || !activeDraftCopy.trim()) return;
+
+    if (generatedDraft.canonicalAsset) {
+      toast({
+        title: "Draft already saved",
+        description:
+          "This content is already in the Content Library and is awaiting human review.",
+      });
+
+      closeDraftGenerator();
+      return;
+    }
 
     setSavingDraft(true);
 
@@ -1123,6 +1978,14 @@ function StrategyPlan({ plan, strategyId }) {
   const tabs = [
     { id: "execution", label: "Execution board" },
     { id: "calendar", label: "Calendar" },
+    {
+      id: "library",
+      label: `Content Library (${contentAssets.length})`,
+    },
+    {
+      id: "publishing",
+      label: `Publishing Queue (${publishingQueue.length})`,
+    },
     { id: "ideas", label: "Idea bank" },
     { id: "overview", label: "Strategy" },
     { id: "review", label: "Review" },
@@ -1182,7 +2045,27 @@ function StrategyPlan({ plan, strategyId }) {
               )}
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                onClick={generateCurrentWeek}
+                disabled={generatingWeek || !currentWeek}
+                className="rounded-full bg-[#2f4a3a] text-[#f6f1e6] hover:bg-[#263d30]"
+              >
+                {generatingWeek ? (
+                  <Loader2
+                    size={15}
+                    className="mr-2 animate-spin"
+                  />
+                ) : (
+                  <Sparkles
+                    size={15}
+                    className="mr-2"
+                  />
+                )}
+                Generate This Week
+              </Button>
+
               <button
                 type="button"
                 disabled={weekIndex <= 0}
@@ -1267,6 +2150,873 @@ function StrategyPlan({ plan, strategyId }) {
         />
       )}
 
+      {tab === "library" && (
+        <div className="space-y-4">
+          <div className="flex flex-col gap-3 rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="eyebrow text-[#8a6a3c]">
+                Content Library
+              </div>
+
+              <h3 className="mt-1 font-display text-2xl text-[#1f2a22]">
+                Review generated content
+              </h3>
+
+              <p className="mt-1 max-w-3xl text-sm leading-6 text-[#6a6a6a]">
+                AI-generated content stays in draft status
+                until a staff member reviews and approves it.
+              </p>
+            </div>
+
+            <Button
+              type="button"
+              variant="outline"
+              onClick={loadContentAssets}
+              disabled={loadingAssets}
+              className="rounded-full"
+            >
+              {loadingAssets ? (
+                <Loader2
+                  size={15}
+                  className="mr-2 animate-spin"
+                />
+              ) : (
+                <RefreshCw
+                  size={15}
+                  className="mr-2"
+                />
+              )}
+              Refresh
+            </Button>
+          </div>
+
+                      <div className="rounded-2xl border border-[#e7dfc9] bg-white p-4">
+              <div className="grid gap-3 md:grid-cols-3">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-[#6a6a6a]">
+                    Week
+                  </label>
+
+                  <select
+                    value={libraryWeekFilter}
+                    onChange={(event) =>
+                      setLibraryWeekFilter(
+                        event.target.value
+                      )
+                    }
+                    className="w-full rounded-xl border border-[#d8cba9] bg-white px-3 py-2 text-sm text-[#2f4a3a]"
+                  >
+                    <option value="all">
+                      All weeks
+                    </option>
+
+                    {normalizeArray(weeks).map(
+                      (week, index) => (
+                        <option
+                          key={`library-week-${index}`}
+                          value={String(index)}
+                        >
+                          Week {week?.week || index + 1}
+                        </option>
+                      )
+                    )}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-[#6a6a6a]">
+                    Content type
+                  </label>
+
+                  <select
+                    value={libraryTypeFilter}
+                    onChange={(event) =>
+                      setLibraryTypeFilter(
+                        event.target.value
+                      )
+                    }
+                    className="w-full rounded-xl border border-[#d8cba9] bg-white px-3 py-2 text-sm text-[#2f4a3a]"
+                  >
+                    <option value="all">
+                      All types
+                    </option>
+                    <option value="blog_post">
+                      Blog
+                    </option>
+                    <option value="newsletter_spotlight">
+                      Newsletter
+                    </option>
+                    <option value="social_post">
+                      Social post
+                    </option>
+                    <option value="video_prompt">
+                      Video prompt
+                    </option>
+                    <option value="package">
+                      Package
+                    </option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-[#6a6a6a]">
+                    Status
+                  </label>
+
+                  <select
+                    value={libraryStatusFilter}
+                    onChange={(event) =>
+                      setLibraryStatusFilter(
+                        event.target.value
+                      )
+                    }
+                    className="w-full rounded-xl border border-[#d8cba9] bg-white px-3 py-2 text-sm text-[#2f4a3a]"
+                  >
+                    <option value="all">
+                      All statuses
+                    </option>
+                    <option value="draft">
+                      Draft
+                    </option>
+                    <option value="approved">
+                      Approved
+                    </option>
+                    <option value="rejected">
+                      Rejected
+                    </option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[#eee7d6] pt-4">
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#2f4a3a]">
+                    <input
+                      type="checkbox"
+                      checked={allVisibleAssetsSelected}
+                      onChange={toggleAllVisibleAssets}
+                      disabled={
+                        visibleAssetIds.length === 0 ||
+                        Boolean(bulkAssetAction)
+                      }
+                    />
+                    Select all visible
+                  </label>
+
+                  <span className="text-xs text-[#8a8a8a]">
+                    Showing{" "}
+                    {filteredContentAssets.length} of{" "}
+                    {contentAssets.length}
+                  </span>
+
+                  {selectedAssetIds.length > 0 && (
+                    <span className="rounded-full bg-[#f1ead8] px-3 py-1 text-xs font-medium text-[#6a5637]">
+                      {selectedAssetIds.length} selected
+                    </span>
+                  )}
+                </div>
+
+                {selectedAssetIds.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() =>
+                        bulkUpdateAssetStatus(
+                          "approved"
+                        )
+                      }
+                      disabled={Boolean(
+                        bulkAssetAction
+                      )}
+                      className="rounded-full bg-[#2f4a3a] text-[#f6f1e6] hover:bg-[#263d30]"
+                    >
+                      {bulkAssetAction ===
+                        "approved" && (
+                        <Loader2
+                          size={14}
+                          className="mr-2 animate-spin"
+                        />
+                      )}
+                      Approve Selected
+                    </Button>
+
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        bulkUpdateAssetStatus(
+                          "rejected"
+                        )
+                      }
+                      disabled={Boolean(
+                        bulkAssetAction
+                      )}
+                      className="rounded-full"
+                    >
+                      {bulkAssetAction ===
+                        "rejected" && (
+                        <Loader2
+                          size={14}
+                          className="mr-2 animate-spin"
+                        />
+                      )}
+                      Reject Selected
+                    </Button>
+
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={clearAssetSelection}
+                      disabled={Boolean(
+                        bulkAssetAction
+                      )}
+                    >
+                      Clear
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+{loadingAssets && contentAssets.length === 0 ? (
+            <div className="rounded-2xl border border-[#e7dfc9] bg-white p-8 text-center text-sm text-[#6a6a6a]">
+              Loading Content Library...
+            </div>
+          ) : contentAssets.length === 0 ? (
+            <EmptyPlanState
+              text="No content drafts have been generated for this strategy yet."
+            />
+          ) : (
+            <div className="space-y-4">
+              {normalizeArray(filteredContentAssets).map((asset) => (
+                <div
+                  key={asset.id}
+                  className="rounded-2xl border border-[#e7dfc9] bg-white p-5"
+                >
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                    <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#2f4a3a]">
+                      <input
+                        type="checkbox"
+                        checked={selectedAssetIds.includes(
+                          asset.id
+                        )}
+                        onChange={() =>
+                          toggleAssetSelection(
+                            asset.id
+                          )
+                        }
+                        disabled={Boolean(
+                          bulkAssetAction
+                        )}
+                        aria-label={`Select ${
+                          asset.title ||
+                          "content asset"
+                        }`}
+                      />
+                      Select
+                    </label>
+
+                    <div className="flex flex-wrap items-center gap-1 text-xs text-[#8a8a8a]">
+                      {(
+                        asset.generated_from_week_index ??
+                        asset.metadata?.strategy_source
+                          ?.week_index
+                      ) != null && (
+                        <span>
+                          Week{" "}
+                          {Number(
+                            asset.generated_from_week_index ??
+                            asset.metadata
+                              ?.strategy_source
+                              ?.week_index
+                          ) + 1}
+                        </span>
+                      )}
+
+                      {asset.metadata?.strategy_source
+                        ?.day_or_date && (
+                        <span>
+                          •{" "}
+                          {
+                            asset.metadata
+                              .strategy_source
+                              .day_or_date
+                          }
+                        </span>
+                      )}
+
+                      {asset.metadata?.strategy_source
+                        ?.channel && (
+                        <span>
+                          •{" "}
+                          {
+                            asset.metadata
+                              .strategy_source
+                              .channel
+                          }
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap gap-2 text-xs">
+                        <span className="rounded-full bg-[#e7efe9] px-3 py-1 font-medium text-[#2f4a3a]">
+                          {asset.content_type || "content"}
+                        </span>
+
+                        <span className="rounded-full bg-[#f1ead8] px-3 py-1 font-medium text-[#6a5637]">
+                          {asset.status || "draft"}
+                        </span>
+                      </div>
+
+                      <h4 className="mt-3 font-display text-xl text-[#1f2a22]">
+                        {asset.title || "Untitled content"}
+                      </h4>
+
+                      {asset.metadata?.summary && (
+                        <p className="mt-2 max-w-4xl text-sm leading-6 text-[#6a6a6a]">
+                          {asset.metadata.summary}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="shrink-0 text-xs text-[#8a8a8a]">
+                      {formatDate(
+                        asset.updated_at ||
+                        asset.created_at
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="mt-4 max-h-72 overflow-y-auto whitespace-pre-wrap rounded-xl bg-[#fbf7ee] p-4 text-sm leading-6 text-[#3a3a3a]">
+                    {asset.body || "No content body."}
+                  </div>
+
+                  {asset.human_review_required && (
+                    <div className="mt-4 text-xs font-medium text-[#8a6a3c]">
+                      Human review required
+                    </div>
+                  )}
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        openAssetEditor(asset)
+                      }
+                      disabled={
+                        assetActionId === asset.id
+                      }
+                      className="rounded-full"
+                    >
+                      Edit
+                    </Button>
+                    {asset.status !== "approved" && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={() =>
+                          updateAssetStatus(
+                            asset.id,
+                            "approved"
+                          )
+                        }
+                        disabled={
+                          assetActionId === asset.id
+                        }
+                        className="rounded-full bg-[#2f4a3a] text-[#f6f1e6] hover:bg-[#263d30]"
+                      >
+                        {assetActionId === asset.id && (
+                          <Loader2
+                            size={14}
+                            className="mr-2 animate-spin"
+                          />
+                        )}
+                        Approve
+                      </Button>
+                    )}
+
+                    {asset.status !== "rejected" && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          updateAssetStatus(
+                            asset.id,
+                            "rejected"
+                          )
+                        }
+                        disabled={
+                          assetActionId === asset.id
+                        }
+                        className="rounded-full"
+                      >
+                        Reject
+                      </Button>
+                    )}
+
+                    {asset.status === "approved" &&
+                        [
+                          "blog_post",
+                          "newsletter_spotlight",
+                          "package",
+                        ].includes(asset.content_type) && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          prepareAssetForWebsite(
+                            asset.id
+                          )
+                        }
+                        disabled={
+                          assetActionId === asset.id
+                        }
+                        className="rounded-full"
+                      >
+                        {assetActionId === asset.id && (
+                          <Loader2
+                            size={14}
+                            className="mr-2 animate-spin"
+                          />
+                        )}
+                        Prepare for Website
+                      </Button>
+                    )}
+
+                    {asset.status === "approved" &&
+                      [
+                        "social_post",
+                        "video_prompt",
+                      ].includes(
+                        asset.content_type
+                      ) && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          sendAssetToPublishingQueue(
+                            asset
+                          )
+                        }
+                        disabled={
+                          publishingQueueActionId ===
+                          asset.id
+                        }
+                        className="rounded-full"
+                      >
+                        {publishingQueueActionId ===
+                          asset.id && (
+                          <Loader2
+                            size={14}
+                            className="mr-2 animate-spin"
+                          />
+                        )}
+                        Send to Publishing Queue
+                      </Button>
+                    )}
+
+                    {asset.website_export?.status ===
+                      "prepared" && (
+                      <span className="inline-flex items-center rounded-full bg-[#e7efe9] px-3 py-1 text-xs font-medium text-[#2f4a3a]">
+                        S3 prepared
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === "publishing" && (
+        <div className="space-y-4">
+          <div className="flex flex-col gap-3 rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="eyebrow text-[#8a6a3c]">
+                Publishing Queue
+              </div>
+
+              <h3 className="mt-1 font-display text-2xl text-[#1f2a22]">
+                Approved social content
+              </h3>
+
+              <p className="mt-1 max-w-3xl text-sm leading-6 text-[#6a6a6a]">
+                Queue approved social posts and video prompts
+                for controlled scheduling. Nothing is
+                published automatically.
+              </p>
+            </div>
+
+            <Button
+              type="button"
+              variant="outline"
+              onClick={loadPublishingQueue}
+              disabled={loadingPublishingQueue}
+              className="rounded-full"
+            >
+              {loadingPublishingQueue ? (
+                <Loader2
+                  size={15}
+                  className="mr-2 animate-spin"
+                />
+              ) : (
+                <RefreshCw
+                  size={15}
+                  className="mr-2"
+                />
+              )}
+              Refresh
+            </Button>
+          </div>
+
+          <div className="grid gap-3 rounded-2xl border border-[#e7dfc9] bg-white p-4 md:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-[#6a6a6a]">
+                Queue status
+              </label>
+
+              <select
+                value={publishingStatusFilter}
+                onChange={(event) =>
+                  setPublishingStatusFilter(
+                    event.target.value
+                  )
+                }
+                className="w-full rounded-xl border border-[#d8cba9] bg-white px-3 py-2 text-sm text-[#2f4a3a]"
+              >
+                <option value="all">
+                  All statuses
+                </option>
+                <option value="ready">
+                  Ready
+                </option>
+                <option value="scheduled">
+                  Scheduled
+                </option>
+                <option value="cancelled">
+                  Cancelled
+                </option>
+                <option value="publishing">
+                  Publishing
+                </option>
+                <option value="published">
+                  Published
+                </option>
+                <option value="failed">
+                  Failed
+                </option>
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-1 block text-xs font-medium text-[#6a6a6a]">
+                Platform
+              </label>
+
+              <select
+                value={publishingPlatformFilter}
+                onChange={(event) =>
+                  setPublishingPlatformFilter(
+                    event.target.value
+                  )
+                }
+                className="w-full rounded-xl border border-[#d8cba9] bg-white px-3 py-2 text-sm text-[#2f4a3a]"
+              >
+                <option value="all">
+                  All platforms
+                </option>
+                <option value="instagram">
+                  Instagram
+                </option>
+                <option value="facebook">
+                  Facebook
+                </option>
+                <option value="tiktok">
+                  TikTok
+                </option>
+                <option value="linkedin">
+                  LinkedIn
+                </option>
+                <option value="threads">
+                  Threads
+                </option>
+                <option value="short_video">
+                  Short video
+                </option>
+              </select>
+            </div>
+
+            <div className="md:col-span-2 text-xs text-[#8a8a8a]">
+              Showing{" "}
+              {filteredPublishingQueue.length} of{" "}
+              {publishingQueue.length} queue items
+            </div>
+          </div>
+
+          {loadingPublishingQueue &&
+          publishingQueue.length === 0 ? (
+            <div className="rounded-2xl border border-[#e7dfc9] bg-white p-8 text-center text-sm text-[#6a6a6a]">
+              Loading Publishing Queue...
+            </div>
+          ) : publishingQueue.length === 0 ? (
+            <EmptyPlanState
+              text="No approved social or video content has been queued yet."
+            />
+          ) : filteredPublishingQueue.length === 0 ? (
+            <EmptyPlanState
+              text="No Publishing Queue items match the selected filters."
+            />
+          ) : (
+            <div className="space-y-4">
+              {normalizeArray(
+                filteredPublishingQueue
+              ).map((item) => (
+                <div
+                  key={item.id}
+                  className="rounded-2xl border border-[#e7dfc9] bg-white p-5"
+                >
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap gap-2 text-xs">
+                        <span className="rounded-full bg-[#e7efe9] px-3 py-1 font-medium text-[#2f4a3a]">
+                          {item.platform ||
+                            "platform"}
+                        </span>
+
+                        <span className="rounded-full bg-[#f1ead8] px-3 py-1 font-medium text-[#6a5637]">
+                          {item.status ||
+                            "ready"}
+                        </span>
+
+                        <span className="rounded-full bg-[#f5f5f5] px-3 py-1 font-medium text-[#666]">
+                          {item.content_type ||
+                            "content"}
+                        </span>
+                      </div>
+
+                      <h4 className="mt-3 font-display text-xl text-[#1f2a22]">
+                        {item.title ||
+                          "Untitled content"}
+                      </h4>
+
+                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-[#8a8a8a]">
+                        {item.week_index != null && (
+                          <span>
+                            Week{" "}
+                            {Number(
+                              item.week_index
+                            ) + 1}
+                          </span>
+                        )}
+
+                        {item.source_channel && (
+                          <span>
+                            • {item.source_channel}
+                          </span>
+                        )}
+
+                        {item.scheduled_at && (
+                          <span>
+                            • Scheduled{" "}
+                            {formatDate(
+                              item.scheduled_at
+                            )}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="shrink-0 text-xs text-[#8a8a8a]">
+                      {formatDate(
+                        item.updated_at ||
+                        item.created_at
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="mt-4 max-h-72 overflow-y-auto whitespace-pre-wrap rounded-xl bg-[#fbf7ee] p-4 text-sm leading-6 text-[#3a3a3a]">
+                    {item.body ||
+                      "No content body."}
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap items-end gap-2">
+                    {[
+                      "ready",
+                      "scheduled",
+                    ].includes(item.status) && (
+                      <div className="min-w-[240px]">
+                        <label className="mb-1 block text-xs font-medium text-[#6a6a6a]">
+                          Schedule date & time
+                        </label>
+
+                        <input
+                          type="datetime-local"
+                          value={
+                            publishingScheduleInputs[
+                              item.id
+                            ] ??
+                            publishingLocalDateTime(
+                              item.scheduled_at
+                            )
+                          }
+                          onChange={(event) =>
+                            setPublishingScheduleInputs(
+                              (current) => ({
+                                ...current,
+                                [item.id]:
+                                  event.target.value,
+                              })
+                            )
+                          }
+                          disabled={
+                            publishingQueueActionId ===
+                            item.id
+                          }
+                          className="w-full rounded-xl border border-[#d8cba9] bg-white px-3 py-2 text-sm text-[#2f4a3a]"
+                        />
+                      </div>
+                    )}
+
+                    {[
+                      "ready",
+                      "scheduled",
+                    ].includes(item.status) && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={() =>
+                          schedulePublishingItem(
+                            item,
+                            publishingScheduleInputs[
+                              item.id
+                            ]
+                          )
+                        }
+                        disabled={
+                          publishingQueueActionId ===
+                            item.id ||
+                          !publishingScheduleInputs[
+                            item.id
+                          ]
+                        }
+                        className="rounded-full bg-[#2f4a3a] text-[#f6f1e6] hover:bg-[#263d30]"
+                      >
+                        {publishingQueueActionId ===
+                          item.id && (
+                          <Loader2
+                            size={14}
+                            className="mr-2 animate-spin"
+                          />
+                        )}
+                        {item.status === "scheduled"
+                          ? "Reschedule"
+                          : "Schedule"}
+                      </Button>
+                    )}
+
+                    {item.status === "failed" && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={() =>
+                          retryFailedPublishingItem(
+                            item
+                          )
+                        }
+                        disabled={
+                          publishingQueueActionId ===
+                          item.id
+                        }
+                        className="rounded-full bg-[#2f4a3a] text-[#f6f1e6] hover:bg-[#263d30]"
+                      >
+                        {publishingQueueActionId ===
+                          item.id && (
+                          <Loader2
+                            size={14}
+                            className="mr-2 animate-spin"
+                          />
+                        )}
+                        Retry Failed
+                      </Button>
+                    )}
+
+                    {item.status === "cancelled" && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={() =>
+                          requeuePublishingItem(
+                            item
+                          )
+                        }
+                        disabled={
+                          publishingQueueActionId ===
+                          item.id
+                        }
+                        className="rounded-full bg-[#2f4a3a] text-[#f6f1e6] hover:bg-[#263d30]"
+                      >
+                        {publishingQueueActionId ===
+                          item.id && (
+                          <Loader2
+                            size={14}
+                            className="mr-2 animate-spin"
+                          />
+                        )}
+                        Requeue
+                      </Button>
+                    )}
+
+                    {[
+                      "ready",
+                      "scheduled",
+                    ].includes(
+                      item.status
+                    ) && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          cancelPublishingItem(
+                            item
+                          )
+                        }
+                        disabled={
+                          publishingQueueActionId ===
+                          item.id
+                        }
+                        className="rounded-full"
+                      >
+                        {publishingQueueActionId ===
+                          item.id && (
+                          <Loader2
+                            size={14}
+                            className="mr-2 animate-spin"
+                          />
+                        )}
+                        Cancel
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {tab === "ideas" && (
         <IdeaBank
           plan={plan}
@@ -1328,6 +3078,261 @@ function StrategyPlan({ plan, strategyId }) {
             AI-generated strategy. Verify every service,
             promotion, statistic, credential, health claim,
             offer, price, and disclaimer before publishing.
+          </div>
+        </div>
+      )}
+
+      {editingAsset && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-3xl bg-[#fffdf8] shadow-2xl">
+            <div className="flex items-center justify-between border-b border-[#e7dfc9] px-6 py-5">
+              <div>
+                <div className="eyebrow text-[#8a6a3c]">
+                  Content Library
+                </div>
+
+                <h3 className="mt-1 font-display text-2xl text-[#1f2a22]">
+                  Edit Content Draft
+                </h3>
+              </div>
+
+              <button
+                type="button"
+                onClick={closeAssetEditor}
+                disabled={Boolean(assetActionId)}
+                className="flex h-10 w-10 items-center justify-center rounded-full border border-[#e7dfc9] text-xl text-[#6a6a6a]"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="space-y-5 p-6">
+              <div>
+                <Label>Title</Label>
+                <Input
+                  value={editingAsset.title}
+                  onChange={(event) =>
+                    setEditingAsset((current) => ({
+                      ...current,
+                      title: event.target.value,
+                    }))
+                  }
+                  className="mt-2"
+                />
+              </div>
+
+              {editingAsset.subject !== undefined && (
+                <div>
+                  <Label>Email subject</Label>
+                  <Input
+                    value={editingAsset.subject}
+                    onChange={(event) =>
+                      setEditingAsset((current) => ({
+                        ...current,
+                        subject: event.target.value,
+                      }))
+                    }
+                    className="mt-2"
+                  />
+                </div>
+              )}
+
+              <div>
+                <Label>Content</Label>
+                <Textarea
+                  value={editingAsset.body}
+                  onChange={(event) =>
+                    setEditingAsset((current) => ({
+                      ...current,
+                      body: event.target.value,
+                    }))
+                  }
+                  rows={18}
+                  className="mt-2 font-mono text-sm"
+                />
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <Label>Slug</Label>
+                  <Input
+                    value={
+                      editingAsset.metadata.slug || ""
+                    }
+                    onChange={(event) =>
+                      setEditingAsset((current) => ({
+                        ...current,
+                        metadata: {
+                          ...current.metadata,
+                          slug: event.target.value,
+                        },
+                      }))
+                    }
+                    className="mt-2"
+                  />
+                </div>
+
+                <div>
+                  <Label>Category</Label>
+                  <Input
+                    value={
+                      editingAsset.metadata.category || ""
+                    }
+                    onChange={(event) =>
+                      setEditingAsset((current) => ({
+                        ...current,
+                        metadata: {
+                          ...current.metadata,
+                          category: event.target.value,
+                        },
+                      }))
+                    }
+                    className="mt-2"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <Label>Summary</Label>
+                <Textarea
+                  value={
+                    editingAsset.metadata.summary || ""
+                  }
+                  onChange={(event) =>
+                    setEditingAsset((current) => ({
+                      ...current,
+                      metadata: {
+                        ...current.metadata,
+                        summary: event.target.value,
+                      },
+                    }))
+                  }
+                  rows={4}
+                  className="mt-2"
+                />
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <Label>SEO title</Label>
+                  <Input
+                    value={
+                      editingAsset.metadata.seo?.title ||
+                      ""
+                    }
+                    onChange={(event) =>
+                      setEditingAsset((current) => ({
+                        ...current,
+                        metadata: {
+                          ...current.metadata,
+                          seo: {
+                            ...current.metadata.seo,
+                            title: event.target.value,
+                          },
+                        },
+                      }))
+                    }
+                    className="mt-2"
+                  />
+                </div>
+
+                <div>
+                  <Label>Publish date</Label>
+                  <Input
+                    type="date"
+                    value={
+                      editingAsset.metadata
+                        .publish_date || ""
+                    }
+                    onChange={(event) =>
+                      setEditingAsset((current) => ({
+                        ...current,
+                        metadata: {
+                          ...current.metadata,
+                          publish_date:
+                            event.target.value,
+                        },
+                      }))
+                    }
+                    className="mt-2"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <Label>SEO description</Label>
+                <Textarea
+                  value={
+                    editingAsset.metadata.seo
+                      ?.description || ""
+                  }
+                  onChange={(event) =>
+                    setEditingAsset((current) => ({
+                      ...current,
+                      metadata: {
+                        ...current.metadata,
+                        seo: {
+                          ...current.metadata.seo,
+                          description:
+                            event.target.value,
+                        },
+                      },
+                    }))
+                  }
+                  rows={3}
+                  className="mt-2"
+                />
+              </div>
+
+              <div>
+                <Label>Tags</Label>
+                <Input
+                  value={editingAsset.tags}
+                  onChange={(event) =>
+                    setEditingAsset((current) => ({
+                      ...current,
+                      tags: event.target.value,
+                    }))
+                  }
+                  placeholder="athlete recovery, wellness, education"
+                  className="mt-2"
+                />
+              </div>
+
+              <div className="rounded-xl border border-[#e7dfc9] bg-[#fbf7ee] p-4 text-xs leading-5 text-[#6a6a6a]">
+                Saving editorial changes automatically returns
+                this asset to draft status so it must be
+                reviewed again before website preparation.
+              </div>
+
+              <div className="flex flex-wrap justify-end gap-3">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={closeAssetEditor}
+                  disabled={Boolean(assetActionId)}
+                  className="rounded-full"
+                >
+                  Cancel
+                </Button>
+
+                <Button
+                  type="button"
+                  onClick={saveAssetEdits}
+                  disabled={Boolean(assetActionId)}
+                  className="rounded-full bg-[#2f4a3a] text-[#f6f1e6]"
+                >
+                  {assetActionId ===
+                    editingAsset.id && (
+                    <Loader2
+                      size={15}
+                      className="mr-2 animate-spin"
+                    />
+                  )}
+                  Save Changes
+                </Button>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -1792,6 +3797,7 @@ function CalendarBoard({
                 onClick={() =>
                   onGenerate({
                     topic: item.topic,
+                    calendarIndex: index,
                     contentType:
                       item.content_type || "social_post",
                     platform: item.channel || "",

@@ -1,11 +1,12 @@
 import React from "react";
 import api from "../lib/api";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+import { normalizeArray } from "../lib/collections";
 
 export default function SymptomTrends({ clientId }) {
   const [logs, setLogs] = React.useState([]);
   React.useEffect(() => {
-    api.get("/symptom-logs", { params: { client_id: clientId } }).then((r) => setLogs(r.data || []));
+    api.get("/symptom-logs", { params: { client_id: clientId } }).then((r) => setLogs(normalizeArray(r.data, ["logs"])));
   }, [clientId]);
 
   const byName = React.useMemo(() => {

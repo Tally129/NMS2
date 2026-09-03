@@ -81,10 +81,10 @@ export const conditions = [
 ];
 
 export const addOns = [
-  { id: "iv", name: "IV Nutrient Drip", price: 95 },
-  { id: "thermo", name: "Thermography Scan", price: 125 },
-  { id: "bioscan", name: "Bio-Energetic Scan", price: 75 },
-  { id: "ozone", name: "Ozone Therapy", price: 90 }
+  { id: "thermo", name: "Thermography Scan" },
+  { id: "blood_work", name: "Blood Work Package" },
+  { id: "colonics", name: "Colonics" },
+  { id: "hyperbaric", name: "Hyperbaric Therapy" }
 ];
 
 export const testimonials = [

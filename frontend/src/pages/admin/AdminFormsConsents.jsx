@@ -15,6 +15,7 @@ import {
   FileText, Sparkles, Upload, Plus, Send, Edit3, Eye, Trash2,
   Search, Archive, ArchiveRestore, Loader2, Copy, X, GripVertical, CheckCircle2, ExternalLink,
 } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 const FIELD_TYPES = [
   { v: "text", label: "Short text" },
@@ -107,8 +108,8 @@ export default function AdminFormsConsents() {
         api.get("/forms/templates", { params: { include_inactive: includeInactive } }),
         api.get("/forms/submissions"),
       ]);
-      setTemplates(t.data || []);
-      setSubmissions(s.data || []);
+      setTemplates(normalizeArray(t.data, ["templates"]));
+      setSubmissions(normalizeArray(s.data, ["submissions"]));
     } catch (e) {
       toast({ title: "Failed to load", description: getErrorMessage(e) || "" });
     }
@@ -116,7 +117,7 @@ export default function AdminFormsConsents() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   React.useEffect(() => { load(); }, [includeInactive]);
 
-  const filteredTpls = templates.filter((t) => {
+  const filteredTpls = normalizeArray(templates).filter((t) => {
     if (categoryFilter !== "all" && t.category !== categoryFilter) return false;
     if (search && !(t.title || "").toLowerCase().includes(search.toLowerCase())) return false;
     return true;
@@ -315,7 +316,7 @@ function TemplateCard({ t, onEdit, onPreview, onSend, onArchive, onDelete }) {
           <Eye size={13} /> Preview
         </button>
         <button onClick={onSend} className="text-[#c19a4b] hover:text-[#8a6a3c] inline-flex items-center gap-1 transition" data-testid={`forms-tpl-send-${t.id}`}>
-          <Send size={13} /> Send
+          <Send size={13} /> Assign
         </button>
         <div className="ml-auto flex items-center gap-2">
           <button onClick={onArchive} className="text-[#6a6a6a] hover:text-[#3a3a3a] transition" title={t.active ? "Archive" : "Unarchive"} data-testid={`forms-tpl-archive-${t.id}`}>
@@ -335,20 +336,179 @@ function TemplateCard({ t, onEdit, onPreview, onSend, onArchive, onDelete }) {
 // ---------- Submissions ----------
 function SubmissionsList({ rows, onReload }) {
   const { toast } = useToast();
+  const [unassignTarget, setUnassignTarget] = React.useState(null);
+  const [unassignReason, setUnassignReason] = React.useState("");
+  const [unassigning, setUnassigning] = React.useState(false);
+  const [search, setSearch] = React.useState("");
+  const [statusFilter, setStatusFilter] = React.useState("all");
+  const [page, setPage] = React.useState(1);
+
+  const PAGE_SIZE = 25;
+
   const copyLink = (s) => {
     const url = `${window.location.origin}${s.submit_url}`;
     navigator.clipboard.writeText(url);
     toast({ title: "Link copied", description: url });
   };
+  const openUnassign = (submission) => {
+    setUnassignTarget(submission);
+    setUnassignReason("Assigned by mistake");
+  };
+
+  const closeUnassign = () => {
+    if (unassigning) return;
+
+    setUnassignTarget(null);
+    setUnassignReason("");
+  };
+
+  const unassignForm = async () => {
+    if (!unassignTarget) return;
+
+    setUnassigning(true);
+
+    try {
+      await api.post(
+        `/forms/submissions/${unassignTarget.id}/unassign`,
+        {
+          reason:
+            unassignReason.trim() ||
+            "No longer required",
+        }
+      );
+
+      toast({
+        title: "Form unassigned",
+        description:
+          "The form was removed from the patient’s pending forms.",
+      });
+
+      setUnassignTarget(null);
+      setUnassignReason("");
+
+      if (onReload) {
+        await onReload();
+      }
+    } catch (error) {
+      const detail = error?.response?.data?.detail;
+
+      toast({
+        title: "Unable to unassign form",
+        description:
+          detail?.message ||
+          (typeof detail === "string"
+            ? detail
+            : getErrorMessage(error) || ""),
+      });
+    } finally {
+      setUnassigning(false);
+    }
+  };
+
+  const filteredRows = normalizeArray(rows).filter((row) => {
+    const query = search.trim().toLowerCase();
+
+    const searchableValues = [
+      row.client_name,
+      row.client_email,
+      row.client_phone,
+      row.client_mrn,
+      row.template_title,
+      row.template_id,
+      row.sent_by_name,
+      row.status,
+    ];
+
+    const matchesSearch =
+      !query ||
+      searchableValues.some((value) =>
+        String(value || "")
+          .toLowerCase()
+          .includes(query)
+      );
+
+    const matchesStatus =
+      statusFilter === "all" ||
+      row.status === statusFilter;
+
+    return matchesSearch && matchesStatus;
+  });
+
+  const pageCount = Math.max(
+    1,
+    Math.ceil(filteredRows.length / PAGE_SIZE)
+  );
+
+  const safePage = Math.min(page, pageCount);
+
+  const visibleRows = filteredRows.slice(
+    (safePage - 1) * PAGE_SIZE,
+    safePage * PAGE_SIZE
+  );
+
+  React.useEffect(() => {
+    if (page > pageCount) {
+      setPage(pageCount);
+    }
+  }, [page, pageCount]);
+
   if ((rows || []).length === 0) {
     return (
       <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-12 text-center text-[#6a6a6a]">
-        No forms have been sent yet. Use the <strong>Send</strong> button on any template.
+        No forms have been assigned yet. Use the <strong>Assign</strong> button on any template.
       </div>
     );
   }
   return (
-    <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] overflow-hidden" data-testid="forms-submissions-table">
+    <>
+      <div className="mb-4 rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-4">
+        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
+          <div className="relative">
+            <Search
+              size={14}
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8a6a3c]"
+            />
+            <Input
+              value={search}
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setPage(1);
+              }}
+              placeholder="Search patient, MRN, email, phone, form, or staff…"
+              className="pl-9 bg-[#f6f1e6] border-[#e0d6bc]"
+              data-testid="forms-submissions-search"
+            />
+          </div>
+
+          <select
+            value={statusFilter}
+            onChange={(event) => {
+              setStatusFilter(event.target.value);
+              setPage(1);
+            }}
+            className="h-10 rounded-md border border-[#e0d6bc] bg-[#f6f1e6] px-3 text-sm text-[#3a3a3a]"
+            data-testid="forms-submissions-status-filter"
+          >
+            <option value="all">All statuses</option>
+            <option value="sent">Awaiting</option>
+            <option value="submitted">Submitted</option>
+            <option value="expired">Expired</option>
+            <option value="void">Voided</option>
+          </select>
+        </div>
+
+        <div className="mt-3 text-xs text-[#6a6a6a]">
+          {filteredRows.length} matching submission
+          {filteredRows.length === 1 ? "" : "s"}
+        </div>
+      </div>
+
+      {filteredRows.length === 0 ? (
+        <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-12 text-center text-[#6a6a6a]">
+          No submissions match your search or filters.
+        </div>
+      ) : (
+      <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] overflow-hidden" data-testid="forms-submissions-table">
       <table className="w-full text-sm">
         <thead className="bg-[#f1ead8] text-[#8a6a3c] uppercase text-[11px] tracking-widest">
           <tr>
@@ -361,7 +521,7 @@ function SubmissionsList({ rows, onReload }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((s) => (
+          {normalizeArray(visibleRows).map((s) => (
             <tr key={s.id} className="border-t border-[#e7dfc9]" data-testid={`forms-sub-${s.id}`}>
               <td className="py-3 px-4 text-xs text-[#6a6a6a]">{new Date(s.created_at).toLocaleDateString([], { month: "short", day: "numeric" })}</td>
               <td className="py-3 px-4 font-medium text-[#1f2a22]">{s.template_title || s.template_id}</td>
@@ -373,22 +533,180 @@ function SubmissionsList({ rows, onReload }) {
                 {s.submitted_at ? new Date(s.submitted_at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "—"}
               </td>
               <td className="py-3 px-4 text-right">
-                {s.status === "sent" && s.submit_url && (
-                  <button onClick={() => copyLink(s)} className="inline-flex items-center gap-1 text-xs text-[#2f4a3a] hover:underline" data-testid={`forms-copy-link-${s.id}`}>
-                    <Copy size={11} /> Copy
-                  </button>
+                {s.status === "sent" && (
+                  <div className="inline-flex items-center gap-3">
+                    {s.submit_url && (
+                      <button
+                        type="button"
+                        onClick={() => copyLink(s)}
+                        className="inline-flex items-center gap-1 text-xs text-[#2f4a3a] hover:underline"
+                        data-testid={`forms-copy-link-${s.id}`}
+                      >
+                        <Copy size={11} />
+                        Copy
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => openUnassign(s)}
+                      className="inline-flex items-center gap-1 text-xs text-[#7a2a2a] hover:underline"
+                      data-testid={`forms-unassign-${s.id}`}
+                    >
+                      <Trash2 size={11} />
+                      Unassign
+                    </button>
+                  </div>
                 )}
+
                 {s.status === "submitted" && (
                   <span className="inline-flex items-center gap-1 text-xs text-[#5b6f5b]">
-                    <CheckCircle2 size={11} /> Done
+                    <CheckCircle2 size={11} />
+                    Done
+                  </span>
+                )}
+
+                {s.status === "void" && (
+                  <span className="text-xs text-[#7a2a2a]">
+                    Removed
+                  </span>
+                )}
+
+                {s.status === "expired" && (
+                  <span className="text-xs text-[#6a6a6a]">
+                    Expired
                   </span>
                 )}
               </td>
             </tr>
           ))}
         </tbody>
-      </table>
-    </div>
+        </table>
+      </div>
+      )}
+
+      {filteredRows.length > 0 && (
+        <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+          <div className="text-xs text-[#6a6a6a]">
+            Showing{" "}
+            {(safePage - 1) * PAGE_SIZE + 1}
+            {"–"}
+            {Math.min(
+              safePage * PAGE_SIZE,
+              filteredRows.length
+            )}
+            {" of "}
+            {filteredRows.length}
+          </div>
+
+          <div className="flex items-center justify-between gap-3 sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={safePage <= 1}
+              onClick={() =>
+                setPage((current) =>
+                  Math.max(1, current - 1)
+                )
+              }
+              data-testid="forms-submissions-prev"
+            >
+              Previous
+            </Button>
+
+            <span className="text-xs text-[#3a3a3a]">
+              Page {safePage} of {pageCount}
+            </span>
+
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={safePage >= pageCount}
+              onClick={() =>
+                setPage((current) =>
+                  Math.min(pageCount, current + 1)
+                )
+              }
+              data-testid="forms-submissions-next"
+            >
+              Next
+            </Button>
+          </div>
+        </div>
+      )}
+
+      <Dialog
+        open={!!unassignTarget}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeUnassign();
+          }
+        }}
+      >
+        <DialogContent className="bg-[#fbf7ee] border-[#e7dfc9]">
+          <DialogHeader>
+            <DialogTitle className="font-display text-2xl">
+              Unassign form?
+            </DialogTitle>
+
+            <DialogDescription>
+              Remove{" "}
+              <strong>
+                {unassignTarget?.template_title ||
+                  unassignTarget?.template_id ||
+                  "this form"}
+              </strong>{" "}
+              from{" "}
+              <strong>
+                {unassignTarget?.client_name ||
+                  "the patient"}
+              </strong>
+              ’s portal. The assignment will remain in the
+              audit history.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div>
+            <Label>Reason</Label>
+
+            <Textarea
+              value={unassignReason}
+              onChange={(event) =>
+                setUnassignReason(event.target.value)
+              }
+              placeholder="Assigned by mistake, duplicate, or no longer needed…"
+              className="mt-2 min-h-[100px] bg-[#f6f1e6] border-[#e0d6bc]"
+              data-testid="forms-unassign-reason"
+            />
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={closeUnassign}
+              disabled={unassigning}
+            >
+              Cancel
+            </Button>
+
+            <Button
+              type="button"
+              onClick={unassignForm}
+              disabled={unassigning}
+              className="bg-[#7a2a2a] text-white hover:bg-[#642222]"
+              data-testid="forms-unassign-confirm"
+            >
+              {unassigning
+                ? "Unassigning…"
+                : "Unassign form"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 function StatusPill({ status }) {
@@ -849,6 +1167,7 @@ function AiAssistDialog({ mode, onOpenChange, onResult }) {
 function SendFormDialog({ template, onOpenChange, onSent }) {
   const { toast } = useToast();
   const [clients, setClients] = React.useState([]);
+  const [patientSearch, setPatientSearch] = React.useState("");
   const [clientId, setClientId] = React.useState("none");
   const [hours, setHours] = React.useState(168);
   const [channel, setChannel] = React.useState("link");
@@ -858,11 +1177,57 @@ function SendFormDialog({ template, onOpenChange, onSent }) {
   const [resultStatus, setResultStatus] = React.useState("");
 
   React.useEffect(() => {
-    if (!template) { setResultUrl(""); setResultStatus(""); setClientId("none"); setChannel("link"); setTarget(""); return; }
-    api.get("/clients").then((r) => setClients(r.data || [])).catch(() => {});
-  }, [template]);
+    if (!template) {
+      setResultUrl("");
+      setResultStatus("");
+      setClientId("none");
+      setChannel("link");
+      setTarget("");
+      setPatientSearch("");
+      setClients([]);
+      return;
+    }
 
-  const selectedClient = clients.find((c) => c.id === clientId);
+    let cancelled = false;
+
+    const timer = setTimeout(async () => {
+      try {
+        const q = patientSearch.trim();
+
+        const response = await api.get("/clients", {
+          params: {
+            page: 1,
+            page_size: 50,
+            q: q.length >= 2 ? q : undefined,
+            sort_by: "full_name",
+            sort_dir: "asc",
+          },
+        });
+
+        if (!cancelled) {
+          setClients(
+            normalizeArray(response.data, [
+              "items",
+              "clients",
+            ])
+          );
+        }
+      } catch {
+        if (!cancelled) {
+          setClients([]);
+        }
+      }
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [template, patientSearch]);
+
+  const filteredClients = normalizeArray(clients);
+
+  const selectedClient = normalizeArray(clients).find((c) => c.id === clientId);
   React.useEffect(() => {
     // Auto-fill target when client + channel combo selected
     if (channel === "email") setTarget(selectedClient?.email || "");
@@ -873,54 +1238,163 @@ function SendFormDialog({ template, onOpenChange, onSent }) {
   if (!template) return null;
 
   const submit = async () => {
+    if (!clientId || clientId === "none") {
+      toast({
+        title: "Select a patient",
+        description:
+          "Choose the patient whose portal should receive this form.",
+      });
+      return;
+    }
+
     setSubmitting(true);
+
     try {
+      // Draft templates must be published before they can be assigned.
+      if (
+        (template.publication_status || "draft") !==
+        "published"
+      ) {
+        const publishBody = {
+          title: template.title,
+          description: template.description || "",
+          category: template.category || "other",
+          fields: normalizeArray(template.fields),
+          active: template.active !== false,
+          source: template.source || "manual",
+          source_filename:
+            template.source_filename || null,
+          form_type: template.form_type || "other",
+          version: Number(template.version || 1),
+          publication_status: "published",
+          requires_signature:
+            !!template.requires_signature,
+          auto_assign_new_patients:
+            !!template.auto_assign_new_patients,
+        };
+
+        await api.put(
+          `/forms/templates/${template.id}`,
+          publishBody
+        );
+      }
+
       const body = {
         template_id: template.id,
-        expires_in_hours: parseInt(hours) || 168,
+        client_id: clientId,
+        expires_in_hours:
+          parseInt(hours, 10) || 168,
+        // "link" creates the portal assignment without requiring
+        // an email address or sending PHI outside the portal.
         channel,
       };
-      if (clientId && clientId !== "none") body.client_id = clientId;
-      if (channel !== "link" && target) body.delivery_target = target;
-      const r = await api.post("/forms/send", body);
-      const url = r.data.submit_url || `${window.location.origin}/forms/respond/${r.data.token}`;
+
+      if (channel === "email" && target) {
+        body.delivery_target = target;
+      }
+
+      const response = await api.post(
+        "/forms/send",
+        body
+      );
+
+      const url =
+        response.data.submit_url ||
+        `/forms/respond/${response.data.token}`;
+
       setResultUrl(url);
-      setResultStatus(r.data.delivery_status || "");
-      try { await navigator.clipboard.writeText(url); } catch {}
-      const desc = channel === "link"
-        ? "Copied to clipboard."
-        : (r.data.delivery_status === "sent_stub" ? `${channel.toUpperCase()} queued (delivery stubbed in this environment).` : "Link generated — provide a recipient to send.");
-      toast({ title: "Form ready", description: desc });
-    } catch (e) {
-      toast({ title: "Failed", description: getErrorMessage(e) || "" });
-    } finally { setSubmitting(false); }
+      setResultStatus(
+        response.data.delivery_status || "assigned"
+      );
+
+      toast({
+        title: "Form assigned",
+        description:
+          channel === "email"
+            ? "The form is now in the patient portal and an email notification was requested."
+            : "The form is now available in the patient’s Forms & Consents page.",
+      });
+    } catch (error) {
+      toast({
+        title: "Assignment failed",
+        description:
+          getErrorMessage(error) || "",
+      });
+    } finally {
+      setSubmitting(false);
+    }
   };
+
 
   return (
     <Dialog open={!!template} onOpenChange={onOpenChange}>
       <DialogContent className="bg-[#fbf7ee] border-[#e7dfc9]">
         <DialogHeader>
-          <DialogTitle className="font-display text-2xl">Send "{template.title}"</DialogTitle>
-          <DialogDescription>Create a tokenized soft-link the patient can open without signing in. Optionally email the link.</DialogDescription>
+          <DialogTitle className="font-display text-2xl">Assign "{template.title}"</DialogTitle>
+          <DialogDescription>Assign this form directly to a patient’s portal account. Email is an optional notification.</DialogDescription>
         </DialogHeader>
         {!resultUrl ? (
           <div className="space-y-4">
             <div>
-              <Label>Patient (optional)</Label>
-              <Select value={clientId} onValueChange={setClientId}>
-                <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]" data-testid="forms-send-client"><SelectValue placeholder="Unlinked link" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">No patient (unlinked link)</SelectItem>
-                  {clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name || c.email}</SelectItem>)}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-[#6a6a6a] mt-2">Linking lets the form attach to the patient's chart on submit.</p>
+              <Label>Patient</Label>
+
+              <Input
+                className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]"
+                placeholder="Search patient by name, email, phone, or MRN..."
+                value={patientSearch}
+                onChange={(e) => setPatientSearch(e.target.value)}
+                data-testid="forms-send-patient-search"
+              />
+
+              <div className="mt-2 max-h-52 overflow-y-auto rounded-xl border border-[#e0d6bc] bg-[#f6f1e6]">
+                {filteredClients.length === 0 ? (
+                  <div className="p-3 text-sm text-[#6a6a6a]">
+                    No patients found.
+                  </div>
+                ) : (
+                  filteredClients.map((c) => (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => {
+                        setClientId(c.id);
+                        setPatientSearch(c.full_name || c.email || "");
+                      }}
+                      className={`block w-full border-b border-[#e7dfc9] px-3 py-2 text-left last:border-b-0 ${
+                        clientId === c.id
+                          ? "bg-[#e8dfc8]"
+                          : "hover:bg-[#efe7d5]"
+                      }`}
+                    >
+                      <div className="text-sm font-medium text-[#1f2a22]">
+                        {c.full_name || "Unnamed patient"}
+                      </div>
+
+                      {c.email && (
+                        <div className="text-xs text-[#6a6a6a]">
+                          {c.email}
+                        </div>
+                      )}
+                    </button>
+                  ))
+                )}
+              </div>
+
+              {selectedClient && (
+                <div className="mt-2 rounded-lg bg-[#dde9dd] px-3 py-2 text-xs text-[#2f4a3a]">
+                  Selected: <strong>{selectedClient.full_name || selectedClient.email}</strong>
+                </div>
+              )}
+
+              <p className="text-xs text-[#6a6a6a] mt-2">
+                Linking lets the form attach to the patient's chart on submit.
+              </p>
             </div>
             <div>
               <Label>Delivery</Label>
               <div className="grid grid-cols-2 gap-2 mt-2" data-testid="forms-send-channel">
                 {[
-                  { v: "link",  label: "Copy link" },
+                  { v: "link",  label: "Patient portal" },
                   { v: "email", label: "Email" },
                 ].map((opt) => (
                   <button
@@ -950,7 +1424,7 @@ function SendFormDialog({ template, onOpenChange, onSent }) {
                   onChange={(e) => setTarget(e.target.value)}
                   data-testid="forms-send-target"
                 />
-                {!target && selectedPatient && <p className="text-xs text-[#7a2a2a] mt-1">No {channel} on file for this patient — enter one above.</p>}
+                {!target && selectedClient && <p className="text-xs text-[#7a2a2a] mt-1">No {channel} on file for this patient — enter one above.</p>}
               </div>
             )}
             <div>
@@ -982,7 +1456,7 @@ function SendFormDialog({ template, onOpenChange, onSent }) {
           {!resultUrl && (
             <Button onClick={submit} disabled={submitting} className="bg-[#c19a4b] hover:bg-[#a8853f] text-[#1f2a22] rounded-full" data-testid="forms-send-submit">
               {submitting ? <Loader2 size={14} className="mr-1 animate-spin" /> : <Send size={14} className="mr-1" />}
-              {channel === "link" ? "Generate link" : `Send via ${channel}`}
+              {submitting ? "Assigning…" : channel === "link" ? ((template.publication_status || "draft") === "published" ? "Assign to patient" : "Publish & assign") : "Assign & email"}
             </Button>
           )}
         </DialogFooter>

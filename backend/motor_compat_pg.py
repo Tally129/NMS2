@@ -29,13 +29,14 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 
 from postgres_db import AsyncSessionLocal
+from postgres_models.crm_and_ops import ContentStrategy, ContentAsset
 from postgres_models.clinical_and_messaging import (
     FormSubmission, FormTemplate, LabValue, Message, MessageThread,
     SoapTemplate, Treatment, TreatmentPlan,
 )
 from postgres_models.crm_and_ops import (
     Campaign, FileMeta, FrontDeskVisit, IntegrationLog, InternalTask,
-    ProtocolEnrollment, ProtocolTemplate,
+    ProtocolEnrollment, ProtocolTemplate, PublishingQueue,
 )
 from postgres_models.payment_methods import (
     PaymentCustomer, SavedPaymentMethod,
@@ -66,6 +67,9 @@ _MODEL_BY_NAME = {
     "treatments": Treatment,
     # Phase 3.5 — CRM & operations
     "campaigns": Campaign,
+    "content_strategies": ContentStrategy,
+    "content_assets": ContentAsset,
+    "publishing_queue": PublishingQueue,
     "front_desk_visits": FrontDeskVisit,
     "internal_tasks": InternalTask,
     "integration_log": IntegrationLog,
@@ -285,7 +289,8 @@ def _build_or_clause(model, clause: Dict[str, Any]):
                 parts.append(expr == val)
             else:
                 parts.append(_jsonb_eq(model, key, val))
-    return _and(*parts) if parts else func.true()
+    from sqlalchemy import true as _true
+    return _and(*parts) if parts else _true()
 
 
 # ---------- cursor ----------------------------------------------------- #
@@ -508,8 +513,18 @@ class MotorCompatCollection:
         upserted_id: Optional[str] = None
         async with AsyncSessionLocal() as pg:
             async with pg.begin():
-                stmt = _apply_filter(select(self._model), self._model, filt or {}).limit(1)
-                row = (await pg.execute(stmt)).scalar_one_or_none()
+                stmt = (
+                    _apply_filter(
+                        select(self._model),
+                        self._model,
+                        filt or {},
+                    )
+                    .limit(1)
+                    .with_for_update(skip_locked=True)
+                )
+                row = (
+                    await pg.execute(stmt)
+                ).scalar_one_or_none()
                 if row:
                     await self._apply_update_ops(row, update_ops)
                     modified = 1
@@ -554,8 +569,22 @@ class MotorCompatCollection:
                                     **_kwargs) -> Optional[Dict[str, Any]]:
         async with AsyncSessionLocal() as pg:
             async with pg.begin():
-                stmt = _apply_filter(select(self._model), self._model, filt or {}).limit(1)
-                row = (await pg.execute(stmt)).scalar_one_or_none()
+                stmt = (
+                    _apply_filter(
+                        select(self._model),
+                        self._model,
+                        filt or {},
+                    )
+                    .limit(1)
+                    .with_for_update(
+                        skip_locked=True
+                    )
+                )
+
+                row = (
+                    await pg.execute(stmt)
+                ).scalar_one_or_none()
+
                 if not row:
                     return None
                 # ReturnDocument.BEFORE preserves the pre-update snapshot.
@@ -598,9 +627,15 @@ class MotorCompatCollection:
         return None
 
     # -------- misc --------
-    async def aggregate(self, pipeline, **_kwargs):
-        # Not used by any Phase 3.4b caller. Return an empty async iterator.
-        class _Empty:
+    def aggregate(self, pipeline, **_kwargs):
+        """Return a Motor-shaped aggregate cursor synchronously.
+
+        Legacy code expects aggregate() itself to return a cursor supporting
+        async iteration and to_list(). PostgreSQL aggregation translation is
+        not implemented here yet, so this temporary compatibility cursor
+        returns no rows instead of raising coroutine/type errors.
+        """
+        class _EmptyAggregateCursor:
             def __aiter__(self):
                 return self
 
@@ -609,7 +644,8 @@ class MotorCompatCollection:
 
             async def to_list(self, length=None):
                 return []
-        return _Empty()
+
+        return _EmptyAggregateCursor()
 
 
 # ---------- database facade ------------------------------------------- #

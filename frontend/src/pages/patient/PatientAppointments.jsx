@@ -9,6 +9,7 @@ import { Label } from "../../components/ui/label";
 import { useToast } from "../../hooks/use-toast";
 import { CalendarDays, Plus, X, Video, MapPin } from "lucide-react";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
 
 export default function PatientAppointments() {
   const { toast } = useToast();
@@ -18,11 +19,11 @@ export default function PatientAppointments() {
   const [form, setForm] = React.useState({ practitioner_id: "", date: "", slot: "", visit_mode: "in_person", consent: false });
   const [slots, setSlots] = React.useState([]);
 
-  const load = () => api.get("/appointments").then((r) => setItems(r.data || []));
+  const load = () => api.get("/appointments").then((r) => setItems(normalizeArray(r.data, ["items"])));
   React.useEffect(() => {
     load();
     api.get("/practitioners").then((r) => {
-      setPractitioners(r.data || []);
+      setPractitioners(normalizeArray(r.data, ["practitioners"]));
       if (r.data?.[0]) setForm((f) => ({ ...f, practitioner_id: r.data[0].id }));
     });
   }, []);
@@ -42,7 +43,7 @@ export default function PatientAppointments() {
     if (form.visit_mode === "telehealth" && !form.consent) {
       return toast({ title: "Please acknowledge the telehealth consent" });
     }
-    const s = slots.find((x) => x.start === form.slot);
+    const s = normalizeArray(slots).find((x) => x.start === form.slot);
     if (!s) return;
     try {
       const me = await api.get("/clients/me");
@@ -68,8 +69,58 @@ export default function PatientAppointments() {
     load();
   };
 
-  const upcoming = items.filter((a) => new Date(a.start) >= new Date() && a.status !== "canceled");
-  const past = items.filter((a) => new Date(a.start) < new Date() || a.status === "canceled");
+  const [historyOpen, setHistoryOpen] = React.useState(false);
+  const [historyFilter, setHistoryFilter] = React.useState("all");
+
+  const upcoming = normalizeArray(items)
+    .filter(
+      (a) =>
+        new Date(a.start) >= new Date() &&
+        a.status !== "canceled"
+    )
+    .sort(
+      (a, b) =>
+        new Date(a.start) - new Date(b.start)
+    );
+
+  const nextAppointment = upcoming[0] || null;
+  const laterUpcoming = upcoming.slice(1);
+
+  const past = normalizeArray(items)
+    .filter(
+      (a) =>
+        new Date(a.start) < new Date() ||
+        a.status === "canceled"
+    )
+    .sort(
+      (a, b) =>
+        new Date(b.start) - new Date(a.start)
+    );
+
+  const filteredHistory = past.filter((a) => {
+    if (historyFilter === "all") return true;
+    if (historyFilter === "canceled") {
+      return a.status === "canceled";
+    }
+    if (historyFilter === "completed") {
+      return a.status === "completed";
+    }
+    return true;
+  });
+
+  const friendlyStatus = (status) => {
+    const labels = {
+      requested: "Requested",
+      scheduled: "Scheduled",
+      confirmed: "Confirmed",
+      arrived: "Arrived",
+      in_session: "In session",
+      completed: "Completed",
+      canceled: "Canceled",
+    };
+
+    return labels[status] || status || "Scheduled";
+  };
 
   return (
     <PortalLayout>
@@ -79,52 +130,253 @@ export default function PatientAppointments() {
         actions={<Button onClick={() => setOpen(true)} className="rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]"><Plus size={16} className="mr-2" /> Book visit</Button>}
       />
 
-      <h2 className="eyebrow text-[#8a6a3c] mb-3">Upcoming</h2>
-      {upcoming.length === 0 ? (
-        <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-10 text-center text-[#6a6a6a]">
-          <CalendarDays size={28} className="mx-auto text-[#c19a4b]" />
-          <div className="mt-3">No upcoming appointments.</div>
-        </div>
-      ) : (
-        <ul className="space-y-3">
-          {upcoming.map((a) => (
-            <li key={a.id} className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+      <section className="mb-8">
+        <h2 className="eyebrow text-[#8a6a3c] mb-3">
+          Next appointment
+        </h2>
+
+        {nextAppointment ? (
+          <div className="rounded-2xl border border-[#c19a4b] bg-[#fbf7ee] p-5">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
               <div>
-                <div className="font-display text-lg text-[#1f2a22] flex items-center gap-2">
-                  {a.visit_mode === "telehealth" ? <Video size={16} className="text-[#2f4a3a]" /> : <MapPin size={16} className="text-[#2f4a3a]" />}
-                  {new Date(a.start).toLocaleString([], { weekday: "long", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                <div className="font-display text-xl text-[#1f2a22] flex items-center gap-2">
+                  {nextAppointment.visit_mode === "telehealth" ? (
+                    <Video size={18} className="text-[#2f4a3a]" />
+                  ) : (
+                    <MapPin size={18} className="text-[#2f4a3a]" />
+                  )}
+
+                  {new Date(nextAppointment.start).toLocaleString(
+                    [],
+                    {
+                      weekday: "long",
+                      month: "long",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
+                    }
+                  )}
                 </div>
-                <div className="text-sm text-[#6a6a6a]">{a.service || "Consultation"} · with {a.practitioner_name || "Practitioner"} · {a.visit_mode === "telehealth" ? "Telehealth" : "In-person"}</div>
-                <div className="text-xs text-[#8a6a3c] uppercase tracking-widest mt-1">{a.status}</div>
+
+                <div className="mt-1 text-sm text-[#6a6a6a]">
+                  {nextAppointment.service || "Consultation"}
+                  {" · with "}
+                  {nextAppointment.practitioner_name || "Practitioner"}
+                  {" · "}
+                  {nextAppointment.visit_mode === "telehealth"
+                    ? "Telehealth"
+                    : "In-person"}
+                </div>
+
+                <div className="mt-2">
+                  <span className="inline-flex rounded-full bg-[#f1ead8] px-3 py-1 text-[11px] font-medium text-[#6b4a1c]">
+                    {friendlyStatus(nextAppointment.status)}
+                  </span>
+                </div>
               </div>
-              <div className="flex gap-2">
-                {a.visit_mode === "telehealth" && a.status !== "canceled" && (
-                  <Link to={`/portal/visit/${a.id}`}>
-                    <Button size="sm" className="rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]">
-                      <Video size={14} className="mr-1" /> Join visit
-                    </Button>
-                  </Link>
-                )}
-                <Button size="sm" variant="outline" onClick={() => cancel(a)} className="rounded-full border-[#7a2a2a] text-[#7a2a2a] hover:bg-[#7a2a2a] hover:text-[#f6f1e6]"><X size={14} className="mr-1" /> Cancel</Button>
+
+              <div className="flex flex-wrap gap-2">
+                {nextAppointment.visit_mode === "telehealth" &&
+                  nextAppointment.status !== "canceled" && (
+                    <Link to={`/portal/visit/${nextAppointment.id}`}>
+                      <Button
+                        size="sm"
+                        className="rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]"
+                      >
+                        <Video size={14} className="mr-1" />
+                        Join visit
+                      </Button>
+                    </Link>
+                  )}
+
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => cancel(nextAppointment)}
+                  className="rounded-full border-[#7a2a2a] text-[#7a2a2a] hover:bg-[#7a2a2a] hover:text-[#f6f1e6]"
+                >
+                  <X size={14} className="mr-1" />
+                  Cancel
+                </Button>
               </div>
-            </li>
-          ))}
-        </ul>
+            </div>
+          </div>
+        ) : (
+          <div className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-8 text-center text-[#6a6a6a]">
+            <CalendarDays
+              size={28}
+              className="mx-auto text-[#c19a4b]"
+            />
+            <div className="mt-3">
+              No upcoming appointments.
+            </div>
+          </div>
+        )}
+      </section>
+
+      {laterUpcoming.length > 0 && (
+        <section className="mb-8">
+          <div className="flex items-center gap-2 mb-3">
+            <h2 className="eyebrow text-[#8a6a3c]">
+              Later appointments
+            </h2>
+
+            <span className="inline-flex min-w-[22px] h-[22px] items-center justify-center rounded-full bg-[#f1ead8] px-2 text-[11px] font-medium text-[#6b4a1c]">
+              {laterUpcoming.length}
+            </span>
+          </div>
+
+          <ul className="space-y-3">
+            {laterUpcoming.map((a) => (
+              <li
+                key={a.id}
+                className="rounded-2xl border border-[#e7dfc9] bg-[#fbf7ee] p-5 flex flex-col md:flex-row md:items-center md:justify-between gap-3"
+              >
+                <div>
+                  <div className="font-display text-lg text-[#1f2a22] flex items-center gap-2">
+                    {a.visit_mode === "telehealth" ? (
+                      <Video size={16} className="text-[#2f4a3a]" />
+                    ) : (
+                      <MapPin size={16} className="text-[#2f4a3a]" />
+                    )}
+
+                    {new Date(a.start).toLocaleString(
+                      [],
+                      {
+                        weekday: "long",
+                        month: "short",
+                        day: "numeric",
+                        hour: "numeric",
+                        minute: "2-digit",
+                      }
+                    )}
+                  </div>
+
+                  <div className="text-sm text-[#6a6a6a]">
+                    {a.service || "Consultation"}
+                    {" · with "}
+                    {a.practitioner_name || "Practitioner"}
+                    {" · "}
+                    {a.visit_mode === "telehealth"
+                      ? "Telehealth"
+                      : "In-person"}
+                  </div>
+
+                  <div className="text-xs text-[#8a6a3c] uppercase tracking-widest mt-1">
+                    {friendlyStatus(a.status)}
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  {a.visit_mode === "telehealth" &&
+                    a.status !== "canceled" && (
+                      <Link to={`/portal/visit/${a.id}`}>
+                        <Button
+                          size="sm"
+                          className="rounded-full bg-[#2f4a3a] hover:bg-[#263d30] text-[#f6f1e6]"
+                        >
+                          <Video size={14} className="mr-1" />
+                          Join visit
+                        </Button>
+                      </Link>
+                    )}
+
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => cancel(a)}
+                    className="rounded-full border-[#7a2a2a] text-[#7a2a2a] hover:bg-[#7a2a2a] hover:text-[#f6f1e6]"
+                  >
+                    <X size={14} className="mr-1" />
+                    Cancel
+                  </Button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
 
-      <h2 className="eyebrow text-[#8a6a3c] mt-10 mb-3">Past & canceled</h2>
-      {past.length === 0 ? (
-        <div className="text-sm text-[#6a6a6a]">No past appointments.</div>
-      ) : (
-        <ul className="space-y-2">
-          {past.map((a) => (
-            <li key={a.id} className="rounded-xl border border-[#e7dfc9] bg-[#fbf7ee] p-4 text-sm flex items-center justify-between">
-              <span>{new Date(a.start).toLocaleDateString()} · {a.service || "—"} · {a.practitioner_name || "—"}</span>
-              <span className="uppercase text-[10px] tracking-widest text-[#8a6a3c]">{a.status}</span>
-            </li>
-          ))}
-        </ul>
-      )}
+      <section className="mt-10">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <button
+            type="button"
+            onClick={() => setHistoryOpen((value) => !value)}
+            className="flex items-center gap-2 text-left"
+            aria-expanded={historyOpen}
+          >
+            <h2 className="eyebrow text-[#8a6a3c]">
+              Appointment history
+            </h2>
+
+            <span className="inline-flex min-w-[24px] h-6 items-center justify-center rounded-full bg-[#f1ead8] px-2 text-xs text-[#6b4a1c]">
+              {past.length}
+            </span>
+
+            <span className="text-xs text-[#6a6a6a]">
+              {historyOpen ? "Hide" : "View"}
+            </span>
+          </button>
+
+          {historyOpen && (
+            <div className="flex flex-wrap gap-2">
+              {[
+                ["all", "All"],
+                ["completed", "Completed"],
+                ["canceled", "Canceled"],
+              ].map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setHistoryFilter(id)}
+                  className={`rounded-full px-3 py-1.5 text-xs font-medium ${
+                    historyFilter === id
+                      ? "bg-[#2f4a3a] text-[#f6f1e6]"
+                      : "bg-[#f1ead8] text-[#5d513d]"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {historyOpen && (
+          <div className="mt-3">
+            {past.length === 0 ? (
+              <div className="text-sm text-[#6a6a6a]">
+                No appointment history.
+              </div>
+            ) : filteredHistory.length === 0 ? (
+              <div className="text-sm text-[#6a6a6a]">
+                No appointments match this filter.
+              </div>
+            ) : (
+              <ul className="space-y-2">
+                {filteredHistory.map((a) => (
+                  <li
+                    key={a.id}
+                    className="rounded-xl border border-[#e7dfc9] bg-[#fbf7ee] p-4 text-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2"
+                  >
+                    <span>
+                      {new Date(a.start).toLocaleDateString()}
+                      {" · "}
+                      {a.service || "—"}
+                      {" · "}
+                      {a.practitioner_name || "—"}
+                    </span>
+
+                    <span className="uppercase text-[10px] tracking-widest text-[#8a6a3c]">
+                      {friendlyStatus(a.status)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </section>
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="bg-[#fbf7ee] border-[#e7dfc9]">
@@ -153,7 +405,7 @@ export default function PatientAppointments() {
             <div><Label>Practitioner</Label>
               <Select value={form.practitioner_id} onValueChange={(v) => setForm({ ...form, practitioner_id: v, slot: "" })}>
                 <SelectTrigger className="mt-2 bg-[#f6f1e6] border-[#e0d6bc]"><SelectValue /></SelectTrigger>
-                <SelectContent>{practitioners.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name}</SelectItem>)}</SelectContent>
+                <SelectContent>{normalizeArray(practitioners).map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name}</SelectItem>)}</SelectContent>
               </Select>
             </div>
             <div><Label>Date</Label>
@@ -166,7 +418,7 @@ export default function PatientAppointments() {
                   <div className="text-xs text-[#6a6a6a] mt-2">No open slots on this date.</div>
                 ) : (
                   <div className="mt-2 grid grid-cols-3 gap-2">
-                    {slots.map((s) => (
+                    {normalizeArray(slots).map((s) => (
                       <button
                         key={s.start}
                         onClick={() => setForm({ ...form, slot: s.start })}

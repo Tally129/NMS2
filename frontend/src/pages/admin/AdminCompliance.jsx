@@ -6,6 +6,7 @@ import { Textarea } from "../../components/ui/textarea";
 import { useToast } from "../../hooks/use-toast";
 import { ShieldCheck, ExternalLink, Loader2, CheckCircle2, Circle, Clock, XCircle, Save } from "lucide-react";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
 
 const STATUS_META = {
   not_started:    { label: "Not started",    color: "bg-[#f5e3e3] text-[#7a2a2a] border-[#d4a8a8]", icon: XCircle },
@@ -21,7 +22,7 @@ export default function AdminCompliance() {
   const [notes, setNotes] = React.useState({});
 
   const load = async () => {
-    try { const r = await api.get("/compliance/baa-checklist"); setRows(r.data || []); }
+    try { const r = await api.get("/compliance/baa-checklist"); setRows(normalizeArray(r.data, ["rows"])); }
     catch (e) { toast({ title: "Failed to load", description: getErrorMessage(e) || "" }); }
   };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -37,9 +38,9 @@ export default function AdminCompliance() {
     finally { setBusy((b) => ({ ...b, [key]: false })); }
   };
 
-  const signedCount = rows.filter((r) => r.status === "signed").length;
-  const requiredCount = rows.filter((r) => r.required).length;
-  const doneCount = rows.filter((r) => r.required && (r.status === "signed" || r.status === "not_applicable")).length;
+  const signedCount = normalizeArray(rows).filter((r) => r.status === "signed").length;
+  const requiredCount = normalizeArray(rows).filter((r) => r.required).length;
+  const doneCount = normalizeArray(rows).filter((r) => r.required && (r.status === "signed" || r.status === "not_applicable")).length;
 
   return (
     <PortalLayout>
@@ -68,7 +69,7 @@ export default function AdminCompliance() {
       </div>
 
       <div className="space-y-4" data-testid="compliance-rows">
-        {rows.map((r) => {
+        {normalizeArray(rows).map((r) => {
           const M = STATUS_META[r.status] || STATUS_META.not_started;
           const Icon = M.icon;
           return (

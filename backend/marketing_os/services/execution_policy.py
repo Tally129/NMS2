@@ -138,6 +138,23 @@ def build_idempotency_key(
     payload: Mapping[str, Any],
     operation_token: str | None = None,
 ) -> str:
+    # A caller-supplied operation token identifies one immutable
+    # execution lifecycle. Request content must not participate in
+    # this hash; otherwise reusing a token with changed content can
+    # accidentally create a second execution request.
+    if operation_token is not None:
+        token = str(operation_token).strip()
+
+        canonical_token = (
+            f"marketing-execution:v1:{token}"
+        )
+
+        return hashlib.sha256(
+            canonical_token.encode("utf-8")
+        ).hexdigest()
+
+    # Legacy/internal callers without an operation token retain the
+    # deterministic content-derived key.
     normalized = {
         "provider": canonical_provider(provider),
         "action_type": str(action_type or "").strip().lower(),
@@ -145,11 +162,6 @@ def build_idempotency_key(
         "target_id": str(target_id or "").strip(),
         "payload": dict(payload or {}),
     }
-
-    if operation_token is not None:
-        normalized["operation_token"] = str(
-            operation_token
-        ).strip()
 
     encoded = json.dumps(
         normalized,

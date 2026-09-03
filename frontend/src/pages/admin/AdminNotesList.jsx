@@ -5,6 +5,7 @@ import api from "../../lib/api";
 import { Input } from "../../components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
 import { FileText, Search, Loader2 } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 export default function AdminNotesList() {
   const [rows, setRows] = React.useState([]);
@@ -20,11 +21,11 @@ export default function AdminNotesList() {
       if (providerFilter && providerFilter !== "all") params.practitioner_id = providerFilter;
       if (search) params.search = search;
       const r = await api.get("/notes/all", { params });
-      setRows(r.data || []);
+      setRows(normalizeArray(r.data, ["rows"]));
     } finally { setLoading(false); }
   };
   React.useEffect(() => {
-    api.get("/practitioners").then((r) => setProviders(r.data || [])).catch(() => {});
+    api.get("/practitioners").then((r) => setProviders(normalizeArray(r.data, ["providers"]))).catch(() => {});
   }, []);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   React.useEffect(() => { const t = setTimeout(load, 250); return () => clearTimeout(t); }, [providerFilter, search]);
@@ -52,7 +53,7 @@ export default function AdminNotesList() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All providers</SelectItem>
-            {providers.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name || p.email}</SelectItem>)}
+            {normalizeArray(providers).map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name || p.email}</SelectItem>)}
           </SelectContent>
         </Select>
       </div>
@@ -72,7 +73,7 @@ export default function AdminNotesList() {
             {!loading && rows.length === 0 && (
               <tr><td colSpan={4} className="py-12 text-center text-[#6a6a6a]">No notes match.</td></tr>
             )}
-            {!loading && rows.map((n) => (
+            {!loading && normalizeArray(rows).map((n) => (
               <tr key={n.id} className="border-t border-[#e7dfc9] hover:bg-[#f1ead8]" data-testid={`admin-note-row-${n.id}`}>
                 <td className="py-3 px-4 text-xs text-[#6a6a6a]">
                   {new Date(n.created_at).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}

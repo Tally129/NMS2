@@ -3,6 +3,7 @@ import PortalLayout, { PortalHeader } from "../PortalLayout";
 import api from "../../lib/api";
 import { Input } from "../../components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
+import { normalizeArray } from "../../lib/collections";
 
 const ACTIONS = [
   "_all_",
@@ -33,12 +34,12 @@ export default function AdminAudit() {
     setLoading(true);
     const params = { limit: 300 };
     if (filter.action && filter.action !== "_all_") params.action = filter.action;
-    api.get("/admin/audit", { params }).then((r) => setItems(r.data || [])).finally(() => setLoading(false));
+    api.get("/admin/audit", { params }).then((r) => setItems(normalizeArray(r.data, ["items"]))).finally(() => setLoading(false));
   }, [filter.action]);
 
   React.useEffect(() => { load(); }, [load]);
 
-  const filtered = items.filter((i) => {
+  const filtered = normalizeArray(items).filter((i) => {
     const s = filter.q.toLowerCase();
     if (!s) return true;
     return (

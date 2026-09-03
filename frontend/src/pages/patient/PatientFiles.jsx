@@ -12,6 +12,7 @@ import {
 import { Upload, Download, FolderOpen } from "lucide-react";
 import { useToast } from "../../hooks/use-toast";
 import { getErrorMessage } from "../../lib/errors";
+import { normalizeArray } from "../../lib/collections";
 
 export default function PatientFiles({ clientIdProp }) {
   const { toast } = useToast();
@@ -30,7 +31,7 @@ export default function PatientFiles({ clientIdProp }) {
       // The backend automatically resolves the signed-in patient's record.
       // Do not submit or trust a patient-provided client_id.
       const r = await api.get("/files");
-      setFiles(r.data || []);
+      setFiles(normalizeArray(r.data, ["files"]));
     } catch (e) {
       setFiles([]);
       setLoadError(e?.response?.data?.detail?.message || e?.message || "Could not load your files.");
@@ -145,7 +146,7 @@ export default function PatientFiles({ clientIdProp }) {
               </tr>
             </thead>
             <tbody>
-              {files.map((f) => (
+              {normalizeArray(files).map((f) => (
                 <tr key={f.id} className="border-t border-[#e7dfc9]">
                   <td className="py-3 px-4 text-[#2a2a2a]">{f.filename}</td>
                   <td className="py-3 px-4 text-[#6a6a6a] capitalize">{f.category}</td>
