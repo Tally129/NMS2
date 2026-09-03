@@ -15,6 +15,7 @@ import AttributionFunnelPanel from "./AttributionFunnelPanel";
 import LeadOperationsPanel from "./LeadOperationsPanel";
 import FunnelBuilderPanel from "./FunnelBuilderPanel";
 import NurtureRecoveryPanel from "./NurtureRecoveryPanel";
+import ExperimentsPanel from "./ExperimentsPanel";
 
 import { Button } from "../../components/ui/button";
 
@@ -893,6 +894,7 @@ export default function MarketingCommandCenter() {
         <LeadOperationsPanel />
         <FunnelBuilderPanel />
         <NurtureRecoveryPanel />
+        <ExperimentsPanel />
       </div>
 
 

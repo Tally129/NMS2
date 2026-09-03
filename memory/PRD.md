@@ -1807,3 +1807,26 @@ yet started.
 - Tests: full Phase 8A+8B + Phase 6/7 regression green (148 passed, 1 skipped).
 
 _Last updated: Jul 2025 (Marketing OS Phase 8A+8B · Nurture + Appointment Recovery)_
+
+---
+
+## Marketing OS Phase 9 — Conversion Optimization + Experimentation
+Migration `f8a9b0c1d2e3` (revises `e7f8a9b0c1d2`). Tables: `marketing_experiments`,
+`marketing_experiment_variants`, `marketing_experiment_assignments`,
+`marketing_experiment_outcomes`. FKs only to auth_users, marketing_offers,
+marketing_funnels, marketing_funnel_steps, marketing_conversion_events (no PHI/EMR).
+- Types: landing_page | offer | funnel_step. Lifecycle: draft→active→paused→completed→archived.
+- Deterministic A/B assignment: sha256(experiment_id:subject_id) bucketed by allocation
+  (stable per subject; unique per experiment+subject; no random reassignment).
+- Outcomes: marketing-safe metrics (impression/click/lead/appointment_request/booked/
+  completed/conversion/spend) + revenue via conversion.value; reuse Phase 5
+  marketing_conversion_events via idempotent /ingest-conversions.
+- Deterministic report: conversion rate, CPL/CPA, revenue, ROAS, lift vs control,
+  documented two-proportion z-test with insufficient-sample flag (no fabricated confidence).
+- Winner recommendation is ADVISORY ONLY (auto_publish=false); no autonomous publishing,
+  no ad-platform writes, no budget changes, no SMS, human approval for any external change.
+- UI: ExperimentsPanel in Marketing Command Center (list/status/variants/allocation/
+  conversions/rate/revenue/lift + Start/Pause/Complete + "No autonomous publishing" notice).
+- Tests: 23 unit + 5 HTTP focused Phase 9 (green).
+
+_Last updated: Jul 2025 (Marketing OS Phase 9 · Experimentation)_

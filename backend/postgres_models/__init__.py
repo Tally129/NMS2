@@ -109,4 +109,10 @@ from .marketing_phase8 import (  # noqa: F401
     MarketingNurtureEnrollment,
     MarketingNurtureAction,
 )
+from .marketing_phase9 import (  # noqa: F401
+    MarketingExperiment,
+    MarketingExperimentVariant,
+    MarketingExperimentAssignment,
+    MarketingExperimentOutcome,
+)
 
