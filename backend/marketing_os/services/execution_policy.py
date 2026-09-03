@@ -785,6 +785,98 @@ def next_request_status(
     return result
 
 
+def evaluate_live_execution_policy(
+    *,
+    provider: str,
+    action_type: str,
+    request_status: str,
+    provider_enabled: bool,
+    provider_dry_run_only: bool,
+    provider_human_approval_required: bool,
+    approved: bool,
+    provider_allowed_actions: Any = None,
+) -> dict[str, Any]:
+    """Evaluate whether one live provider mutation may execute.
+
+    Live execution is allowed only when:
+    - the provider itself is enabled;
+    - the provider is not configured dry-run-only;
+    - the action appears in the provider allowlist;
+    - the request lifecycle is approved;
+    - human approval requirements have been satisfied.
+
+    This function performs no external call.
+    """
+
+    provider = canonical_provider(provider)
+
+    action_type = str(
+        action_type or ""
+    ).strip().lower()
+
+    request_status = str(
+        request_status or ""
+    ).strip().lower()
+
+    allowed_actions = {
+        str(value or "").strip().lower()
+        for value in (
+            provider_allowed_actions
+            if isinstance(
+                provider_allowed_actions,
+                (list, tuple, set, frozenset),
+            )
+            else []
+        )
+        if str(value or "").strip()
+    }
+
+    reasons: list[str] = []
+
+    if provider not in SUPPORTED_PROVIDERS:
+        reasons.append("unsupported_provider")
+
+    if action_type not in ALLOWED_ACTIONS:
+        reasons.append("unsupported_action")
+
+    if not provider_enabled:
+        reasons.append("provider_disabled")
+
+    if provider_dry_run_only:
+        reasons.append("provider_dry_run_only")
+
+    if action_type not in allowed_actions:
+        reasons.append("action_not_allowed")
+
+    if request_status != "approved":
+        reasons.append("request_not_approved")
+
+    if (
+        provider_human_approval_required
+        and not approved
+    ):
+        reasons.append("human_approval_required")
+
+    if not approved:
+        reasons.append("approval_missing")
+
+    reasons = list(dict.fromkeys(reasons))
+
+    return {
+        "allowed": not reasons,
+        "provider": provider,
+        "action_type": action_type,
+        "live_execution": True,
+        "dry_run": False,
+        "human_approval_required": bool(
+            provider_human_approval_required
+        ),
+        "approved": bool(approved),
+        "reasons": reasons,
+    }
+
+
+
 __all__ = [
     "SUPPORTED_PROVIDERS",
     "ALLOWED_ACTIONS",
@@ -793,6 +885,7 @@ __all__ = [
     "build_idempotency_key",
     "ACTION_PAYLOAD_FIELDS",
     "ACTION_TARGET_CONTRACTS",
+    "evaluate_live_execution_policy",
     "EXECUTION_CREDENTIAL_FIELDS",
     "validate_execution_target",
     "validate_execution_payload",

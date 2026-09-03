@@ -13,6 +13,7 @@ from marketing_os.services.execution_policy import (
     build_idempotency_key,
     canonical_provider,
     evaluate_execution_policy,
+    evaluate_live_execution_policy,
     next_request_status,
     validate_execution_request,
     validate_execution_target,
@@ -231,10 +232,118 @@ async def perform_dry_run(
     }
 
 
+async def perform_live_execution(
+    request: Mapping[str, Any],
+    *,
+    adapter: Any,
+    provider_enabled: bool,
+    provider_dry_run_only: bool,
+    provider_human_approval_required: bool,
+    provider_allowed_actions: Any = None,
+) -> dict[str, Any]:
+    """Execute one already-approved provider mutation.
+
+    The caller supplies the concrete live provider adapter.
+    This keeps account/credential resolution outside the policy
+    engine and makes the execution service independently testable.
+    """
+
+    approved = (
+        str(request.get("status") or "").lower()
+        == "approved"
+        and bool(request.get("approved_by"))
+        and bool(request.get("approved_at"))
+    )
+
+    if bool(request.get("dry_run", True)):
+        return {
+            "allowed": False,
+            "policy": {
+                "allowed": False,
+                "live_execution": True,
+                "dry_run": False,
+                "reasons": [
+                    "request_marked_dry_run",
+                ],
+            },
+            "result": None,
+        }
+
+    policy = evaluate_live_execution_policy(
+        provider=request.get("provider"),
+        action_type=request.get("action_type"),
+        request_status=request.get("status"),
+        provider_enabled=provider_enabled,
+        provider_dry_run_only=provider_dry_run_only,
+        provider_human_approval_required=(
+            provider_human_approval_required
+        ),
+        approved=approved,
+        provider_allowed_actions=(
+            provider_allowed_actions
+        ),
+    )
+
+    if not policy["allowed"]:
+        return {
+            "allowed": False,
+            "policy": policy,
+            "result": None,
+        }
+
+    if adapter is None:
+        raise RuntimeError(
+            "live_provider_adapter_required"
+        )
+
+    execute_action = getattr(
+        adapter,
+        "execute_action",
+        None,
+    )
+
+    if not callable(execute_action):
+        raise RuntimeError(
+            "provider_adapter_execute_action_missing"
+        )
+
+    result = await execute_action(
+        action_type=request.get("action_type"),
+        target_type=request.get("target_type"),
+        target_id=request.get("target_id"),
+        payload=request.get("request_payload") or {},
+    )
+
+    if not isinstance(result, Mapping):
+        raise RuntimeError(
+            "invalid_provider_execution_result"
+        )
+
+    result = dict(result)
+
+    if result.get("external_write_performed") is not True:
+        raise RuntimeError(
+            "provider_did_not_confirm_external_write"
+        )
+
+    if result.get("verified") is not True:
+        raise RuntimeError(
+            "provider_write_not_verified"
+        )
+
+    return {
+        "allowed": True,
+        "policy": policy,
+        "result": result,
+    }
+
+
+
 __all__ = [
     "prepare_execution_request",
     "execution_request_matches_existing",
     "submit_for_approval",
     "decide_request",
     "perform_dry_run",
+    "perform_live_execution",
 ]
