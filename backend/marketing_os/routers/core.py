@@ -1484,16 +1484,134 @@ async def _resolve_live_execution_adapter(
     provider: str,
     request: dict[str, Any],
 ):
-    """Resolve one live provider adapter.
+    """Resolve one write-enabled external provider adapter.
 
-    Phase 3 intentionally has no production provider resolution yet.
-    Tests may monkeypatch this helper. Real Google Ads account
-    resolution is added in Phase 4.
+    The authoritative account configuration is stored in
+    marketing_channel_accounts. Secrets remain server-side.
     """
 
-    raise RuntimeError(
-        f"live_provider_resolution_not_configured:{provider}"
+    from marketing_os.integrations.google_ads import (
+        credential_readiness as google_ads_credential_readiness,
     )
+    from marketing_os.integrations.registry import (
+        create_integration,
+        normalize_provider,
+    )
+
+    provider = normalize_provider(provider)
+
+    if provider != "google_ads":
+        raise RuntimeError(
+            f"live_provider_not_supported:{provider}"
+        )
+
+    readiness = google_ads_credential_readiness()
+
+    if not readiness.get("required_configured"):
+        raise RuntimeError(
+            "google_ads_credentials_missing"
+        )
+
+    async with AsyncSessionLocal() as pg:
+        result = await pg.execute(
+            text("""
+                SELECT
+                    id,
+                    provider,
+                    external_account_id,
+                    account_name,
+                    status,
+                    currency,
+                    timezone,
+                    read_enabled,
+                    write_enabled,
+                    last_sync_at,
+                    configuration
+                FROM marketing_channel_accounts
+                WHERE lower(provider) = 'google_ads'
+                ORDER BY created_at DESC
+            """)
+        )
+
+        rows = [
+            dict(row)
+            for row in result.mappings().all()
+        ]
+
+    if not rows:
+        raise RuntimeError(
+            "google_ads_account_not_registered"
+        )
+
+    eligible = []
+
+    for account in rows:
+        status = str(
+            account.get("status") or ""
+        ).strip().lower()
+
+        if status not in {"connected", "active"}:
+            continue
+
+        if account.get("read_enabled") is not True:
+            continue
+
+        if account.get("write_enabled") is not True:
+            continue
+
+        eligible.append(account)
+
+    if not eligible:
+        raise RuntimeError(
+            "google_ads_write_account_not_enabled"
+        )
+
+    if len(eligible) > 1:
+        requested_account_id = (
+            request.get("channel_account_id")
+            or request.get("request_payload", {}).get(
+                "channel_account_id"
+            )
+        )
+
+        if requested_account_id:
+            matches = [
+                account
+                for account in eligible
+                if str(account.get("id"))
+                == str(requested_account_id)
+            ]
+
+            if len(matches) != 1:
+                raise RuntimeError(
+                    "google_ads_channel_account_not_found"
+                )
+
+            account = matches[0]
+
+        else:
+            raise RuntimeError(
+                "google_ads_multiple_write_accounts"
+            )
+
+    else:
+        account = eligible[0]
+
+    integration = create_integration(
+        "google_ads",
+        account=account,
+    )
+
+    if getattr(
+        integration,
+        "provider",
+        None,
+    ) != "google_ads":
+        raise RuntimeError(
+            "google_ads_adapter_provider_mismatch"
+        )
+
+    return integration
 
 
 
