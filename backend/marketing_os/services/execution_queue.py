@@ -15,6 +15,7 @@ from marketing_os.services.execution_policy import (
     evaluate_execution_policy,
     next_request_status,
     validate_execution_request,
+    validate_execution_target,
 )
 from marketing_os.services.provider_adapters import (
     get_provider_adapter,
@@ -38,15 +39,38 @@ def prepare_execution_request(
         payload=payload,
     )
 
-    if not validation["valid"]:
+    target_validation = validate_execution_target(
+        action_type=action_type,
+        target_type=target_type,
+        target_id=target_id,
+    )
+
+    combined_errors = list(
+        validation["errors"]
+    )
+
+    if not target_validation["valid"]:
+        combined_errors.extend(
+            target_validation["errors"]
+        )
+
+    if combined_errors:
         return {
             "valid": False,
-            "errors": validation["errors"],
+            "errors": combined_errors,
             "payload_policy": (
                 validation.get("payload_policy")
                 or {}
             ),
+            "target_policy": target_validation,
         }
+
+    target_type = target_validation[
+        "target_type"
+    ]
+    target_id = target_validation[
+        "target_id"
+    ]
 
     idempotency_key = build_idempotency_key(
         provider=provider,
@@ -62,12 +86,8 @@ def prepare_execution_request(
             "id": uuid.uuid4().hex,
             "provider": provider,
             "action_type": validation["action_type"],
-            "target_type": str(target_type or "").strip()[:100],
-            "target_id": (
-                str(target_id).strip()[:255]
-                if target_id is not None
-                else None
-            ),
+            "target_type": target_type,
+            "target_id": target_id,
             "request_payload": dict(payload or {}),
             "idempotency_key": idempotency_key,
             "dry_run": bool(dry_run),

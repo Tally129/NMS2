@@ -360,3 +360,242 @@ def test_budget_update_accepts_bounded_safe_fields():
     )
 
     assert prepared["valid"] is True
+
+
+def test_pause_requires_campaign_target():
+    prepared = prepare_execution_request(
+        provider="google_ads",
+        action_type="campaign.pause",
+        target_type="ad",
+        target_id="123",
+        payload={"reason": "review"},
+    )
+
+    assert prepared["valid"] is False
+    assert (
+        "invalid_target_type_for_action"
+        in prepared["errors"]
+    )
+
+
+def test_pause_requires_target_id():
+    prepared = prepare_execution_request(
+        provider="google_ads",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id=None,
+        payload={"reason": "review"},
+    )
+
+    assert prepared["valid"] is False
+    assert (
+        "target_id_required_for_action"
+        in prepared["errors"]
+    )
+
+
+def test_campaign_create_allows_missing_target_id():
+    prepared = prepare_execution_request(
+        provider="google_ads",
+        action_type="campaign.create",
+        target_type="campaign",
+        target_id=None,
+        payload={
+            "name": "September Campaign",
+            "currency": "USD",
+            "daily_budget": 50,
+        },
+    )
+
+    assert prepared["valid"] is True
+
+
+def test_budget_rejects_negative_value():
+    prepared = prepare_execution_request(
+        provider="meta_ads",
+        action_type="budget.update",
+        target_type="campaign",
+        target_id="abc",
+        payload={
+            "daily_budget": -1,
+            "currency": "USD",
+        },
+    )
+
+    assert prepared["valid"] is False
+    assert "invalid_payload_values" in prepared["errors"]
+    assert (
+        "daily_budget_must_be_nonnegative"
+        in prepared["payload_policy"]["value_errors"]
+    )
+
+
+def test_budget_rejects_nonfinite_value():
+    prepared = prepare_execution_request(
+        provider="meta_ads",
+        action_type="budget.update",
+        target_type="campaign",
+        target_id="abc",
+        payload={
+            "daily_budget": float("inf"),
+            "currency": "USD",
+        },
+    )
+
+    assert prepared["valid"] is False
+    assert (
+        "daily_budget_must_be_finite"
+        in prepared["payload_policy"]["value_errors"]
+    )
+
+
+def test_budget_rejects_boolean_as_number():
+    prepared = prepare_execution_request(
+        provider="meta_ads",
+        action_type="budget.update",
+        target_type="campaign",
+        target_id="abc",
+        payload={
+            "daily_budget": True,
+            "currency": "USD",
+        },
+    )
+
+    assert prepared["valid"] is False
+    assert (
+        "daily_budget_must_be_number"
+        in prepared["payload_policy"]["value_errors"]
+    )
+
+
+def test_currency_requires_three_letters():
+    prepared = prepare_execution_request(
+        provider="meta_ads",
+        action_type="budget.update",
+        target_type="campaign",
+        target_id="abc",
+        payload={
+            "daily_budget": 25,
+            "currency": "US",
+        },
+    )
+
+    assert prepared["valid"] is False
+    assert (
+        "currency_must_be_three_letters"
+        in prepared["payload_policy"]["value_errors"]
+    )
+
+
+def test_ad_destination_requires_http_url():
+    prepared = prepare_execution_request(
+        provider="google_ads",
+        action_type="ad.create",
+        target_type="ad",
+        target_id=None,
+        payload={
+            "name": "Test Ad",
+            "headline": "Wellness",
+            "destination_url": "javascript:alert(1)",
+        },
+    )
+
+    assert prepared["valid"] is False
+    assert (
+        "destination_url_must_be_http_url"
+        in prepared["payload_policy"]["value_errors"]
+    )
+
+
+def test_campaign_dates_must_be_ordered():
+    prepared = prepare_execution_request(
+        provider="google_ads",
+        action_type="campaign.create",
+        target_type="campaign",
+        target_id=None,
+        payload={
+            "name": "Test",
+            "start_date": "2026-09-30",
+            "end_date": "2026-09-01",
+        },
+    )
+
+    assert prepared["valid"] is False
+    assert (
+        "end_date_before_start_date"
+        in prepared["payload_policy"]["value_errors"]
+    )
+
+
+def test_nested_allowed_field_value_is_rejected():
+    prepared = prepare_execution_request(
+        provider="google_ads",
+        action_type="campaign.create",
+        target_type="campaign",
+        target_id=None,
+        payload={
+            "name": {
+                "unexpected": "nested",
+            },
+        },
+    )
+
+    assert prepared["valid"] is False
+    assert (
+        "name_must_be_scalar"
+        in prepared["payload_policy"]["value_errors"]
+    )
+
+
+def test_execution_payload_size_is_bounded():
+    prepared = prepare_execution_request(
+        provider="google_ads",
+        action_type="ad.create",
+        target_type="ad",
+        target_id=None,
+        payload={
+            "description": "x" * 40000,
+        },
+    )
+
+    assert prepared["valid"] is False
+    assert (
+        "payload_too_large"
+        in prepared["payload_policy"]["value_errors"]
+    )
+
+
+def test_ad_update_requires_ad_target_id():
+    prepared = prepare_execution_request(
+        provider="google_ads",
+        action_type="ad.update",
+        target_type="ad",
+        target_id=None,
+        payload={
+            "headline": "Updated headline",
+        },
+    )
+
+    assert prepared["valid"] is False
+    assert (
+        "target_id_required_for_action"
+        in prepared["errors"]
+    )
+
+
+def test_safe_ad_payload_remains_valid():
+    prepared = prepare_execution_request(
+        provider="google_ads",
+        action_type="ad.create",
+        target_type="ad",
+        target_id=None,
+        payload={
+            "name": "Wellness Ad",
+            "headline": "Explore Wellness Care",
+            "description": "Learn more about our wellness services.",
+            "destination_url": "https://natmedsol.com/",
+            "status": "paused",
+        },
+    )
+
+    assert prepared["valid"] is True

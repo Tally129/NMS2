@@ -1743,6 +1743,10 @@ async def marketing_execution_request_create(
                     prepared.get("payload_policy")
                     or {}
                 ),
+                "target_policy": (
+                    prepared.get("target_policy")
+                    or {}
+                ),
             },
         )
 
