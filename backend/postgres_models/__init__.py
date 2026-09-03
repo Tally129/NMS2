@@ -130,3 +130,9 @@ from .marketing_phase11 import (  # noqa: F401
     MarketingContentCalendarItem,
 )
 
+# Marketing OS Phase 12 — AI Marketing Director
+from .marketing_phase12 import (
+    MarketingDirectorSignal,
+    MarketingDirectorBrief,
+)
+

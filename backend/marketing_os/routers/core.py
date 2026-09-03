@@ -27,6 +27,9 @@ from postgres_db import AsyncSessionLocal
 
 from marketing_os.capabilities import CAPABILITIES
 from marketing_os.services.director import build_marketing_brief
+from marketing_os.services.director_signals import build_cross_phase_signals
+from marketing_os.services.director_persistence import persist_director_snapshot
+from marketing_os.services.director_ai import build_director_summary
 from marketing_os.services.lead_opportunities import derive_lead_opportunities
 from marketing_os.services.paid_media import build_paid_media_overview
 from marketing_os.services.journey import (
@@ -995,6 +998,7 @@ async def decide_marketing_recommendation(
 
 @api.get("/marketing-os/director/brief")
 async def marketing_director_brief(
+    ai_summary: bool = Query(default=False),
     current_user=Depends(
         require_roles(*MARKETING_ROLES)
     ),
@@ -1155,6 +1159,57 @@ async def marketing_director_brief(
         except (TypeError, ValueError):
             pass
 
+    # Phase 9-11 Director inputs are intentionally bounded and read-only.
+    # SELECT to_jsonb(row) avoids coupling the Director to every source-table
+    # column while preserving the source modules as the systems of record.
+    async with AsyncSessionLocal() as pg:
+        experiment_result = await pg.execute(text("""
+            SELECT to_jsonb(e) AS data
+            FROM marketing_experiments e
+            ORDER BY e.created_at DESC
+            LIMIT 25
+        """))
+        experiment_rows = [
+            dict(row._mapping["data"])
+            for row in experiment_result
+            if row._mapping["data"]
+        ]
+
+        local_result = await pg.execute(text("""
+            SELECT to_jsonb(o) AS data
+            FROM marketing_local_opportunities o
+            WHERE COALESCE(o.status, 'open') NOT IN ('dismissed', 'actioned')
+            ORDER BY o.priority DESC, o.created_at DESC
+            LIMIT 50
+        """))
+        local_opportunity_rows = [
+            dict(row._mapping["data"])
+            for row in local_result
+            if row._mapping["data"]
+        ]
+
+        content_result = await pg.execute(text("""
+            SELECT to_jsonb(t) AS data
+            FROM marketing_content_topics t
+            WHERE COALESCE(t.status, 'idea') NOT IN ('archived', 'dismissed')
+            ORDER BY t.priority DESC, t.created_at DESC
+            LIMIT 50
+        """))
+        content_topic_rows = [
+            dict(row._mapping["data"])
+            for row in content_result
+            if row._mapping["data"]
+        ]
+
+    director_signals = build_cross_phase_signals(
+        paid_media=aggregated.values(),
+        funnel=compute_funnel(conversion_events),
+        lead_operations=setter_metrics(lead_rows, lead_task_rows),
+        experiments=experiment_rows,
+        local_growth=local_opportunity_rows,
+        content_topics=content_topic_rows,
+    )
+
     brief = build_marketing_brief(
         goals=goals,
         budgets=budgets,
@@ -1208,8 +1263,68 @@ async def marketing_director_brief(
         "goal_rows": len(goals),
         "budget_rows": len(budgets),
         "metric_rows": len(rows),
+        "phase9_experiment_rows": len(experiment_rows),
+        "phase10_local_opportunity_rows": len(local_opportunity_rows),
+        "phase11_content_topic_rows": len(content_topic_rows),
     }
 
+    director_summary, director_ai_status = await build_director_summary(
+        director_signals,
+        use_ai=ai_summary,
+    )
+
+    brief["director_summary"] = director_summary
+    brief["director_ai_status"] = director_ai_status
+
+    brief["director_signals"] = director_signals
+    brief["safety"] = {
+        "advisory_only": True,
+        "ai_decides_priority": False,
+        "automatic_execution": False,
+        "external_execution_allowed": False,
+        "human_approval_required": True,
+        "phi_used": False,
+    }
+
+    director_source_counts = {
+        "goal_rows": len(goals),
+        "budget_rows": len(budgets),
+        "metric_rows": len(rows),
+        "phase9_experiment_rows": len(experiment_rows),
+        "phase10_local_opportunity_rows": len(
+            local_opportunity_rows
+        ),
+        "phase11_content_topic_rows": len(
+            content_topic_rows
+        ),
+        "signal_rows": len(
+            director_signals.get("signals") or []
+        ),
+    }
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            director_persistence = await persist_director_snapshot(
+                pg,
+                director_signals=director_signals,
+                deterministic_brief={
+                    "executive_summary": brief.get(
+                        "executive_summary"
+                    ),
+                    "channel_health": brief.get(
+                        "channel_health"
+                    ),
+                    "recommendation_count": len(
+                        brief.get("recommendations") or []
+                    ),
+                    "director_summary": director_summary,
+                    "director_ai_status": director_ai_status,
+                },
+                source_counts=director_source_counts,
+                created_by=user_id(current_user),
+            )
+
+    brief["director_persistence"] = director_persistence
     brief["persistence"] = persistence
 
     return brief

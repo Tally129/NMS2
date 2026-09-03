@@ -18,6 +18,7 @@ import NurtureRecoveryPanel from "./NurtureRecoveryPanel";
 import ExperimentsPanel from "./ExperimentsPanel";
 import ReputationLocalPanel from "./ReputationLocalPanel";
 import ContentSocialPanel from "./ContentSocialPanel";
+import AIMarketingDirectorPanel from "./AIMarketingDirectorPanel";
 
 import { Button } from "../../components/ui/button";
 
@@ -899,6 +900,7 @@ export default function MarketingCommandCenter() {
         <ExperimentsPanel />
         <ReputationLocalPanel />
         <ContentSocialPanel />
+        <AIMarketingDirectorPanel />
       </div>
 
 
