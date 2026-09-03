@@ -1,8 +1,14 @@
 import axios from "axios";
 import { normalizeApiList } from "./collections";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-export const API_BASE = `${BACKEND_URL}/api`;
+const BACKEND_URL = (
+  process.env.REACT_APP_BACKEND_URL || ""
+).replace(/\/$/, "");
+
+export const API_BASE =
+  BACKEND_URL.endsWith("/api")
+    ? BACKEND_URL
+    : `${BACKEND_URL}/api`;
 
 // Sprint 2: NO refresh token in browser storage. Access token stays in memory only.
 // LS.user + LS.lastActivity are UX conveniences that do NOT grant PHI access.
