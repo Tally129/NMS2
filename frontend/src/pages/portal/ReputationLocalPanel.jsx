@@ -9,6 +9,7 @@ import {
 import {
   MapPin, Loader2, RefreshCw, ShieldCheck, Star, TrendingUp,
 } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 const pct = (v) => (v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`);
 
@@ -91,7 +92,7 @@ export default function ReputationLocalPanel() {
                 <SelectValue placeholder="Select location" />
               </SelectTrigger>
               <SelectContent>
-                {locations.map((l) => (
+                {normalizeArray(locations).map((l) => (
                   <SelectItem key={l.id} value={l.id}>{l.name}</SelectItem>
                 ))}
               </SelectContent>

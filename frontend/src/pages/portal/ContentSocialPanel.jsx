@@ -11,6 +11,7 @@ import {
   PenSquare, Loader2, RefreshCw, ShieldCheck, Sparkles, CalendarDays,
   Hash, Plus,
 } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 const CHANNELS = ["blog", "tiktok", "instagram", "facebook", "linkedin",
   "email"];
@@ -239,7 +240,7 @@ export default function ContentSocialPanel() {
               </div>
             ) : (
               <div className="grid gap-2" data-testid="topic-list">
-                {topics.slice(0, 12).map((t) => (
+                {normalizeArray(topics).slice(0, 12).map((t) => (
                   <div key={t.id}
                     className="flex items-start justify-between gap-3 rounded-xl border border-[#e2dac5] bg-white px-4 py-3"
                     data-testid="topic-row">
@@ -290,7 +291,7 @@ export default function ContentSocialPanel() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">No topic</SelectItem>
-                  {topics.map((t) => (
+                  {normalizeArray(topics).map((t) => (
                     <SelectItem key={t.id} value={t.id}>{t.topic}</SelectItem>
                   ))}
                 </SelectContent>
@@ -306,7 +307,7 @@ export default function ContentSocialPanel() {
               </div>
             ) : (
               <div className="grid gap-2" data-testid="brief-list">
-                {briefs.slice(0, 12).map((b) => (
+                {normalizeArray(briefs).slice(0, 12).map((b) => (
                   <div key={b.id}
                     className="rounded-xl border border-[#e2dac5] bg-white px-4 py-3"
                     data-testid="brief-row">
@@ -366,7 +367,7 @@ export default function ContentSocialPanel() {
               </div>
             ) : (
               <div className="grid gap-2" data-testid="calendar-list">
-                {calendar.slice(0, 12).map((c) => (
+                {normalizeArray(calendar).slice(0, 12).map((c) => (
                   <div key={c.id}
                     className="flex items-center justify-between gap-3 rounded-xl border border-[#e2dac5] bg-white px-4 py-3"
                     data-testid="calendar-row">

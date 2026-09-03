@@ -19,6 +19,7 @@ import {
   TrendingDown,
   TrendingUp,
 } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 
 function asArray(value, keys = []) {
@@ -534,7 +535,7 @@ export default function SearchIntelligencePanel() {
                 Audit Findings
               </h4>
               <div className="space-y-2" data-testid="si-issues">
-                {issues.slice(0, 30).map((issue, idx) => (
+                {normalizeArray(issues).slice(0, 30).map((issue, idx) => (
                   <div
                     key={`${issue.issue_code}-${idx}`}
                     className="rounded-lg border border-[#f0e8d5] p-3"

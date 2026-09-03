@@ -1336,7 +1336,7 @@ function StrategyPlan({ plan, strategyId }) {
   const allVisibleAssetsSelected =
     visibleAssetIds.length > 0 &&
     visibleAssetIds.every((id) =>
-      selectedAssetIds.includes(id)
+      normalizeArray(selectedAssetIds).includes(id)
     );
 
   const toggleAssetSelection = (assetId) => {
@@ -2400,7 +2400,7 @@ function StrategyPlan({ plan, strategyId }) {
                     <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#2f4a3a]">
                       <input
                         type="checkbox"
-                        checked={selectedAssetIds.includes(
+                        checked={normalizeArray(selectedAssetIds).includes(
                           asset.id
                         )}
                         onChange={() =>

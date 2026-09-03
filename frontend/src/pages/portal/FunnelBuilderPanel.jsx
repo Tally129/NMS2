@@ -851,7 +851,7 @@ export default function FunnelBuilderPanel() {
                         <SelectItem value="none">
                           None
                         </SelectItem>
-                        {forms.map((form) => (
+                        {normalizeArray(forms).map((form) => (
                           <SelectItem
                             key={form.id}
                             value={form.id}
@@ -889,7 +889,7 @@ export default function FunnelBuilderPanel() {
                         <SelectItem value="none">
                           None
                         </SelectItem>
-                        {offers.map((offer) => (
+                        {normalizeArray(offers).map((offer) => (
                           <SelectItem
                             key={offer.id}
                             value={offer.id}
@@ -987,7 +987,7 @@ export default function FunnelBuilderPanel() {
                         Select funnel
                       </SelectItem>
 
-                      {funnels.map((funnel) => (
+                      {normalizeArray(funnels).map((funnel) => (
                         <SelectItem
                           key={funnel.id}
                           value={funnel.id}
@@ -1122,7 +1122,7 @@ export default function FunnelBuilderPanel() {
                   No funnels have been created yet.
                 </EmptyState>
               ) : (
-                funnels.map((funnel) => {
+                normalizeArray(funnels).map((funnel) => {
                   const steps = normalizeArray(
                     funnel.steps
                   );
@@ -1384,7 +1384,7 @@ export default function FunnelBuilderPanel() {
                     No marketing qualification forms yet.
                   </EmptyState>
                 ) : (
-                  forms.map((form) => {
+                  normalizeArray(forms).map((form) => {
                     const fields =
                       normalizeArray(
                         form.schema?.fields
@@ -1662,7 +1662,7 @@ export default function FunnelBuilderPanel() {
                     No offers have been created yet.
                   </EmptyState>
                 ) : (
-                  offers.map((offer) => {
+                  normalizeArray(offers).map((offer) => {
                     const locations =
                       normalizeArray(
                         offer

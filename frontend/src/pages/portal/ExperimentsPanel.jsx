@@ -23,6 +23,7 @@ import {
   Plus,
   Trophy,
 } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 function StatusBadge({ status }) {
   const tone = {
@@ -210,7 +211,7 @@ export default function ExperimentsPanel() {
                 </div>
               ) : (
                 <div className="grid gap-2">
-                  {experiments.map((e) => (
+                  {normalizeArray(experiments).map((e) => (
                     <div
                       key={e.id}
                       className="flex items-center justify-between gap-2 rounded-lg border border-[#eee3ca] px-3 py-2"

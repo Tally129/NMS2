@@ -13,6 +13,7 @@ import {
   TrendingDown,
   TrendingUp,
 } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 const READINESS_STYLES = {
   connected: { cls: "bg-green-100 text-green-800", label: "Connected" },
@@ -268,7 +269,7 @@ export default function SearchConsoleSection() {
                     </tr>
                   </thead>
                   <tbody>
-                    {queries.slice(0, 10).map((q, i) => (
+                    {normalizeArray(queries).slice(0, 10).map((q, i) => (
                       <tr key={i} className="border-t border-[#f0e8d5]">
                         <td className="py-1 pr-2 text-[#3f3320]">{q.query}</td>
                         <td className="py-1 pr-2">{fmt(q.clicks)}</td>
@@ -298,7 +299,7 @@ export default function SearchConsoleSection() {
                     </tr>
                   </thead>
                   <tbody>
-                    {pages.slice(0, 10).map((p, i) => (
+                    {normalizeArray(pages).slice(0, 10).map((p, i) => (
                       <tr key={i} className="border-t border-[#f0e8d5]">
                         <td className="py-1 pr-2 break-all text-[#3f3320]">
                           {p.page}

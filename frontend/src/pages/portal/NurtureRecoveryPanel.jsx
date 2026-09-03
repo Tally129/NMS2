@@ -26,6 +26,7 @@ import {
   SkipForward,
   Sprout,
 } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 
 function SectionCard({ title, subtitle, icon: Icon, actions, children, testId }) {
@@ -170,7 +171,7 @@ export default function NurtureRecoveryPanel() {
   }, [load]);
 
   const sequenceName = (id) =>
-    sequences.find((s) => s.id === id)?.name || id;
+    normalizeArray(sequences).find((s) => s.id === id)?.name || id;
 
   const toggleSteps = async (id) => {
     if (expandedSeqId === id) {
@@ -420,7 +421,7 @@ export default function NurtureRecoveryPanel() {
               <EmptyState>No actions awaiting approval.</EmptyState>
             ) : (
               <div className="grid gap-2">
-                {actions.map((a) => (
+                {normalizeArray(actions).map((a) => (
                   <div
                     key={a.id}
                     className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#e2dac5] bg-white px-4 py-3"
@@ -522,7 +523,7 @@ export default function NurtureRecoveryPanel() {
                     <SelectValue placeholder="Select a sequence" />
                   </SelectTrigger>
                   <SelectContent>
-                    {sequences.map((s) => (
+                    {normalizeArray(sequences).map((s) => (
                       <SelectItem key={s.id} value={s.id}>
                         {s.name} ({s.status})
                       </SelectItem>
@@ -640,7 +641,7 @@ export default function NurtureRecoveryPanel() {
                 <EmptyState>No sequences yet.</EmptyState>
               ) : (
                 <div className="grid gap-2">
-                  {sequences.map((s) => (
+                  {normalizeArray(sequences).map((s) => (
                     <div
                       key={s.id}
                       className="rounded-lg border border-[#eee3ca] px-3 py-2"
@@ -737,8 +738,7 @@ export default function NurtureRecoveryPanel() {
                     <SelectValue placeholder="Active sequence" />
                   </SelectTrigger>
                   <SelectContent>
-                    {sequences
-                      .filter((s) => s.status === "active")
+                    {normalizeArray(sequences).filter((s) => s.status === "active")
                       .map((s) => (
                         <SelectItem key={s.id} value={s.id}>
                           {s.name}
@@ -757,7 +757,7 @@ export default function NurtureRecoveryPanel() {
                     <SelectValue placeholder="Select a marketing lead" />
                   </SelectTrigger>
                   <SelectContent>
-                    {leads.map((l) => (
+                    {normalizeArray(leads).map((l) => (
                       <SelectItem key={l.id} value={l.id}>
                         {l.marketing_subject_id} ({l.lead_status})
                       </SelectItem>
@@ -786,7 +786,7 @@ export default function NurtureRecoveryPanel() {
               <EmptyState>No enrollments yet.</EmptyState>
             ) : (
               <div className="grid gap-2">
-                {enrollments.slice(0, 25).map((e) => (
+                {normalizeArray(enrollments).slice(0, 25).map((e) => (
                   <div
                     key={e.id}
                     className="flex items-center justify-between gap-2 rounded-lg border border-[#eee3ca] bg-white px-3 py-2 text-sm"

@@ -28,6 +28,7 @@ import {
   AlertTriangle,
   Clock,
 } from "lucide-react";
+import { normalizeArray } from "../../lib/collections";
 
 
 const VIEWS = [
@@ -329,7 +330,7 @@ function LeadDetailDrawer({ leadId, open, onClose, onChanged }) {
               <div className="space-y-2" data-testid="lead-timeline">
                 {timeline.length === 0 ? (
                   <div className="text-xs text-[#6a6a6a]">No activity yet.</div>
-                ) : timeline.map((a) => (
+                ) : normalizeArray(timeline).map((a) => (
                   <div key={a.id} className="text-xs">
                     <span className="font-medium">{a.activity_type}</span>
                     {a.summary ? ` — ${a.summary}` : ""}
@@ -488,7 +489,7 @@ export default function LeadOperationsPanel() {
               </tr>
             </thead>
             <tbody>
-              {leads.map((lead) => (
+              {normalizeArray(leads).map((lead) => (
                 <tr key={lead.id}
                   className="cursor-pointer border-b border-[#f0eadb] last:border-0 hover:bg-[#fbf7ee]"
                   onClick={() => setActiveLead(lead.id)}
