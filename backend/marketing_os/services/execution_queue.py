@@ -42,6 +42,10 @@ def prepare_execution_request(
         return {
             "valid": False,
             "errors": validation["errors"],
+            "payload_policy": (
+                validation.get("payload_policy")
+                or {}
+            ),
         }
 
     idempotency_key = build_idempotency_key(

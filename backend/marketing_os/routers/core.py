@@ -1436,56 +1436,6 @@ def _execution_actor_id(user: dict) -> str:
     return value
 
 
-def _phase14_payload_safe(value: Any) -> bool:
-    """Conservative recursive PHI/credential guard."""
-
-    prohibited = {
-        "patient",
-        "patient_id",
-        "patient_name",
-        "medical_record",
-        "medical_record_number",
-        "mrn",
-        "diagnosis",
-        "diagnoses",
-        "medication",
-        "medications",
-        "prescription",
-        "dob",
-        "date_of_birth",
-        "ssn",
-        "social_security_number",
-        "insurance_id",
-        "insurance_member_id",
-        "clinical",
-        "clinical_note",
-        "soap_note",
-        "password",
-        "secret",
-        "access_token",
-        "refresh_token",
-        "api_key",
-        "private_key",
-    }
-
-    if isinstance(value, dict):
-        for key, child in value.items():
-            normalized = str(key or "").strip().lower()
-
-            if normalized in prohibited:
-                return False
-
-            if not _phase14_payload_safe(child):
-                return False
-
-    elif isinstance(value, list):
-        for child in value:
-            if not _phase14_payload_safe(child):
-                return False
-
-    return True
-
-
 async def _get_execution_request(
     pg,
     request_id: str,
@@ -1774,15 +1724,6 @@ async def marketing_execution_request_create(
             detail="Phase 14 supports dry-run requests only",
         )
 
-    if not _phase14_payload_safe(body.payload):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Execution payload contains prohibited "
-                "PHI, clinical, or credential fields"
-            ),
-        )
-
     prepared = prepare_execution_request(
         provider=body.provider,
         action_type=body.action_type,
@@ -1798,6 +1739,10 @@ async def marketing_execution_request_create(
             detail={
                 "message": "Invalid execution request",
                 "errors": prepared.get("errors") or [],
+                "payload_policy": (
+                    prepared.get("payload_policy")
+                    or {}
+                ),
             },
         )
 

@@ -14,6 +14,10 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from marketing_os.services.measurement import (
+    find_prohibited_fields,
+)
+
 
 SUPPORTED_PROVIDERS = {
     "google_ads",
@@ -35,6 +39,73 @@ TERMINAL_STATUSES = {
     "rejected",
     "cancelled",
     "failed",
+}
+
+
+# Phase 14 execution payloads must remain both non-PHI and bounded.
+# These are dry-run contracts only; live provider execution remains disabled.
+EXECUTION_CREDENTIAL_FIELDS = frozenset({
+    "password",
+    "secret",
+    "client_secret",
+    "access_token",
+    "refresh_token",
+    "api_key",
+    "private_key",
+    "authorization",
+    "bearer_token",
+    "credential",
+    "credentials",
+})
+
+
+ACTION_PAYLOAD_FIELDS = {
+    "campaign.pause": frozenset({
+        "reason",
+    }),
+    "campaign.resume": frozenset({
+        "reason",
+    }),
+    "campaign.create": frozenset({
+        "name",
+        "objective",
+        "status",
+        "daily_budget",
+        "total_budget",
+        "currency",
+        "start_date",
+        "end_date",
+        "reason",
+    }),
+    "budget.update": frozenset({
+        "amount",
+        "daily_budget",
+        "total_budget",
+        "currency",
+        "reason",
+    }),
+    "ad.create": frozenset({
+        "name",
+        "headline",
+        "description",
+        "destination_url",
+        "status",
+        "creative_id",
+        "campaign_id",
+        "ad_group_id",
+        "reason",
+    }),
+    "ad.update": frozenset({
+        "name",
+        "headline",
+        "description",
+        "destination_url",
+        "status",
+        "creative_id",
+        "campaign_id",
+        "ad_group_id",
+        "reason",
+    }),
 }
 
 
@@ -81,6 +152,122 @@ def build_idempotency_key(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _normalized_payload_key(value: Any) -> str:
+    return (
+        str(value or "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
+
+
+def _find_execution_credentials(
+    value: Any,
+    *,
+    path: str = "",
+) -> list[str]:
+    violations: list[str] = []
+
+    if isinstance(value, Mapping):
+        for raw_key, child in value.items():
+            key = _normalized_payload_key(raw_key)
+
+            child_path = (
+                f"{path}.{key}"
+                if path
+                else key
+            )
+
+            if key in EXECUTION_CREDENTIAL_FIELDS:
+                violations.append(child_path)
+
+            violations.extend(
+                _find_execution_credentials(
+                    child,
+                    path=child_path,
+                )
+            )
+
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            child_path = (
+                f"{path}[{index}]"
+                if path
+                else f"[{index}]"
+            )
+
+            violations.extend(
+                _find_execution_credentials(
+                    child,
+                    path=child_path,
+                )
+            )
+
+    return violations
+
+
+def validate_execution_payload(
+    *,
+    action_type: str,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    action_type = str(
+        action_type or ""
+    ).strip().lower()
+
+    errors: list[str] = []
+
+    if not isinstance(payload, Mapping):
+        return {
+            "valid": False,
+            "errors": ["invalid_payload"],
+            "prohibited_fields": [],
+            "credential_fields": [],
+            "unexpected_fields": [],
+        }
+
+    prohibited = sorted(
+        set(find_prohibited_fields(payload))
+    )
+
+    credentials = sorted(
+        set(_find_execution_credentials(payload))
+    )
+
+    if prohibited:
+        errors.append("prohibited_marketing_fields")
+
+    if credentials:
+        errors.append("credential_fields_prohibited")
+
+    allowed_fields = ACTION_PAYLOAD_FIELDS.get(
+        action_type
+    )
+
+    unexpected: list[str] = []
+
+    if allowed_fields is not None:
+        for raw_key in payload.keys():
+            key = _normalized_payload_key(raw_key)
+
+            if key not in allowed_fields:
+                unexpected.append(key)
+
+    unexpected = sorted(set(unexpected))
+
+    if unexpected:
+        errors.append("unexpected_payload_fields")
+
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "prohibited_fields": prohibited,
+        "credential_fields": credentials,
+        "unexpected_fields": unexpected,
+    }
+
+
 def validate_execution_request(
     *,
     provider: str,
@@ -98,14 +285,22 @@ def validate_execution_request(
     if action_type not in ALLOWED_ACTIONS:
         errors.append("unsupported_action")
 
-    if not isinstance(payload, Mapping):
-        errors.append("invalid_payload")
+    payload_validation = validate_execution_payload(
+        action_type=action_type,
+        payload=payload,
+    )
+
+    if not payload_validation["valid"]:
+        errors.extend(
+            payload_validation["errors"]
+        )
 
     return {
         "valid": not errors,
         "errors": errors,
         "provider": provider,
         "action_type": action_type,
+        "payload_policy": payload_validation,
     }
 
 
@@ -214,6 +409,9 @@ __all__ = [
     "TERMINAL_STATUSES",
     "canonical_provider",
     "build_idempotency_key",
+    "ACTION_PAYLOAD_FIELDS",
+    "EXECUTION_CREDENTIAL_FIELDS",
+    "validate_execution_payload",
     "validate_execution_request",
     "evaluate_execution_policy",
     "next_request_status",

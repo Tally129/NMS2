@@ -233,3 +233,130 @@ def test_provider_policy_cannot_bypass_human_approval():
     assert policy["allowed"] is False
     assert "human_approval_required" in policy["reasons"]
     assert policy["human_approval_required"] is True
+
+
+def test_execution_payload_rejects_direct_phi_field():
+    prepared = prepare_execution_request(
+        provider="google_ads",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id="123",
+        payload={
+            "reason": "review",
+            "email": "person@example.com",
+        },
+    )
+
+    assert prepared["valid"] is False
+    assert (
+        "prohibited_marketing_fields"
+        in prepared["errors"]
+    )
+    assert (
+        "email"
+        in prepared["payload_policy"]["prohibited_fields"]
+    )
+
+
+def test_execution_payload_rejects_nested_phi_field():
+    prepared = prepare_execution_request(
+        provider="meta_ads",
+        action_type="campaign.create",
+        target_type="campaign",
+        target_id=None,
+        payload={
+            "name": "September campaign",
+            "reason": "test",
+            "metadata": {
+                "diagnosis": "prohibited-value",
+            },
+        },
+    )
+
+    assert prepared["valid"] is False
+    assert (
+        "prohibited_marketing_fields"
+        in prepared["errors"]
+    )
+    assert (
+        "metadata.diagnosis"
+        in prepared["payload_policy"]["prohibited_fields"]
+    )
+
+
+def test_execution_payload_rejects_credentials():
+    prepared = prepare_execution_request(
+        provider="microsoft_ads",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id="xyz",
+        payload={
+            "reason": "test",
+            "access_token": "never-store-this",
+        },
+    )
+
+    assert prepared["valid"] is False
+    assert (
+        "credential_fields_prohibited"
+        in prepared["errors"]
+    )
+    assert (
+        "access_token"
+        in prepared["payload_policy"]["credential_fields"]
+    )
+
+
+def test_execution_payload_rejects_unexpected_field():
+    prepared = prepare_execution_request(
+        provider="google_ads",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id="123",
+        payload={
+            "reason": "review",
+            "arbitrary_blob": {
+                "anything": "value",
+            },
+        },
+    )
+
+    assert prepared["valid"] is False
+    assert (
+        "unexpected_payload_fields"
+        in prepared["errors"]
+    )
+    assert (
+        "arbitrary_blob"
+        in prepared["payload_policy"]["unexpected_fields"]
+    )
+
+
+def test_pause_payload_accepts_marketing_safe_reason():
+    prepared = prepare_execution_request(
+        provider="google_ads",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id="123",
+        payload={
+            "reason": "performance review",
+        },
+    )
+
+    assert prepared["valid"] is True
+
+
+def test_budget_update_accepts_bounded_safe_fields():
+    prepared = prepare_execution_request(
+        provider="meta_ads",
+        action_type="budget.update",
+        target_type="campaign",
+        target_id="abc",
+        payload={
+            "daily_budget": 125,
+            "currency": "USD",
+            "reason": "approved planning scenario",
+        },
+    )
+
+    assert prepared["valid"] is True
