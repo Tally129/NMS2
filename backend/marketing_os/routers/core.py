@@ -41,6 +41,7 @@ from marketing_os.services.execution_queue import (
     decide_request,
     execution_request_matches_existing,
     perform_dry_run,
+    perform_live_execution,
     prepare_execution_request,
     submit_for_approval,
 )
@@ -1478,6 +1479,24 @@ def _serialize_and_validate_execution_replay(
     return existing
 
 
+async def _resolve_live_execution_adapter(
+    *,
+    provider: str,
+    request: dict[str, Any],
+):
+    """Resolve one live provider adapter.
+
+    Phase 3 intentionally has no production provider resolution yet.
+    Tests may monkeypatch this helper. Real Google Ads account
+    resolution is added in Phase 4.
+    """
+
+    raise RuntimeError(
+        f"live_provider_resolution_not_configured:{provider}"
+    )
+
+
+
 async def _get_execution_request(
     pg,
     request_id: str,
@@ -2219,6 +2238,297 @@ async def marketing_execution_request_attempts(
         "items": rows,
         "count": len(rows),
     }
+
+
+@api.post(
+    "/marketing-os/execution/requests/{request_id}/execute"
+)
+async def marketing_execution_request_execute(
+    request_id: str,
+    user=Depends(require_roles(*MARKETING_ROLES)),
+):
+    actor = _execution_actor_id(user)
+
+    live_exception = None
+    outcome = None
+    attempt_id = None
+    attempt_number = None
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+            row = await _get_execution_request(
+                pg,
+                request_id,
+                for_update=True,
+            )
+
+            if not row:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Execution request not found",
+                )
+
+            request = serialize_row(row)
+
+            if request.get("dry_run") is not False:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Execution request is not marked "
+                        "for live execution"
+                    ),
+                )
+
+            if request.get("status") != "approved":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Execution request must be approved "
+                        "before live execution"
+                    ),
+                )
+
+            if (
+                not request.get("approved_by")
+                or not request.get("approved_at")
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Execution request approval metadata "
+                        "is incomplete"
+                    ),
+                )
+
+            policy_row = await _get_execution_policy(
+                pg,
+                request["provider"],
+            )
+
+            if policy_row:
+                policy = serialize_row(policy_row)
+            else:
+                policy = {
+                    "provider": request["provider"],
+                    "enabled": False,
+                    "dry_run_only": True,
+                    "human_approval_required": True,
+                    "allowed_actions": [],
+                }
+
+            count_result = await pg.execute(
+                text("""
+                    SELECT COUNT(*) AS count
+                    FROM marketing_execution_attempts
+                    WHERE execution_request_id = :request_id
+                """),
+                {
+                    "request_id": request_id,
+                },
+            )
+
+            attempt_number = int(
+                count_result.scalar() or 0
+            ) + 1
+
+            attempt_id = new_marketing_id()
+
+            await pg.execute(
+                text("""
+                    INSERT INTO marketing_execution_attempts (
+                        id,
+                        execution_request_id,
+                        attempt_number,
+                        provider,
+                        dry_run,
+                        status,
+                        request_snapshot
+                    )
+                    VALUES (
+                        :id,
+                        :execution_request_id,
+                        :attempt_number,
+                        :provider,
+                        false,
+                        'started',
+                        CAST(:request_snapshot AS jsonb)
+                    )
+                """),
+                {
+                    "id": attempt_id,
+                    "execution_request_id": request_id,
+                    "attempt_number": attempt_number,
+                    "provider": request["provider"],
+                    "request_snapshot": json.dumps(
+                        {
+                            "provider":
+                                request["provider"],
+                            "action_type":
+                                request["action_type"],
+                            "target_type":
+                                request["target_type"],
+                            "target_id":
+                                request["target_id"],
+                            "request_payload":
+                                request["request_payload"],
+                            "dry_run": False,
+                        },
+                        default=str,
+                    ),
+                },
+            )
+
+            try:
+                adapter = (
+                    await _resolve_live_execution_adapter(
+                        provider=request["provider"],
+                        request=request,
+                    )
+                )
+
+                outcome = await perform_live_execution(
+                    request,
+                    adapter=adapter,
+                    provider_enabled=bool(
+                        policy.get("enabled")
+                    ),
+                    provider_dry_run_only=bool(
+                        policy.get("dry_run_only", True)
+                    ),
+                    provider_human_approval_required=bool(
+                        policy.get(
+                            "human_approval_required",
+                            True,
+                        )
+                    ),
+                    provider_allowed_actions=(
+                        policy.get("allowed_actions")
+                        or []
+                    ),
+                )
+
+                if not outcome.get("allowed"):
+                    await pg.execute(
+                        text("""
+                            UPDATE marketing_execution_attempts
+                            SET
+                                status = 'policy_blocked',
+                                response_snapshot =
+                                    CAST(:response AS jsonb),
+                                finished_at = now()
+                            WHERE id = :attempt_id
+                        """),
+                        {
+                            "attempt_id": attempt_id,
+                            "response": json.dumps(
+                                outcome,
+                                default=str,
+                            ),
+                        },
+                    )
+
+                    return {
+                        "request_id": request_id,
+                        "attempt_id": attempt_id,
+                        "attempt_number":
+                            attempt_number,
+                        "outcome": outcome,
+                        "external_write_performed":
+                            False,
+                        "live_execution_enabled":
+                            True,
+                    }
+
+                await pg.execute(
+                    text("""
+                        UPDATE marketing_execution_attempts
+                        SET
+                            status = 'executed',
+                            response_snapshot =
+                                CAST(:response AS jsonb),
+                            finished_at = now()
+                        WHERE id = :attempt_id
+                    """),
+                    {
+                        "attempt_id": attempt_id,
+                        "response": json.dumps(
+                            outcome,
+                            default=str,
+                        ),
+                    },
+                )
+
+                await pg.execute(
+                    text("""
+                        UPDATE marketing_execution_requests
+                        SET
+                            status = 'executed',
+                            executed_by = :executed_by,
+                            executed_at = now(),
+                            failure_code = NULL,
+                            failure_message = NULL,
+                            updated_at = now()
+                        WHERE id = :request_id
+                    """),
+                    {
+                        "request_id": request_id,
+                        "executed_by": actor,
+                    },
+                )
+
+            except Exception as exc:
+                await pg.execute(
+                    text("""
+                        UPDATE marketing_execution_attempts
+                        SET
+                            status = 'failed',
+                            error_code = 'live_execution_error',
+                            error_message = :error_message,
+                            finished_at = now()
+                        WHERE id = :attempt_id
+                    """),
+                    {
+                        "attempt_id": attempt_id,
+                        "error_message": str(exc)[:2000],
+                    },
+                )
+
+                await pg.execute(
+                    text("""
+                        UPDATE marketing_execution_requests
+                        SET
+                            status = 'failed',
+                            failure_code =
+                                'live_execution_error',
+                            failure_message =
+                                :failure_message,
+                            updated_at = now()
+                        WHERE id = :request_id
+                    """),
+                    {
+                        "request_id": request_id,
+                        "failure_message": str(exc)[:2000],
+                    },
+                )
+
+                live_exception = exc
+
+    if live_exception is not None:
+        raise HTTPException(
+            status_code=500,
+            detail="Live execution failed",
+        ) from live_exception
+
+    return {
+        "request_id": request_id,
+        "attempt_id": attempt_id,
+        "attempt_number": attempt_number,
+        "outcome": outcome,
+        "external_write_performed": True,
+        "verified": True,
+        "live_execution_enabled": True,
+    }
+
 
 
 @api.post(
