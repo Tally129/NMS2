@@ -296,6 +296,12 @@ async def gsc_sync(
                 status_code=400,
                 detail="No marketing site configured.",
             )
+        # _resolve_site() performs a SELECT, which autobegins a SQLAlchemy
+        # transaction. sync_search_console() owns its transaction boundaries,
+        # so end the read-only lookup transaction before handing off the
+        # session.
+        await pg.rollback()
+
         adapter = GoogleSearchConsoleAdapter()
         result = await sync_search_console(
             pg,
