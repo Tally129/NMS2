@@ -30,6 +30,7 @@ from marketing_os.services.director import build_marketing_brief
 from marketing_os.services.director_signals import build_cross_phase_signals
 from marketing_os.services.director_persistence import persist_director_snapshot
 from marketing_os.services.director_ai import build_director_summary
+from marketing_os.services.executive_command_center import build_executive_command_center
 from marketing_os.services.lead_opportunities import derive_lead_opportunities
 from marketing_os.services.paid_media import build_paid_media_overview
 from marketing_os.services.journey import (
@@ -1276,6 +1277,19 @@ async def marketing_director_brief(
     brief["director_summary"] = director_summary
     brief["director_ai_status"] = director_ai_status
 
+    executive_command_center = build_executive_command_center(
+        paid_media=aggregated.values(),
+        funnel=compute_funnel(conversion_events),
+        lead_operations=setter_metrics(
+            lead_rows,
+            lead_task_rows,
+        ),
+        director_signals=director_signals,
+        director_summary=director_summary,
+        revenue=brief.get("revenue") or {},
+    )
+
+    brief["executive_command_center"] = executive_command_center
     brief["director_signals"] = director_signals
     brief["safety"] = {
         "advisory_only": True,
