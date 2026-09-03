@@ -17,6 +17,7 @@ import {
 
 import api from "../../lib/api";
 import { Button } from "../../components/ui/button";
+import { normalizeArray } from "../../lib/collections";
 
 
 const PROVIDER_LABELS = {
@@ -216,7 +217,7 @@ function PolicyCard({
       </div>
 
       <div className="mt-2 space-y-2">
-        {supportedActions.map((action) => (
+        {normalizeArray(supportedActions).map((action) => (
           <label
             key={action}
             className="flex cursor-pointer items-center gap-2 text-sm text-[#555952]"
@@ -541,7 +542,7 @@ function RequestDetails({
 
               {approvals.length ? (
                 <div className="space-y-2">
-                  {approvals.map((item) => (
+                  {normalizeArray(approvals).map((item) => (
                     <div
                       key={item.id}
                       className="rounded-lg border border-[#e7dfc9] bg-white p-3"
@@ -584,7 +585,7 @@ function RequestDetails({
 
               {attempts.length ? (
                 <div className="space-y-2">
-                  {attempts.map((item) => (
+                  {normalizeArray(attempts).map((item) => (
                     <div
                       key={item.id}
                       className="rounded-lg border border-[#e7dfc9] bg-white p-3"
@@ -711,7 +712,7 @@ export default function MarketingExecutionQueue() {
   }, [load]);
 
   function policyFor(provider) {
-    return policies.find(
+    return normalizeArray(policies).find(
       (item) => item.provider === provider
     );
   }
@@ -802,11 +803,11 @@ export default function MarketingExecutionQueue() {
     }
   }
 
-  const pendingCount = requests.filter(
+  const pendingCount = normalizeArray(requests).filter(
     (item) => item.status === "pending_approval"
   ).length;
 
-  const approvedCount = requests.filter(
+  const approvedCount = normalizeArray(requests).filter(
     (item) => item.status === "approved"
   ).length;
 
@@ -1123,7 +1124,7 @@ export default function MarketingExecutionQueue() {
           </div>
         ) : requests.length ? (
           <div className="space-y-3">
-            {requests.map((request) => (
+            {normalizeArray(requests).map((request) => (
               <RequestDetails
                 key={request.id}
                 request={request}
