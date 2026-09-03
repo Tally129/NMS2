@@ -1444,9 +1444,17 @@ def _execution_actor_id(user: dict) -> str:
 async def _get_execution_request(
     pg,
     request_id: str,
+    *,
+    for_update: bool = False,
 ):
+    lock_clause = (
+        "FOR UPDATE"
+        if for_update
+        else ""
+    )
+
     result = await pg.execute(
-        text("""
+        text(f"""
             SELECT
                 id,
                 provider,
@@ -1469,6 +1477,7 @@ async def _get_execution_request(
                 updated_at
             FROM marketing_execution_requests
             WHERE id = :request_id
+            {lock_clause}
             LIMIT 1
         """),
         {
@@ -1930,6 +1939,7 @@ async def marketing_execution_request_submit(
             row = await _get_execution_request(
                 pg,
                 request_id,
+                for_update=True,
             )
 
             if not row:
@@ -1992,6 +2002,7 @@ async def marketing_execution_request_decision(
             row = await _get_execution_request(
                 pg,
                 request_id,
+                for_update=True,
             )
 
             if not row:
@@ -2178,6 +2189,7 @@ async def marketing_execution_request_dry_run(
             row = await _get_execution_request(
                 pg,
                 request_id,
+                for_update=True,
             )
 
             if not row:
@@ -2219,20 +2231,8 @@ async def marketing_execution_request_dry_run(
                     "allowed_actions": [],
                 }
 
-            # Serialize attempt-number allocation for this request.
-            # The parent-row lock prevents concurrent dry runs from
-            # selecting the same next attempt number.
-            await pg.execute(
-                text("""
-                    SELECT id
-                    FROM marketing_execution_requests
-                    WHERE id = :request_id
-                    FOR UPDATE
-                """),
-                {
-                    "request_id": request_id,
-                },
-            )
+            # The request row was locked before lifecycle
+            # validation. This also serializes attempt numbering.
 
             attempt_count = await pg.execute(
                 text("""
