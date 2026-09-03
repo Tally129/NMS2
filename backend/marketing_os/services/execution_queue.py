@@ -30,6 +30,7 @@ def prepare_execution_request(
     target_id: str | None,
     payload: Mapping[str, Any],
     dry_run: bool = True,
+    operation_token: str | None = None,
 ) -> dict[str, Any]:
     provider = canonical_provider(provider)
 
@@ -78,6 +79,7 @@ def prepare_execution_request(
         target_type=target_type,
         target_id=target_id,
         payload=payload,
+        operation_token=operation_token,
     )
 
     return {

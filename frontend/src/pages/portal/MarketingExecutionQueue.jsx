@@ -642,6 +642,7 @@ export default function MarketingExecutionQueue() {
     React.useState(false);
 
   const [creating, setCreating] = React.useState(false);
+  const operationTokenRef = React.useRef(null);
 
   const [form, setForm] = React.useState({
     provider: "google_ads",
@@ -729,6 +730,16 @@ export default function MarketingExecutionQueue() {
         );
       }
 
+      if (!operationTokenRef.current) {
+        operationTokenRef.current =
+          typeof crypto !== "undefined" &&
+          typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `exec-${Date.now()}-${Math.random()
+                .toString(36)
+                .slice(2)}`;
+      }
+
       await api.post(
         "/marketing-os/execution/requests",
         {
@@ -738,9 +749,15 @@ export default function MarketingExecutionQueue() {
           target_id:
             form.target_id.trim() || null,
           payload,
+          operation_token:
+            operationTokenRef.current,
           dry_run: true,
         }
       );
+
+      // The operation completed successfully. A future
+      // intentional create must receive a fresh token.
+      operationTokenRef.current = null;
 
       setShowCreate(false);
 

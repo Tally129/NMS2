@@ -136,6 +136,7 @@ def build_idempotency_key(
     target_type: str,
     target_id: str | None,
     payload: Mapping[str, Any],
+    operation_token: str | None = None,
 ) -> str:
     normalized = {
         "provider": canonical_provider(provider),
@@ -144,6 +145,11 @@ def build_idempotency_key(
         "target_id": str(target_id or "").strip(),
         "payload": dict(payload or {}),
     }
+
+    if operation_token is not None:
+        normalized["operation_token"] = str(
+            operation_token
+        ).strip()
 
     encoded = json.dumps(
         normalized,

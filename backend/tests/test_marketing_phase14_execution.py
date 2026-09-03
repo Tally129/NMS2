@@ -599,3 +599,115 @@ def test_safe_ad_payload_remains_valid():
     )
 
     assert prepared["valid"] is True
+
+
+def test_same_operation_token_is_idempotent():
+    first = build_idempotency_key(
+        provider="google_ads",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id="123",
+        payload={"reason": "review"},
+        operation_token=(
+            "11111111-1111-4111-8111-111111111111"
+        ),
+    )
+
+    second = build_idempotency_key(
+        provider="google",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id="123",
+        payload={"reason": "review"},
+        operation_token=(
+            "11111111-1111-4111-8111-111111111111"
+        ),
+    )
+
+    assert first == second
+
+
+def test_different_operation_tokens_allow_new_lifecycle():
+    first = build_idempotency_key(
+        provider="google_ads",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id="123",
+        payload={"reason": "review"},
+        operation_token=(
+            "11111111-1111-4111-8111-111111111111"
+        ),
+    )
+
+    second = build_idempotency_key(
+        provider="google_ads",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id="123",
+        payload={"reason": "review"},
+        operation_token=(
+            "22222222-2222-4222-8222-222222222222"
+        ),
+    )
+
+    assert first != second
+
+
+def test_operation_token_changes_queue_idempotency_key():
+    first = prepare_execution_request(
+        provider="meta_ads",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id="abc",
+        payload={"reason": "review"},
+        operation_token=(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        ),
+    )
+
+    second = prepare_execution_request(
+        provider="meta_ads",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id="abc",
+        payload={"reason": "review"},
+        operation_token=(
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        ),
+    )
+
+    assert first["valid"] is True
+    assert second["valid"] is True
+    assert (
+        first["request"]["idempotency_key"]
+        != second["request"]["idempotency_key"]
+    )
+
+
+def test_same_operation_token_preserves_queue_key():
+    token = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+
+    first = prepare_execution_request(
+        provider="microsoft_ads",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id="xyz",
+        payload={"reason": "review"},
+        operation_token=token,
+    )
+
+    second = prepare_execution_request(
+        provider="bing",
+        action_type="campaign.pause",
+        target_type="campaign",
+        target_id="xyz",
+        payload={"reason": "review"},
+        operation_token=token,
+    )
+
+    assert first["valid"] is True
+    assert second["valid"] is True
+    assert (
+        first["request"]["idempotency_key"]
+        == second["request"]["idempotency_key"]
+    )

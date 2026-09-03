@@ -95,6 +95,11 @@ class ExecutionRequestCreate(BaseModel):
     target_type: str = Field(..., min_length=1, max_length=100)
     target_id: Optional[str] = Field(default=None, max_length=255)
     payload: dict = Field(default_factory=dict)
+    operation_token: str = Field(
+        ...,
+        min_length=16,
+        max_length=128,
+    )
     dry_run: bool = True
 
 
@@ -1731,6 +1736,7 @@ async def marketing_execution_request_create(
         target_id=body.target_id,
         payload=body.payload,
         dry_run=True,
+        operation_token=body.operation_token,
     )
 
     if not prepared.get("valid"):
@@ -1794,7 +1800,7 @@ async def marketing_execution_request_create(
                 result["live_execution_enabled"] = False
                 return result
 
-            await pg.execute(
+            insert_result = await pg.execute(
                 text("""
                     INSERT INTO marketing_execution_requests (
                         id,
@@ -1822,6 +1828,9 @@ async def marketing_execution_request_create(
                         true,
                         :created_by
                     )
+                    ON CONFLICT (idempotency_key)
+                    DO NOTHING
+                    RETURNING id
                 """),
                 {
                     "id": request["id"],
@@ -1837,6 +1846,67 @@ async def marketing_execution_request_create(
                     "created_by": actor,
                 },
             )
+
+            inserted_row = insert_result.first()
+
+            if not inserted_row:
+                # A concurrent request won the unique-key race.
+                # PostgreSQL has already serialized the conflict;
+                # re-read the committed winner and return it as an
+                # idempotent replay rather than exposing a DB error.
+                concurrent_duplicate = await pg.execute(
+                    text("""
+                        SELECT
+                            id,
+                            provider,
+                            action_type,
+                            target_type,
+                            target_id,
+                            idempotency_key,
+                            request_payload,
+                            dry_run,
+                            status,
+                            human_approval_required,
+                            approved_by,
+                            approved_at,
+                            executed_by,
+                            executed_at,
+                            created_by,
+                            failure_code,
+                            failure_message,
+                            created_at,
+                            updated_at
+                        FROM marketing_execution_requests
+                        WHERE idempotency_key = :idempotency_key
+                        LIMIT 1
+                    """),
+                    {
+                        "idempotency_key":
+                            request["idempotency_key"],
+                    },
+                )
+
+                concurrent_row = (
+                    concurrent_duplicate.first()
+                )
+
+                if not concurrent_row:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Concurrent execution request "
+                            "could not be resolved"
+                        ),
+                    )
+
+                result = serialize_row(
+                    concurrent_row
+                )
+
+                result["idempotent_replay"] = True
+                result["live_execution_enabled"] = False
+
+                return result
 
     return {
         **request,
