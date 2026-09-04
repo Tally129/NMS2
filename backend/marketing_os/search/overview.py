@@ -80,13 +80,12 @@ def build_search_overview(
     backlinks = backlink_summary or {}
 
     metrics = {
-        # Search Console (real values when connected; else honest null).
-        "organic_keywords": _metric(
-            gsc.get("organic_keywords"), conn["search_console"],
-            "google_search_console"
-        ),
-        "estimated_organic_traffic": _metric(
-            gsc.get("clicks"), conn["search_console"],
+        # Search Console first-party observations.
+        #
+        # GSC query count is NOT a Semrush-style organic ranking-keyword
+        # universe, and GSC clicks are NOT estimated organic traffic.
+        "gsc_search_queries": _metric(
+            gsc.get("search_queries"), conn["search_console"],
             "google_search_console"
         ),
         "organic_clicks": _metric(
@@ -104,6 +103,14 @@ def build_search_overview(
         "average_organic_position": _metric(
             gsc.get("average_position"), conn["search_console"],
             "google_search_console"
+        ),
+
+        # Market-ranking metrics require a dedicated SEO/rank provider.
+        "organic_keywords": _metric(
+            None, conn["rank_provider"], "rank_provider"
+        ),
+        "estimated_organic_traffic": _metric(
+            None, conn["rank_provider"], "rank_provider"
         ),
         "backlink_count": _metric(
             backlinks.get("backlink_count"),
@@ -166,6 +173,7 @@ def build_search_overview(
 
 def _empty_metrics(conn: dict) -> dict[str, Any]:
     keys = [
+        "gsc_search_queries",
         "organic_keywords",
         "estimated_organic_traffic",
         "organic_clicks",

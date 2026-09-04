@@ -25,6 +25,70 @@ def _new_id() -> str:
     return uuid.uuid4().hex
 
 
+MAX_PROVIDER_PAGES = 100
+
+
+def _fetch_all_search_analytics(
+    adapter,
+    *,
+    start_date: str,
+    end_date: str,
+    dimensions: list[str],
+    row_limit: int,
+) -> tuple[list[dict], dict[str, Any]]:
+    """Fetch every available GSC page for one dimension set.
+
+    Google Search Console supports ``startRow`` pagination.  A page with
+    fewer rows than ``row_limit`` proves the result set is exhausted.
+    ``MAX_PROVIDER_PAGES`` prevents an accidental unbounded loop if a
+    provider behaves unexpectedly.
+    """
+    if not 1 <= row_limit <= 25000:
+        raise ValueError("row_limit must be between 1 and 25000")
+
+    rows: list[dict] = []
+    pages = 0
+    start_row = 0
+    complete = False
+
+    while pages < MAX_PROVIDER_PAGES:
+        response = adapter.fetch_search_analytics(
+            start_date=start_date,
+            end_date=end_date,
+            dimensions=dimensions,
+            row_limit=row_limit,
+            start_row=start_row,
+        )
+
+        raw_rows = (
+            response.get("rows", [])
+            if isinstance(response, dict)
+            else []
+        ) or []
+
+        normalized = normalize_rows(response, dimensions)
+        rows.extend(normalized)
+        pages += 1
+
+        if len(raw_rows) < row_limit:
+            complete = True
+            break
+
+        start_row += len(raw_rows)
+
+    return rows, {
+        "dimensions": list(dimensions),
+        "rows": len(rows),
+        "pages": pages,
+        "page_size": row_limit,
+        "complete": complete,
+        "max_pages": MAX_PROVIDER_PAGES,
+        "next_start_row": (
+            None if complete else start_row
+        ),
+    }
+
+
 async def _upsert_daily(pg, site_id: str, rows: list[dict]) -> int:
     count = 0
     for r in rows:
@@ -161,7 +225,7 @@ async def sync_search_console(
     start_date: str,
     end_date: str,
     created_by: Optional[str] = None,
-    row_limit: int = 1000,
+    row_limit: int = 25000,
 ) -> dict[str, Any]:
     """Read GSC (date/query/page) and persist normalized metrics.
 
@@ -176,27 +240,29 @@ async def sync_search_console(
     error: Optional[str] = None
     rows_synced = 0
 
+    pagination: dict[str, dict[str, Any]] = {}
+
     try:
-        daily = normalize_rows(
-            adapter.fetch_search_analytics(
-                start_date=start_date, end_date=end_date,
-                dimensions=["date"], row_limit=row_limit,
-            ),
-            ["date"],
+        daily, pagination["daily"] = _fetch_all_search_analytics(
+            adapter,
+            start_date=start_date,
+            end_date=end_date,
+            dimensions=["date"],
+            row_limit=row_limit,
         )
-        queries = normalize_rows(
-            adapter.fetch_search_analytics(
-                start_date=start_date, end_date=end_date,
-                dimensions=["query"], row_limit=row_limit,
-            ),
-            ["query"],
+        queries, pagination["queries"] = _fetch_all_search_analytics(
+            adapter,
+            start_date=start_date,
+            end_date=end_date,
+            dimensions=["query"],
+            row_limit=row_limit,
         )
-        pages = normalize_rows(
-            adapter.fetch_search_analytics(
-                start_date=start_date, end_date=end_date,
-                dimensions=["page"], row_limit=row_limit,
-            ),
-            ["page"],
+        pages, pagination["pages"] = _fetch_all_search_analytics(
+            adapter,
+            start_date=start_date,
+            end_date=end_date,
+            dimensions=["page"],
+            row_limit=row_limit,
         )
 
         async with pg.begin():
@@ -249,6 +315,15 @@ async def sync_search_console(
         "start_date": start_date,
         "end_date": end_date,
         "source": PROVIDER,
+        "pagination": pagination,
+        "complete": (
+            status == "completed"
+            and bool(pagination)
+            and all(
+                item.get("complete") is True
+                for item in pagination.values()
+            )
+        ),
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
     }

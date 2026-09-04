@@ -519,7 +519,7 @@ async def _gsc_overview_summary(pg, site_id: str) -> dict:
         {"sid": site_id},
     )
     cap = captured.first()._mapping.get("c")
-    organic_keywords = None
+    search_queries = None
     if cap is not None:
         cnt = await pg.execute(
             text(
@@ -529,7 +529,7 @@ async def _gsc_overview_summary(pg, site_id: str) -> dict:
             ),
             {"sid": site_id, "c": cap},
         )
-        organic_keywords = int(cnt.first()._mapping.get("n") or 0)
+        search_queries = int(cnt.first()._mapping.get("n") or 0)
 
     return {
         "connected": True,
@@ -539,7 +539,8 @@ async def _gsc_overview_summary(pg, site_id: str) -> dict:
         "average_position": (
             round(wpos / pos_impr, 2) if pos_impr else None
         ),
-        "organic_keywords": organic_keywords,
+        "search_queries": search_queries,
+        "captured_date": cap.isoformat() if cap is not None else None,
     }
 
 

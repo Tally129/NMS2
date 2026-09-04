@@ -322,16 +322,22 @@ export default function SearchIntelligencePanel() {
               icon={FileSearch}
             />
             <MetricCard
-              label="Organic Keywords"
-              name="organic_keywords"
+              label="GSC Search Queries"
+              name="gsc_search_queries"
               overview={overview}
               icon={Search}
             />
             <MetricCard
-              label="Est. Organic Traffic"
-              name="estimated_organic_traffic"
+              label="GSC Organic Clicks"
+              name="organic_clicks"
               overview={overview}
               icon={TrendingUp}
+            />
+            <MetricCard
+              label="Organic Ranking Keywords"
+              name="organic_keywords"
+              overview={overview}
+              icon={Search}
             />
             <MetricCard
               label="Tracked Keywords"

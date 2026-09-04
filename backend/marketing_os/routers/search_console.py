@@ -53,7 +53,7 @@ class SyncRequest(BaseModel):
     site_id: Optional[str] = Field(default=None, max_length=64)
     start_date: Optional[str] = Field(default=None)
     end_date: Optional[str] = Field(default=None)
-    row_limit: int = Field(default=1000, ge=1, le=25000)
+    row_limit: int = Field(default=25000, ge=1, le=25000)
 
 
 async def _resolve_site(pg, site_id: Optional[str]) -> Optional[dict]:
