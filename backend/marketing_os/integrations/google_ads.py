@@ -694,11 +694,8 @@ class GoogleAdsIntegration(MarketingIntegration):
             else client.enums.CampaignStatusEnum.PAUSED
         )
 
-        client.copy_from(
-            operation.update_mask,
-            client.get_type("FieldMask")(
-                paths=["status"]
-            ),
+        operation.update_mask.paths.append(
+            "status"
         )
 
         response = service.mutate_campaigns(
@@ -803,11 +800,8 @@ class GoogleAdsIntegration(MarketingIntegration):
             amount
         )
 
-        client.copy_from(
-            operation.update_mask,
-            client.get_type("FieldMask")(
-                paths=["amount_micros"]
-            ),
+        operation.update_mask.paths.append(
+            "amount_micros"
         )
 
         response = (

@@ -39,11 +39,7 @@ class Operation:
         self.create.manual_cpc = Obj()
         self.update = Obj()
         self.update_mask = Obj()
-
-
-class FieldMask:
-    def __init__(self, paths=None):
-        self.paths = list(paths or [])
+        self.update_mask.paths = []
 
 
 class Result:
@@ -194,9 +190,9 @@ class FakeClient:
         }:
             return Operation()
 
-        if name == "FieldMask":
-            return FieldMask
-
+        # FieldMask is a protobuf message, not a Google Ads
+        # API resource type. Real Google Ads v25 rejects
+        # client.get_type("FieldMask"), so the fake must reject it too.
         raise AssertionError(name)
 
     def copy_from(self, target, source):
