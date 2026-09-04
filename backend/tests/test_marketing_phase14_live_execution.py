@@ -100,6 +100,13 @@ async def test_live_execution_calls_adapter_after_approval():
 
     assert result["result"]["verified"] is True
 
+    # The live route consumes both confirmation flags from
+    # the top-level outcome, not only from the nested provider
+    # result. This is the contract that prevents a verified
+    # provider write from being misclassified as uncertain.
+    assert result["external_write_performed"] is True
+    assert result["verified"] is True
+
 
 @pytest.mark.asyncio
 async def test_live_execution_blocks_dry_run_request():

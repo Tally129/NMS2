@@ -335,6 +335,14 @@ async def perform_live_execution(
         "allowed": True,
         "policy": policy,
         "result": result,
+        # The live route consumes both provider confirmation
+        # flags from the top-level outcome. Keep the complete
+        # nested provider result while exposing the verified
+        # contract required by the finalization route.
+        "external_write_performed": (
+            result["external_write_performed"]
+        ),
+        "verified": result["verified"],
     }
 
 
