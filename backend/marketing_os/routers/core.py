@@ -1493,6 +1493,9 @@ async def _resolve_live_execution_adapter(
     from marketing_os.integrations.google_ads import (
         credential_readiness as google_ads_credential_readiness,
     )
+    from marketing_os.integrations.bootstrap import (
+        register_default_integrations,
+    )
     from marketing_os.integrations.registry import (
         create_integration,
         normalize_provider,
@@ -1596,6 +1599,10 @@ async def _resolve_live_execution_adapter(
 
     else:
         account = eligible[0]
+
+    # Ensure provider factories are registered in this
+    # process before resolving the write-enabled adapter.
+    register_default_integrations()
 
     integration = create_integration(
         "google_ads",
