@@ -2365,15 +2365,32 @@ async def marketing_execution_request_execute(
     request_id: str,
     user=Depends(require_roles(*MARKETING_ROLES)),
 ):
+    """Execute one approved live marketing action.
+
+    Lifecycle:
+    1. Claim the approved request in a short DB transaction.
+    2. Commit the claim before any external provider call.
+    3. Execute the provider action outside a DB transaction.
+    4. Record the verified outcome in a new short transaction.
+
+    A previously started live attempt is never blindly retried.
+    """
+
     actor = _execution_actor_id(user)
 
-    live_exception = None
-    outcome = None
+    request = None
+    policy = None
     attempt_id = None
     attempt_number = None
 
+    # ---------------------------------------------------------
+    # PHASE 1 — CLAIM
+    # Short transaction only. No provider/network calls here.
+    # ---------------------------------------------------------
+
     async with AsyncSessionLocal() as pg:
         async with pg.begin():
+
             row = await _get_execution_request(
                 pg,
                 request_id,
@@ -2394,6 +2411,14 @@ async def marketing_execution_request_execute(
                     detail=(
                         "Execution request is not marked "
                         "for live execution"
+                    ),
+                )
+
+            if request.get("status") == "executed":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Execution request has already been executed"
                     ),
                 )
 
@@ -2434,9 +2459,49 @@ async def marketing_execution_request_execute(
                     "allowed_actions": [],
                 }
 
+            # Any previous live attempt means provider state may
+            # already have changed. Do not blindly retry.
+            prior_result = await pg.execute(
+                text("""
+                    SELECT
+                        id,
+                        attempt_number,
+                        status,
+                        started_at,
+                        finished_at
+                    FROM marketing_execution_attempts
+                    WHERE execution_request_id = :request_id
+                      AND dry_run = false
+                    ORDER BY attempt_number DESC
+                    LIMIT 1
+                """),
+                {
+                    "request_id": request_id,
+                },
+            )
+
+            prior = prior_result.mappings().first()
+
+            if (
+                prior is not None
+                and prior.get("status") != "policy_blocked"
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "A prior live execution attempt may have "
+                        "reached the provider. Automatic retry is "
+                        "blocked to prevent a duplicate provider "
+                        "mutation. Review the existing attempt "
+                        "before taking further action."
+                    ),
+                )
+
+            # The request row is locked, so MAX()+1 is safe for
+            # this request while this short transaction is open.
             count_result = await pg.execute(
                 text("""
-                    SELECT COUNT(*) AS count
+                    SELECT COALESCE(MAX(attempt_number), 0)
                     FROM marketing_execution_attempts
                     WHERE execution_request_id = :request_id
                 """),
@@ -2450,6 +2515,17 @@ async def marketing_execution_request_execute(
             ) + 1
 
             attempt_id = new_marketing_id()
+
+            snapshot = {
+                "provider": request["provider"],
+                "action_type": request["action_type"],
+                "target_type": request["target_type"],
+                "target_id": request["target_id"],
+                "request_payload": request["request_payload"],
+                "dry_run": False,
+                "idempotency_key":
+                    request.get("idempotency_key"),
+            }
 
             await pg.execute(
                 text("""
@@ -2478,94 +2554,132 @@ async def marketing_execution_request_execute(
                     "attempt_number": attempt_number,
                     "provider": request["provider"],
                     "request_snapshot": json.dumps(
-                        {
-                            "provider":
-                                request["provider"],
-                            "action_type":
-                                request["action_type"],
-                            "target_type":
-                                request["target_type"],
-                            "target_id":
-                                request["target_id"],
-                            "request_payload":
-                                request["request_payload"],
-                            "dry_run": False,
-                        },
+                        snapshot,
                         default=str,
                     ),
                 },
             )
 
-            try:
-                adapter = (
-                    await _resolve_live_execution_adapter(
-                        provider=request["provider"],
-                        request=request,
-                    )
+    # Claim transaction is committed here.
+    # There is intentionally NO open DB transaction while
+    # talking to Google Ads or another provider.
+
+    # ---------------------------------------------------------
+    # PHASE 2 — PROVIDER EXECUTION
+    # No DB session/transaction is held during this operation.
+    # ---------------------------------------------------------
+
+    try:
+        adapter = await _resolve_live_execution_adapter(
+            provider=request["provider"],
+            request=request,
+        )
+
+        outcome = await perform_live_execution(
+            request,
+            adapter=adapter,
+            provider_enabled=bool(
+                policy.get("enabled")
+            ),
+            provider_dry_run_only=bool(
+                policy.get("dry_run_only", True)
+            ),
+            provider_human_approval_required=bool(
+                policy.get(
+                    "human_approval_required",
+                    True,
                 )
+            ),
+            provider_allowed_actions=(
+                policy.get("allowed_actions")
+                or []
+            ),
+        )
 
-                outcome = await perform_live_execution(
-                    request,
-                    adapter=adapter,
-                    provider_enabled=bool(
-                        policy.get("enabled")
-                    ),
-                    provider_dry_run_only=bool(
-                        policy.get("dry_run_only", True)
-                    ),
-                    provider_human_approval_required=bool(
-                        policy.get(
-                            "human_approval_required",
-                            True,
-                        )
-                    ),
-                    provider_allowed_actions=(
-                        policy.get("allowed_actions")
-                        or []
-                    ),
-                )
-
-                if not outcome.get("allowed"):
-                    await pg.execute(
-                        text("""
-                            UPDATE marketing_execution_attempts
-                            SET
-                                status = 'policy_blocked',
-                                response_snapshot =
-                                    CAST(:response AS jsonb),
-                                finished_at = now()
-                            WHERE id = :attempt_id
-                        """),
-                        {
-                            "attempt_id": attempt_id,
-                            "response": json.dumps(
-                                outcome,
-                                default=str,
-                            ),
-                        },
-                    )
-
-                    return {
-                        "request_id": request_id,
-                        "attempt_id": attempt_id,
-                        "attempt_number":
-                            attempt_number,
-                        "outcome": outcome,
-                        "external_write_performed":
-                            False,
-                        "live_execution_enabled":
-                            True,
-                    }
+    except Exception as exc:
+        # We cannot know whether every provider exception occurred
+        # before or after the external provider accepted a write.
+        # Record the attempt as uncertain and block automatic retry.
+        async with AsyncSessionLocal() as pg:
+            async with pg.begin():
 
                 await pg.execute(
                     text("""
                         UPDATE marketing_execution_attempts
                         SET
-                            status = 'executed',
+                            status = 'execution_uncertain',
+                            error_code =
+                                'live_execution_uncertain',
+                            error_message = :error_message,
+                            finished_at = now()
+                        WHERE id = :attempt_id
+                          AND status = 'started'
+                    """),
+                    {
+                        "attempt_id": attempt_id,
+                        "error_message":
+                            str(exc)[:2000],
+                    },
+                )
+
+                await pg.execute(
+                    text("""
+                        UPDATE marketing_execution_requests
+                        SET
+                            status = 'failed',
+                            failure_code =
+                                'live_execution_uncertain',
+                            failure_message =
+                                :failure_message,
+                            updated_at = now()
+                        WHERE id = :request_id
+                          AND status = 'approved'
+                    """),
+                    {
+                        "request_id": request_id,
+                        "failure_message": (
+                            "Provider execution failed or became "
+                            "ambiguous after the live attempt "
+                            "started. Automatic retry is blocked. "
+                            + str(exc)[:1500]
+                        ),
+                    },
+                )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Live execution failed or became uncertain. "
+                "Automatic retry is blocked pending review."
+            ),
+        ) from exc
+
+    # ---------------------------------------------------------
+    # PHASE 3 — FINALIZE
+    # Short transaction after provider call has completed.
+    # ---------------------------------------------------------
+
+    allowed = bool(outcome.get("allowed"))
+    external_write_performed = bool(
+        outcome.get("external_write_performed")
+    )
+    verified = bool(
+        outcome.get("verified")
+    )
+
+    if not allowed:
+        async with AsyncSessionLocal() as pg:
+            async with pg.begin():
+                await pg.execute(
+                    text("""
+                        UPDATE marketing_execution_attempts
+                        SET
+                            status = 'policy_blocked',
                             response_snapshot =
                                 CAST(:response AS jsonb),
                             finished_at = now()
                         WHERE id = :attempt_id
+                          AND status = 'started'
                     """),
                     {
                         "attempt_id": attempt_id,
@@ -2576,38 +2690,62 @@ async def marketing_execution_request_execute(
                     },
                 )
 
-                await pg.execute(
-                    text("""
-                        UPDATE marketing_execution_requests
-                        SET
-                            status = 'executed',
-                            executed_by = :executed_by,
-                            executed_at = now(),
-                            failure_code = NULL,
-                            failure_message = NULL,
-                            updated_at = now()
-                        WHERE id = :request_id
-                    """),
-                    {
-                        "request_id": request_id,
-                        "executed_by": actor,
-                    },
-                )
+        return {
+            "request_id": request_id,
+            "attempt_id": attempt_id,
+            "attempt_number": attempt_number,
+            "outcome": outcome,
+            "external_write_performed": False,
+            "verified": False,
+            "live_execution_enabled": True,
+        }
 
-            except Exception as exc:
+    # perform_live_execution is already expected to enforce these,
+    # but the route refuses to mark an execution successful unless
+    # the provider explicitly confirms both.
+    if (
+        not external_write_performed
+        or not verified
+    ):
+        # The provider call completed, but the result is not strong
+        # enough to declare the mutation safely committed. Record
+        # this as uncertain and permanently block blind retry.
+        if not external_write_performed:
+            uncertainty_reason = (
+                "Provider did not confirm an external write."
+            )
+        else:
+            uncertainty_reason = (
+                "Provider reported a write but verification "
+                "did not succeed."
+            )
+
+        async with AsyncSessionLocal() as pg:
+            async with pg.begin():
+
                 await pg.execute(
                     text("""
                         UPDATE marketing_execution_attempts
                         SET
-                            status = 'failed',
-                            error_code = 'live_execution_error',
-                            error_message = :error_message,
+                            status = 'execution_uncertain',
+                            response_snapshot =
+                                CAST(:response AS jsonb),
+                            error_code =
+                                'live_execution_unverified',
+                            error_message =
+                                :error_message,
                             finished_at = now()
                         WHERE id = :attempt_id
+                          AND status = 'started'
                     """),
                     {
                         "attempt_id": attempt_id,
-                        "error_message": str(exc)[:2000],
+                        "response": json.dumps(
+                            outcome,
+                            default=str,
+                        ),
+                        "error_message":
+                            uncertainty_reason,
                     },
                 )
 
@@ -2617,36 +2755,93 @@ async def marketing_execution_request_execute(
                         SET
                             status = 'failed',
                             failure_code =
-                                'live_execution_error',
+                                'live_execution_unverified',
                             failure_message =
                                 :failure_message,
                             updated_at = now()
                         WHERE id = :request_id
+                          AND status = 'approved'
                     """),
                     {
                         "request_id": request_id,
-                        "failure_message": str(exc)[:2000],
+                        "failure_message":
+                            uncertainty_reason
+                            + " Automatic retry is blocked.",
                     },
                 )
 
-                live_exception = exc
-
-    if live_exception is not None:
         raise HTTPException(
             status_code=500,
-            detail="Live execution failed",
-        ) from live_exception
+            detail=(
+                uncertainty_reason
+                + " Automatic retry is blocked pending review."
+            ),
+        )
+
+    async with AsyncSessionLocal() as pg:
+        async with pg.begin():
+
+            attempt_update = await pg.execute(
+                text("""
+                    UPDATE marketing_execution_attempts
+                    SET
+                        status = 'executed',
+                        response_snapshot =
+                            CAST(:response AS jsonb),
+                        finished_at = now()
+                    WHERE id = :attempt_id
+                      AND status = 'started'
+                """),
+                {
+                    "attempt_id": attempt_id,
+                    "response": json.dumps(
+                        outcome,
+                        default=str,
+                    ),
+                },
+            )
+
+            if attempt_update.rowcount != 1:
+                raise RuntimeError(
+                    "Live execution attempt could not be "
+                    "finalized from started state"
+                )
+
+            request_update = await pg.execute(
+                text("""
+                    UPDATE marketing_execution_requests
+                    SET
+                        status = 'executed',
+                        executed_by = :executed_by,
+                        executed_at = now(),
+                        failure_code = NULL,
+                        failure_message = NULL,
+                        updated_at = now()
+                    WHERE id = :request_id
+                      AND status = 'approved'
+                """),
+                {
+                    "request_id": request_id,
+                    "executed_by": actor,
+                },
+            )
+
+            if request_update.rowcount != 1:
+                raise RuntimeError(
+                    "Execution request could not be finalized "
+                    "from approved state"
+                )
 
     return {
         "request_id": request_id,
         "attempt_id": attempt_id,
         "attempt_number": attempt_number,
         "outcome": outcome,
-        "external_write_performed": True,
-        "verified": True,
+        "external_write_performed":
+            external_write_performed,
+        "verified": verified,
         "live_execution_enabled": True,
     }
-
 
 
 @api.post(
