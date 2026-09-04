@@ -15,8 +15,25 @@ def _enum(name):
 
 
 class FakeService:
-    def __init__(self, rows):
-        self.rows = rows
+    def __init__(self, responses):
+        self.responses = []
+
+        if (
+            responses
+            and isinstance(
+                responses[0],
+                list,
+            )
+        ):
+            self.responses = [
+                list(item)
+                for item in responses
+            ]
+        else:
+            self.responses = [
+                list(responses)
+            ]
+
         self.calls = []
 
     def search(
@@ -34,7 +51,18 @@ class FakeService:
             }
         )
 
-        return list(self.rows)
+        index = len(
+            self.calls
+        ) - 1
+
+        if index >= len(
+            self.responses
+        ):
+            return []
+
+        return list(
+            self.responses[index]
+        )
 
 
 class FakeClient:
@@ -43,6 +71,7 @@ class FakeClient:
 
     def get_service(self, name):
         assert name == "GoogleAdsService"
+
         return self.service
 
 
@@ -58,8 +87,6 @@ def _campaign_row():
                 "customers/101/"
                 "campaignBudgets/456"
             ),
-            start_date="2026-09-01",
-            end_date="",
             contains_eu_political_advertising=
                 _enum(
                     "DOES_NOT_CONTAIN_"
@@ -73,6 +100,14 @@ def _campaign_row():
             reference_count=1,
             explicitly_shared=True,
         ),
+    )
+
+
+def _metric_row():
+    return SimpleNamespace(
+        campaign=SimpleNamespace(
+            id=123,
+        ),
         metrics=SimpleNamespace(
             impressions=100,
             clicks=10,
@@ -83,10 +118,15 @@ def _campaign_row():
     )
 
 
-def test_workspace_campaign_query_is_read_only():
+def test_workspace_campaign_queries_are_read_only():
     service = FakeService(
         [
-            _campaign_row(),
+            [
+                _campaign_row(),
+            ],
+            [
+                _metric_row(),
+            ],
         ]
     )
 
@@ -165,19 +205,92 @@ def test_workspace_campaign_query_is_read_only():
         == 2.5
     )
 
-    assert len(service.calls) == 1
+    assert len(service.calls) == 2
 
-    query = service.calls[0]["query"]
+    inventory_query = (
+        service.calls[0]["query"]
+    )
 
-    assert "FROM campaign" in query
-    assert "segments.date BETWEEN" in query
+    performance_query = (
+        service.calls[1]["query"]
+    )
 
-    lowered = query.lower()
+    assert "FROM campaign" in inventory_query
+    assert "metrics." not in inventory_query
+    assert "segments.date" not in inventory_query
+    assert "campaign.start_date" not in inventory_query
+    assert "campaign.end_date" not in inventory_query
 
-    assert "mutate" not in lowered
-    assert "update " not in lowered
-    assert "insert " not in lowered
-    assert "delete " not in lowered
+    assert "FROM campaign" in performance_query
+    assert "metrics.impressions" in performance_query
+    assert "segments.date BETWEEN" in performance_query
+    assert "campaign.start_date" not in performance_query
+    assert "campaign.end_date" not in performance_query
+
+    for query in (
+        inventory_query,
+        performance_query,
+    ):
+        lowered = query.lower()
+
+        assert "mutate" not in lowered
+        assert "update " not in lowered
+        assert "insert " not in lowered
+        assert "delete " not in lowered
+
+
+def test_workspace_zero_activity_campaign_is_preserved():
+    service = FakeService(
+        [
+            [
+                _campaign_row(),
+            ],
+            [],
+        ]
+    )
+
+    integration = GoogleAdsIntegration(
+        account={
+            "external_account_id":
+                "101",
+            "configuration": {},
+        },
+        client=FakeClient(
+            service
+        ),
+    )
+
+    rows = (
+        integration
+        ._workspace_campaigns_sync(
+            start_date=date(
+                2026,
+                9,
+                1,
+            ),
+            end_date=date(
+                2026,
+                9,
+                30,
+            ),
+        )
+    )
+
+    assert len(rows) == 1
+
+    metrics = rows[0]["metrics"]
+
+    assert metrics == {
+        "impressions": 0,
+        "clicks": 0,
+        "ctr": None,
+        "spend": 0.0,
+        "average_cpc": None,
+        "conversions": 0.0,
+        "conversion_value": 0.0,
+        "cpa": None,
+        "roas": None,
+    }
 
 
 @pytest.mark.asyncio

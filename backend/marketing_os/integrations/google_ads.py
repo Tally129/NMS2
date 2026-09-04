@@ -915,15 +915,16 @@ class GoogleAdsIntegration(MarketingIntegration):
         except (TypeError, ValueError, ZeroDivisionError):
             return None
 
-    def _workspace_campaign_query(
+    def _workspace_campaign_inventory_query(
         self,
         *,
-        start_date: date,
-        end_date: date,
         campaign_id: str | None = None,
     ) -> str:
-        start = start_date.isoformat()
-        end = end_date.isoformat()
+        """Return provider state independent of performance activity.
+
+        This query deliberately contains no metrics or date segmentation so
+        paused and zero-traffic campaigns remain visible in the NMS workspace.
+        """
 
         campaign_filter = ""
 
@@ -931,6 +932,7 @@ class GoogleAdsIntegration(MarketingIntegration):
             campaign_id = _clean_customer_id(
                 campaign_id
             )
+
             campaign_filter = (
                 f" AND campaign.id = {campaign_id}"
             )
@@ -942,14 +944,44 @@ class GoogleAdsIntegration(MarketingIntegration):
                 campaign.status,
                 campaign.advertising_channel_type,
                 campaign.campaign_budget,
-                campaign.start_date,
-                campaign.end_date,
                 campaign.contains_eu_political_advertising,
                 campaign_budget.id,
                 campaign_budget.name,
                 campaign_budget.amount_micros,
                 campaign_budget.reference_count,
-                campaign_budget.explicitly_shared,
+                campaign_budget.explicitly_shared
+            FROM campaign
+            WHERE campaign.status != 'REMOVED'
+              {campaign_filter}
+            ORDER BY campaign.id
+        """
+
+    def _workspace_campaign_metrics_query(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        campaign_id: str | None = None,
+    ) -> str:
+        """Return date-bounded performance aggregated by campaign."""
+
+        start = start_date.isoformat()
+        end = end_date.isoformat()
+
+        campaign_filter = ""
+
+        if campaign_id:
+            campaign_id = _clean_customer_id(
+                campaign_id
+            )
+
+            campaign_filter = (
+                f" AND campaign.id = {campaign_id}"
+            )
+
+        return f"""
+            SELECT
+                campaign.id,
                 metrics.impressions,
                 metrics.clicks,
                 metrics.cost_micros,
@@ -976,24 +1008,37 @@ class GoogleAdsIntegration(MarketingIntegration):
             "GoogleAdsService"
         )
 
-        rows = service.search(
+        inventory_rows = service.search(
             customer_id=self.customer_id,
-            query=self._workspace_campaign_query(
+            query=self._workspace_campaign_inventory_query(
+                campaign_id=campaign_id,
+            ),
+        )
+
+        metric_rows = service.search(
+            customer_id=self.customer_id,
+            query=self._workspace_campaign_metrics_query(
                 start_date=start_date,
                 end_date=end_date,
                 campaign_id=campaign_id,
             ),
         )
 
-        campaigns = []
+        metrics_by_campaign: dict[str, dict[str, Any]] = {}
 
-        for row in rows:
+        for row in metric_rows:
+            campaign_key = str(
+                row.campaign.id
+            )
+
             impressions = int(
-                row.metrics.impressions or 0
+                row.metrics.impressions
+                or 0
             )
 
             clicks = int(
-                row.metrics.clicks or 0
+                row.metrics.clicks
+                or 0
             )
 
             spend = float(
@@ -1003,7 +1048,8 @@ class GoogleAdsIntegration(MarketingIntegration):
             )
 
             conversions = float(
-                row.metrics.conversions or 0
+                row.metrics.conversions
+                or 0
             )
 
             conversion_value = float(
@@ -1011,33 +1057,71 @@ class GoogleAdsIntegration(MarketingIntegration):
                 or 0
             )
 
-            ctr = self._safe_ratio(
-                clicks,
-                impressions,
+            metrics_by_campaign[
+                campaign_key
+            ] = {
+                "impressions":
+                    impressions,
+                "clicks":
+                    clicks,
+                "ctr":
+                    self._safe_ratio(
+                        clicks,
+                        impressions,
+                    ),
+                "spend":
+                    spend,
+                "average_cpc":
+                    self._safe_ratio(
+                        spend,
+                        clicks,
+                    ),
+                "conversions":
+                    conversions,
+                "conversion_value":
+                    conversion_value,
+                "cpa":
+                    self._safe_ratio(
+                        spend,
+                        conversions,
+                    ),
+                "roas":
+                    self._safe_ratio(
+                        conversion_value,
+                        spend,
+                    ),
+            }
+
+        campaigns = []
+
+        for row in inventory_rows:
+            campaign_key = str(
+                row.campaign.id
             )
 
-            average_cpc = self._safe_ratio(
-                spend,
-                clicks,
-            )
-
-            cpa = self._safe_ratio(
-                spend,
-                conversions,
-            )
-
-            roas = self._safe_ratio(
-                conversion_value,
-                spend,
+            metrics = metrics_by_campaign.get(
+                campaign_key,
+                {
+                    "impressions": 0,
+                    "clicks": 0,
+                    "ctr": None,
+                    "spend": 0.0,
+                    "average_cpc": None,
+                    "conversions": 0.0,
+                    "conversion_value": 0.0,
+                    "cpa": None,
+                    "roas": None,
+                },
             )
 
             campaigns.append(
                 {
-                    "provider": self.provider,
+                    "provider":
+                        self.provider,
                     "customer_id":
                         self.customer_id,
                     "campaign_id":
-                        str(row.campaign.id),
+                        campaign_key,
                     "campaign_name":
                         str(
                             row.campaign.name
@@ -1052,18 +1136,6 @@ class GoogleAdsIntegration(MarketingIntegration):
                             row.campaign
                             .advertising_channel_type
                         ),
-                    "start_date":
-                        str(
-                            row.campaign.start_date
-                            or ""
-                        )
-                        or None,
-                    "end_date":
-                        str(
-                            row.campaign.end_date
-                            or ""
-                        )
-                        or None,
                     "campaign_resource_name":
                         (
                             f"customers/"
@@ -1106,26 +1178,8 @@ class GoogleAdsIntegration(MarketingIntegration):
                                 .explicitly_shared
                             ),
                     },
-                    "metrics": {
-                        "impressions":
-                            impressions,
-                        "clicks":
-                            clicks,
-                        "ctr":
-                            ctr,
-                        "spend":
-                            spend,
-                        "average_cpc":
-                            average_cpc,
-                        "conversions":
-                            conversions,
-                        "conversion_value":
-                            conversion_value,
-                        "cpa":
-                            cpa,
-                        "roas":
-                            roas,
-                    },
+                    "metrics":
+                        metrics,
                     "eu_political_advertising":
                         self._enum_name(
                             row.campaign
