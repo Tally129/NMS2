@@ -87,6 +87,9 @@ def serialize_row(row) -> dict[str, Any]:
     return result
 
 
+from marketing_os.services.execution_policy import validate_live_request_creation_policy
+
+
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
@@ -1788,8 +1791,6 @@ async def marketing_execution_policy_update(
                         UPDATE marketing_provider_execution_policies
                         SET
                             enabled = :enabled,
-                            dry_run_only = true,
-                            human_approval_required = true,
                             allowed_actions =
                                 CAST(:allowed_actions AS jsonb),
                             updated_at = now()
@@ -1837,13 +1838,46 @@ async def marketing_execution_policy_update(
                     },
                 )
 
+    async with AsyncSessionLocal() as pg:
+        current_row = await _get_execution_policy(
+            pg,
+            provider,
+        )
+
+    current = (
+        serialize_row(current_row)
+        if current_row
+        else {}
+    )
+
     return {
         "provider": provider,
-        "enabled": bool(body.enabled),
-        "dry_run_only": True,
-        "human_approval_required": True,
-        "allowed_actions": normalized_actions,
-        "live_execution_enabled": False,
+        "enabled": bool(
+            current.get("enabled")
+        ),
+        "dry_run_only": bool(
+            current.get(
+                "dry_run_only",
+                True,
+            )
+        ),
+        "human_approval_required": bool(
+            current.get(
+                "human_approval_required",
+                True,
+            )
+        ),
+        "allowed_actions": (
+            current.get("allowed_actions")
+            or []
+        ),
+        "live_execution_enabled": (
+            current.get("enabled") is True
+            and current.get("dry_run_only") is False
+            and current.get(
+                "human_approval_required"
+            ) is True
+        ),
     }
 
 
@@ -1916,12 +1950,6 @@ async def marketing_execution_request_create(
 ):
     actor = _execution_actor_id(user)
 
-    if body.dry_run is not True:
-        raise HTTPException(
-            status_code=400,
-            detail="Phase 14 supports dry-run requests only",
-        )
-
     operation_token = body.operation_token.strip()
     if len(operation_token) < 16:
         raise HTTPException(
@@ -1941,7 +1969,7 @@ async def marketing_execution_request_create(
         target_type=body.target_type,
         target_id=body.target_id,
         payload=body.payload,
-        dry_run=True,
+        dry_run=bool(body.dry_run),
         operation_token=operation_token,
     )
 
@@ -1966,6 +1994,59 @@ async def marketing_execution_request_create(
 
     async with AsyncSessionLocal() as pg:
         async with pg.begin():
+            if request.get("dry_run") is False:
+                policy_row = await _get_execution_policy(
+                    pg,
+                    request["provider"],
+                )
+
+                provider_policy = (
+                    serialize_row(policy_row)
+                    if policy_row
+                    else None
+                )
+
+                try:
+                    validate_live_request_creation_policy(
+                        request=request,
+                        provider_policy=provider_policy,
+                    )
+                except ValueError as exc:
+                    code = str(exc)
+
+                    messages = {
+                        "provider_policy_missing": (
+                            "No provider execution policy exists."
+                        ),
+                        "provider_disabled": (
+                            "Provider live execution is disabled."
+                        ),
+                        "provider_dry_run_only": (
+                            "Provider is restricted to dry-run execution."
+                        ),
+                        "live_request_requires_human_approval": (
+                            "Live execution requires human approval."
+                        ),
+                        "action_not_allowlisted": (
+                            "Requested action is not allowed by "
+                            "the provider execution policy."
+                        ),
+                    }
+
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": code,
+                            "message": messages.get(
+                                code,
+                                (
+                                    "Live execution request "
+                                    "is not allowed."
+                                ),
+                            ),
+                        },
+                    ) from exc
+
             duplicate = await pg.execute(
                 text("""
                     SELECT
@@ -2030,7 +2111,7 @@ async def marketing_execution_request_create(
                         :target_id,
                         :idempotency_key,
                         CAST(:request_payload AS jsonb),
-                        true,
+                        :dry_run,
                         'draft',
                         true,
                         :created_by
@@ -2049,6 +2130,9 @@ async def marketing_execution_request_create(
                         request["idempotency_key"],
                     "request_payload": json.dumps(
                         request["request_payload"]
+                    ),
+                    "dry_run": bool(
+                        request["dry_run"]
                     ),
                     "created_by": actor,
                 },
@@ -2116,7 +2200,9 @@ async def marketing_execution_request_create(
         **request,
         "created_by": actor,
         "idempotent_replay": False,
-        "live_execution_enabled": False,
+        "live_execution_enabled": (
+            request.get("dry_run") is False
+        ),
     }
 
 

@@ -893,3 +893,73 @@ __all__ = [
     "evaluate_execution_policy",
     "next_request_status",
 ]
+
+
+def validate_live_request_creation_policy(
+    *,
+    request: dict,
+    provider_policy: dict | None,
+) -> dict:
+    """Fail closed when creating a live provider request.
+
+    This is an early creation-time check only. The execute route
+    must still re-read and enforce current provider policy before
+    any external provider mutation.
+    """
+
+    if request.get("dry_run") is not False:
+        return {
+            "live_request": False,
+            "policy_validated": False,
+        }
+
+    if not provider_policy:
+        raise ValueError(
+            "provider_policy_missing"
+        )
+
+    if provider_policy.get("enabled") is not True:
+        raise ValueError(
+            "provider_disabled"
+        )
+
+    if provider_policy.get("dry_run_only") is not False:
+        raise ValueError(
+            "provider_dry_run_only"
+        )
+
+    if (
+        provider_policy.get(
+            "human_approval_required"
+        )
+        is not True
+    ):
+        raise ValueError(
+            "live_request_requires_human_approval"
+        )
+
+    action_type = str(
+        request.get("action_type")
+        or ""
+    ).strip().lower()
+
+    allowed_actions = {
+        str(item).strip().lower()
+        for item in (
+            provider_policy.get(
+                "allowed_actions"
+            )
+            or []
+        )
+        if str(item).strip()
+    }
+
+    if action_type not in allowed_actions:
+        raise ValueError(
+            "action_not_allowlisted"
+        )
+
+    return {
+        "live_request": True,
+        "policy_validated": True,
+    }
