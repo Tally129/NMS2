@@ -343,9 +343,48 @@ function RequestDetails({
     }
   }
 
+  async function executeLiveRequest() {
+    const actionName =
+      actionLabel(
+        request.action_type
+      );
+
+    const target =
+      request.target_id
+        ? `${request.target_type} ${request.target_id}`
+        : request.target_type;
+
+    const confirmed = window.confirm(
+      `EXECUTE LIVE: ${actionName}\n\n` +
+      `Provider: ${providerLabel(request.provider)}\n` +
+      `Target: ${target}\n\n` +
+      "This is the step that can change the external " +
+      "advertising account. Continue?"
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    await action(
+      "post",
+      `/marketing-os/execution/requests/${request.id}/execute`,
+      {},
+      "execute"
+    );
+  }
+
+
   const canSubmit = request.status === "draft";
   const canDecide = request.status === "pending_approval";
-  const canDryRun = request.status === "approved";
+
+  const canDryRun =
+    request.status === "approved" &&
+    request.dry_run === true;
+
+  const canExecute =
+    request.status === "approved" &&
+    request.dry_run === false;
 
   return (
     <div className="rounded-xl border border-[#e7dfc9] bg-white">
@@ -388,7 +427,12 @@ function RequestDetails({
           </div>
 
           <div>
-            Live execution: Disabled
+            Mode:{" "}
+            {
+              request.dry_run
+                ? "Approved simulation"
+                : "Governed live execution"
+            }
           </div>
         </div>
 
@@ -457,6 +501,21 @@ function RequestDetails({
                   : "Reject"}
               </Button>
             </>
+          )}
+
+          {canExecute && (
+            <Button
+              disabled={Boolean(busy)}
+              onClick={executeLiveRequest}
+            >
+              <Play size={14} className="mr-2" />
+
+              {
+                busy === "execute"
+                  ? "Executing..."
+                  : "Execute Approved Live Action"
+              }
+            </Button>
           )}
 
           {canDryRun && (
@@ -580,7 +639,7 @@ function RequestDetails({
 
             <div>
               <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#8a6a3c]">
-                Dry-Run Attempts
+                Execution Attempts
               </div>
 
               {attempts.length ? (
@@ -616,7 +675,7 @@ function RequestDetails({
                 </div>
               ) : (
                 <div className="text-sm text-[#777870]">
-                  No dry-run attempts recorded.
+                  No execution attempts recorded.
                 </div>
               )}
             </div>
@@ -885,13 +944,13 @@ export default function MarketingExecutionQueue() {
 
         <div>
           <div className="font-semibold text-amber-900">
-            Live advertising writes are disabled
+            Governed live advertising execution
           </div>
 
           <div className="mt-1 text-sm leading-6 text-amber-800">
-            Approval currently authorizes an audited simulation
-            only. Google Ads, Meta Ads, and Microsoft Ads cannot
-            be modified from this system in Phase 14.
+            Live provider changes require a live request,
+            human approval, and a separate explicit Execute step.
+            Approval alone does not modify the advertising account.
           </div>
         </div>
       </div>
@@ -919,7 +978,7 @@ export default function MarketingExecutionQueue() {
 
         <div className="rounded-xl border border-[#e7dfc9] bg-white p-4">
           <div className="text-xs uppercase tracking-wide text-[#8a6a3c]">
-            Approved for Dry Run
+            Approved Requests
           </div>
 
           <div className="mt-2 text-2xl font-semibold text-[#1f2a22]">

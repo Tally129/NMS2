@@ -298,6 +298,139 @@ export default function GoogleAdsWorkspacePanel() {
   const [detailLoading, setDetailLoading] =
     React.useState(false);
 
+  const [controlBusy, setControlBusy] =
+    React.useState("");
+
+  const [controlMessage, setControlMessage] =
+    React.useState("");
+
+
+  async function requestCampaignAction(
+    campaign,
+  ) {
+    const campaignId = String(
+      campaign?.campaign_id || ""
+    ).trim();
+
+    const campaignName =
+      campaign?.campaign_name ||
+      `Campaign ${campaignId}`;
+
+    const status = String(
+      campaign?.status || ""
+    ).toUpperCase();
+
+    let actionType = "";
+
+    if (status === "ENABLED") {
+      actionType = "campaign.pause";
+    } else if (status === "PAUSED") {
+      actionType = "campaign.resume";
+    } else {
+      setError(
+        "Only enabled or paused campaigns can use " +
+        "the governed Pause / Resume workflow."
+      );
+      return;
+    }
+
+    if (!campaignId) {
+      setError(
+        "Google campaign ID is missing."
+      );
+      return;
+    }
+
+    const actionLabel =
+      actionType === "campaign.pause"
+        ? "PAUSE"
+        : "RESUME";
+
+    const confirmed = window.confirm(
+      `${actionLabel} request for "${campaignName}" ` +
+      `(Google campaign ${campaignId})?\n\n` +
+      "This will create and submit an approval request. " +
+      "It will NOT change Google Ads yet."
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    if (
+      typeof crypto === "undefined" ||
+      typeof crypto.randomUUID !== "function"
+    ) {
+      setError(
+        "Secure operation token generation is unavailable."
+      );
+      return;
+    }
+
+    setControlBusy(
+      campaignId
+    );
+
+    setControlMessage("");
+    setError("");
+
+    try {
+      const operationToken =
+        crypto.randomUUID();
+
+      const createResponse =
+        await api.post(
+          "/marketing-os/execution/requests",
+          {
+            provider: "google_ads",
+            action_type: actionType,
+            target_type: "campaign",
+            target_id: campaignId,
+            payload: {},
+            operation_token:
+              operationToken,
+            dry_run: false,
+          }
+        );
+
+      const created =
+        createResponse?.data ||
+        createResponse ||
+        {};
+
+      const requestId =
+        created?.id;
+
+      if (!requestId) {
+        throw new Error(
+          "Execution request was created without an ID."
+        );
+      }
+
+      await api.post(
+        `/marketing-os/execution/requests/${requestId}/submit`,
+        {}
+      );
+
+      setControlMessage(
+        `${actionLabel} request for "${campaignName}" ` +
+        "was submitted for approval. " +
+        "Google Ads has not been changed."
+      );
+
+    } catch (err) {
+      setError(
+        err?.response?.data?.detail?.message ||
+        err?.response?.data?.detail ||
+        err?.message ||
+        "Unable to create the governed Google Ads request."
+      );
+
+    } finally {
+      setControlBusy("");
+    }
+  }
+
 
   const load = React.useCallback(
     async ({
@@ -587,6 +720,19 @@ export default function GoogleAdsWorkspacePanel() {
       </div>
 
 
+      {controlMessage ? (
+        <div
+          className={
+            "mt-4 rounded-xl border border-[#bfd3c2] " +
+            "bg-[#eef6ef] px-4 py-3 text-sm " +
+            "text-[#2f5a39]"
+          }
+        >
+          {controlMessage}
+        </div>
+      ) : null}
+
+
       {error ? (
         <div
           className={
@@ -838,6 +984,7 @@ export default function GoogleAdsWorkspacePanel() {
                           "CTR",
                           "Conv.",
                           "ROAS",
+                          "Control",
                         ].map(
                           (heading) => (
                             <th
@@ -1040,6 +1187,62 @@ export default function GoogleAdsWorkspacePanel() {
                                     )
                                   }
                                 </td>
+
+                                <td className="px-3 py-3">
+                                  {
+                                    ["ENABLED", "PAUSED"].includes(
+                                      String(
+                                        campaign.status || ""
+                                      ).toUpperCase()
+                                    ) ? (
+                                      <button
+                                        type="button"
+                                        disabled={
+                                          Boolean(
+                                            controlBusy
+                                          )
+                                        }
+                                        onClick={
+                                          () =>
+                                            requestCampaignAction(
+                                              campaign
+                                            )
+                                        }
+                                        className={
+                                          "whitespace-nowrap rounded-lg " +
+                                          "border border-[#ccb987] " +
+                                          "bg-white px-3 py-2 text-xs " +
+                                          "font-semibold text-[#5f4b27] " +
+                                          "hover:bg-[#fffaf0] " +
+                                          "disabled:cursor-not-allowed " +
+                                          "disabled:opacity-50"
+                                        }
+                                      >
+                                        {
+                                          String(controlBusy) ===
+                                          String(
+                                            campaign.campaign_id
+                                          )
+                                            ? "Submitting..."
+                                            : String(
+                                                campaign.status
+                                              ).toUpperCase() ===
+                                              "ENABLED"
+                                              ? "Request Pause"
+                                              : "Request Resume"
+                                        }
+                                      </button>
+                                    ) : (
+                                      <span
+                                        className={
+                                          "text-xs text-[#999]"
+                                        }
+                                      >
+                                        Not available
+                                      </span>
+                                    )
+                                  }
+                                </td>
                               </tr>
 
 
@@ -1051,7 +1254,7 @@ export default function GoogleAdsWorkspacePanel() {
                                   }
                                 >
                                   <td
-                                    colSpan={11}
+                                    colSpan={12}
                                     className="p-4"
                                   >
                                     {detailLoading ? (
