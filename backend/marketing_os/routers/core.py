@@ -1396,6 +1396,9 @@ from marketing_os.routers import search_phase3 as _marketing_phase3_routes  # no
 # Register Phase 4 read-only paid-media (Google/Meta/Microsoft) routes.
 from marketing_os.routers import paid_media as _marketing_paid_media_routes  # noqa: F401,E402
 
+# Register live read-only Google Ads workspace routes.
+from marketing_os.routers import google_ads_workspace as _marketing_google_ads_workspace_routes  # noqa: F401,E402
+
 # Register Phase 5 lead->appointment->revenue attribution routes.
 from marketing_os.routers import attribution as _marketing_attribution_routes  # noqa: F401,E402
 

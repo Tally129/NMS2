@@ -885,6 +885,824 @@ class GoogleAdsIntegration(MarketingIntegration):
             "campaign_not_found"
         )
 
+
+    # ------------------------------------------------------------------
+    # Live Google Ads workspace reads
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _enum_name(value) -> str:
+        name = getattr(value, "name", None)
+        if name:
+            return str(name)
+
+        return str(value or "")
+
+    @staticmethod
+    def _safe_ratio(
+        numerator,
+        denominator,
+    ):
+        try:
+            denominator = float(denominator or 0)
+            if denominator == 0:
+                return None
+
+            return (
+                float(numerator or 0)
+                / denominator
+            )
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+
+    def _workspace_campaign_query(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        campaign_id: str | None = None,
+    ) -> str:
+        start = start_date.isoformat()
+        end = end_date.isoformat()
+
+        campaign_filter = ""
+
+        if campaign_id:
+            campaign_id = _clean_customer_id(
+                campaign_id
+            )
+            campaign_filter = (
+                f" AND campaign.id = {campaign_id}"
+            )
+
+        return f"""
+            SELECT
+                campaign.id,
+                campaign.name,
+                campaign.status,
+                campaign.advertising_channel_type,
+                campaign.campaign_budget,
+                campaign.start_date,
+                campaign.end_date,
+                campaign.contains_eu_political_advertising,
+                campaign_budget.id,
+                campaign_budget.name,
+                campaign_budget.amount_micros,
+                campaign_budget.reference_count,
+                campaign_budget.explicitly_shared,
+                metrics.impressions,
+                metrics.clicks,
+                metrics.cost_micros,
+                metrics.conversions,
+                metrics.conversions_value
+            FROM campaign
+            WHERE campaign.status != 'REMOVED'
+              AND segments.date BETWEEN
+                  '{start}' AND '{end}'
+              {campaign_filter}
+            ORDER BY campaign.id
+        """
+
+    def _workspace_campaigns_sync(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        campaign_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        client = self._get_client()
+
+        service = client.get_service(
+            "GoogleAdsService"
+        )
+
+        rows = service.search(
+            customer_id=self.customer_id,
+            query=self._workspace_campaign_query(
+                start_date=start_date,
+                end_date=end_date,
+                campaign_id=campaign_id,
+            ),
+        )
+
+        campaigns = []
+
+        for row in rows:
+            impressions = int(
+                row.metrics.impressions or 0
+            )
+
+            clicks = int(
+                row.metrics.clicks or 0
+            )
+
+            spend = float(
+                _micros_to_decimal(
+                    row.metrics.cost_micros
+                )
+            )
+
+            conversions = float(
+                row.metrics.conversions or 0
+            )
+
+            conversion_value = float(
+                row.metrics.conversions_value
+                or 0
+            )
+
+            ctr = self._safe_ratio(
+                clicks,
+                impressions,
+            )
+
+            average_cpc = self._safe_ratio(
+                spend,
+                clicks,
+            )
+
+            cpa = self._safe_ratio(
+                spend,
+                conversions,
+            )
+
+            roas = self._safe_ratio(
+                conversion_value,
+                spend,
+            )
+
+            campaigns.append(
+                {
+                    "provider": self.provider,
+                    "customer_id":
+                        self.customer_id,
+                    "campaign_id":
+                        str(row.campaign.id),
+                    "campaign_name":
+                        str(
+                            row.campaign.name
+                            or ""
+                        ),
+                    "status":
+                        self._enum_name(
+                            row.campaign.status
+                        ),
+                    "channel_type":
+                        self._enum_name(
+                            row.campaign
+                            .advertising_channel_type
+                        ),
+                    "start_date":
+                        str(
+                            row.campaign.start_date
+                            or ""
+                        )
+                        or None,
+                    "end_date":
+                        str(
+                            row.campaign.end_date
+                            or ""
+                        )
+                        or None,
+                    "campaign_resource_name":
+                        (
+                            f"customers/"
+                            f"{self.customer_id}/"
+                            f"campaigns/"
+                            f"{row.campaign.id}"
+                        ),
+                    "budget": {
+                        "budget_id":
+                            str(
+                                row.campaign_budget.id
+                            ),
+                        "name":
+                            str(
+                                row.campaign_budget.name
+                                or ""
+                            ),
+                        "resource_name":
+                            str(
+                                row.campaign
+                                .campaign_budget
+                                or ""
+                            ),
+                        "daily_budget":
+                            float(
+                                _micros_to_decimal(
+                                    row.campaign_budget
+                                    .amount_micros
+                                )
+                            ),
+                        "reference_count":
+                            int(
+                                row.campaign_budget
+                                .reference_count
+                                or 0
+                            ),
+                        "explicitly_shared":
+                            bool(
+                                row.campaign_budget
+                                .explicitly_shared
+                            ),
+                    },
+                    "metrics": {
+                        "impressions":
+                            impressions,
+                        "clicks":
+                            clicks,
+                        "ctr":
+                            ctr,
+                        "spend":
+                            spend,
+                        "average_cpc":
+                            average_cpc,
+                        "conversions":
+                            conversions,
+                        "conversion_value":
+                            conversion_value,
+                        "cpa":
+                            cpa,
+                        "roas":
+                            roas,
+                    },
+                    "eu_political_advertising":
+                        self._enum_name(
+                            row.campaign
+                            .contains_eu_political_advertising
+                        ),
+                }
+            )
+
+        return campaigns
+
+    async def workspace_campaigns(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(
+            self._workspace_campaigns_sync,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def _workspace_ad_groups_sync(
+        self,
+        *,
+        campaign_id: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[dict[str, Any]]:
+        campaign_id = _clean_customer_id(
+            campaign_id
+        )
+
+        client = self._get_client()
+
+        service = client.get_service(
+            "GoogleAdsService"
+        )
+
+        query = f"""
+            SELECT
+                ad_group.id,
+                ad_group.name,
+                ad_group.status,
+                ad_group.type,
+                metrics.impressions,
+                metrics.clicks,
+                metrics.cost_micros,
+                metrics.conversions,
+                metrics.conversions_value
+            FROM ad_group
+            WHERE campaign.id = {campaign_id}
+              AND ad_group.status != 'REMOVED'
+              AND segments.date BETWEEN
+                  '{start_date.isoformat()}'
+                  AND
+                  '{end_date.isoformat()}'
+            ORDER BY ad_group.id
+        """
+
+        rows = service.search(
+            customer_id=self.customer_id,
+            query=query,
+        )
+
+        items = []
+
+        for row in rows:
+            items.append(
+                {
+                    "ad_group_id":
+                        str(row.ad_group.id),
+                    "name":
+                        str(
+                            row.ad_group.name
+                            or ""
+                        ),
+                    "status":
+                        self._enum_name(
+                            row.ad_group.status
+                        ),
+                    "type":
+                        self._enum_name(
+                            row.ad_group.type
+                        ),
+                    "impressions":
+                        int(
+                            row.metrics.impressions
+                            or 0
+                        ),
+                    "clicks":
+                        int(
+                            row.metrics.clicks
+                            or 0
+                        ),
+                    "spend":
+                        float(
+                            _micros_to_decimal(
+                                row.metrics
+                                .cost_micros
+                            )
+                        ),
+                    "conversions":
+                        float(
+                            row.metrics
+                            .conversions
+                            or 0
+                        ),
+                    "conversion_value":
+                        float(
+                            row.metrics
+                            .conversions_value
+                            or 0
+                        ),
+                }
+            )
+
+        return items
+
+    def _workspace_ads_sync(
+        self,
+        *,
+        campaign_id: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[dict[str, Any]]:
+        campaign_id = _clean_customer_id(
+            campaign_id
+        )
+
+        client = self._get_client()
+
+        service = client.get_service(
+            "GoogleAdsService"
+        )
+
+        query = f"""
+            SELECT
+                ad_group.id,
+                ad_group.name,
+                ad_group_ad.ad.id,
+                ad_group_ad.ad.name,
+                ad_group_ad.ad.type,
+                ad_group_ad.status,
+                ad_group_ad.ad.final_urls,
+                metrics.impressions,
+                metrics.clicks,
+                metrics.cost_micros,
+                metrics.conversions,
+                metrics.conversions_value
+            FROM ad_group_ad
+            WHERE campaign.id = {campaign_id}
+              AND ad_group_ad.status != 'REMOVED'
+              AND segments.date BETWEEN
+                  '{start_date.isoformat()}'
+                  AND
+                  '{end_date.isoformat()}'
+            ORDER BY ad_group_ad.ad.id
+        """
+
+        rows = service.search(
+            customer_id=self.customer_id,
+            query=query,
+        )
+
+        items = []
+
+        for row in rows:
+            items.append(
+                {
+                    "ad_id":
+                        str(
+                            row.ad_group_ad
+                            .ad.id
+                        ),
+                    "ad_name":
+                        str(
+                            row.ad_group_ad
+                            .ad.name
+                            or ""
+                        ),
+                    "ad_type":
+                        self._enum_name(
+                            row.ad_group_ad
+                            .ad.type
+                        ),
+                    "status":
+                        self._enum_name(
+                            row.ad_group_ad
+                            .status
+                        ),
+                    "ad_group_id":
+                        str(
+                            row.ad_group.id
+                        ),
+                    "ad_group_name":
+                        str(
+                            row.ad_group.name
+                            or ""
+                        ),
+                    "final_urls":
+                        [
+                            str(url)
+                            for url in (
+                                row.ad_group_ad
+                                .ad.final_urls
+                                or []
+                            )
+                        ],
+                    "impressions":
+                        int(
+                            row.metrics.impressions
+                            or 0
+                        ),
+                    "clicks":
+                        int(
+                            row.metrics.clicks
+                            or 0
+                        ),
+                    "spend":
+                        float(
+                            _micros_to_decimal(
+                                row.metrics
+                                .cost_micros
+                            )
+                        ),
+                    "conversions":
+                        float(
+                            row.metrics
+                            .conversions
+                            or 0
+                        ),
+                    "conversion_value":
+                        float(
+                            row.metrics
+                            .conversions_value
+                            or 0
+                        ),
+                }
+            )
+
+        return items
+
+    def _workspace_keywords_sync(
+        self,
+        *,
+        campaign_id: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[dict[str, Any]]:
+        campaign_id = _clean_customer_id(
+            campaign_id
+        )
+
+        client = self._get_client()
+
+        service = client.get_service(
+            "GoogleAdsService"
+        )
+
+        query = f"""
+            SELECT
+                ad_group.id,
+                ad_group.name,
+                ad_group_criterion.criterion_id,
+                ad_group_criterion.keyword.text,
+                ad_group_criterion.keyword.match_type,
+                ad_group_criterion.status,
+                metrics.impressions,
+                metrics.clicks,
+                metrics.cost_micros,
+                metrics.conversions,
+                metrics.conversions_value
+            FROM keyword_view
+            WHERE campaign.id = {campaign_id}
+              AND ad_group_criterion.status != 'REMOVED'
+              AND segments.date BETWEEN
+                  '{start_date.isoformat()}'
+                  AND
+                  '{end_date.isoformat()}'
+            ORDER BY
+                ad_group_criterion.criterion_id
+        """
+
+        rows = service.search(
+            customer_id=self.customer_id,
+            query=query,
+        )
+
+        items = []
+
+        for row in rows:
+            items.append(
+                {
+                    "criterion_id":
+                        str(
+                            row.ad_group_criterion
+                            .criterion_id
+                        ),
+                    "keyword":
+                        str(
+                            row.ad_group_criterion
+                            .keyword.text
+                            or ""
+                        ),
+                    "match_type":
+                        self._enum_name(
+                            row.ad_group_criterion
+                            .keyword.match_type
+                        ),
+                    "status":
+                        self._enum_name(
+                            row.ad_group_criterion
+                            .status
+                        ),
+                    "ad_group_id":
+                        str(
+                            row.ad_group.id
+                        ),
+                    "ad_group_name":
+                        str(
+                            row.ad_group.name
+                            or ""
+                        ),
+                    "impressions":
+                        int(
+                            row.metrics.impressions
+                            or 0
+                        ),
+                    "clicks":
+                        int(
+                            row.metrics.clicks
+                            or 0
+                        ),
+                    "spend":
+                        float(
+                            _micros_to_decimal(
+                                row.metrics
+                                .cost_micros
+                            )
+                        ),
+                    "conversions":
+                        float(
+                            row.metrics
+                            .conversions
+                            or 0
+                        ),
+                    "conversion_value":
+                        float(
+                            row.metrics
+                            .conversions_value
+                            or 0
+                        ),
+                }
+            )
+
+        return items
+
+    def _workspace_conversion_actions_sync(
+        self,
+    ) -> list[dict[str, Any]]:
+        client = self._get_client()
+
+        service = client.get_service(
+            "GoogleAdsService"
+        )
+
+        query = """
+            SELECT
+                conversion_action.id,
+                conversion_action.name,
+                conversion_action.status,
+                conversion_action.type,
+                conversion_action.category,
+                conversion_action.primary_for_goal
+            FROM conversion_action
+            WHERE conversion_action.status != 'REMOVED'
+            ORDER BY conversion_action.id
+        """
+
+        rows = service.search(
+            customer_id=self.customer_id,
+            query=query,
+        )
+
+        items = []
+
+        for row in rows:
+            action = row.conversion_action
+
+            items.append(
+                {
+                    "conversion_action_id":
+                        str(action.id),
+                    "name":
+                        str(
+                            action.name
+                            or ""
+                        ),
+                    "status":
+                        self._enum_name(
+                            action.status
+                        ),
+                    "type":
+                        self._enum_name(
+                            action.type
+                        ),
+                    "category":
+                        self._enum_name(
+                            action.category
+                        ),
+                    "primary_for_goal":
+                        bool(
+                            action.primary_for_goal
+                        ),
+                }
+            )
+
+        return items
+
+    async def workspace_overview(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, Any]:
+        campaigns = await self.workspace_campaigns(
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        totals = {
+            "impressions": 0,
+            "clicks": 0,
+            "spend": 0.0,
+            "conversions": 0.0,
+            "conversion_value": 0.0,
+        }
+
+        active = 0
+        paused = 0
+
+        for campaign in campaigns:
+            metrics = (
+                campaign.get("metrics")
+                or {}
+            )
+
+            totals["impressions"] += int(
+                metrics.get("impressions")
+                or 0
+            )
+
+            totals["clicks"] += int(
+                metrics.get("clicks")
+                or 0
+            )
+
+            totals["spend"] += float(
+                metrics.get("spend")
+                or 0
+            )
+
+            totals["conversions"] += float(
+                metrics.get("conversions")
+                or 0
+            )
+
+            totals["conversion_value"] += float(
+                metrics.get(
+                    "conversion_value"
+                )
+                or 0
+            )
+
+            status = str(
+                campaign.get("status")
+                or ""
+            ).upper()
+
+            if status == "ENABLED":
+                active += 1
+            elif status == "PAUSED":
+                paused += 1
+
+        totals["ctr"] = self._safe_ratio(
+            totals["clicks"],
+            totals["impressions"],
+        )
+
+        totals["average_cpc"] = (
+            self._safe_ratio(
+                totals["spend"],
+                totals["clicks"],
+            )
+        )
+
+        totals["cpa"] = self._safe_ratio(
+            totals["spend"],
+            totals["conversions"],
+        )
+
+        totals["roas"] = self._safe_ratio(
+            totals["conversion_value"],
+            totals["spend"],
+        )
+
+        return {
+            "provider": self.provider,
+            "customer_id": self.customer_id,
+            "start_date":
+                start_date.isoformat(),
+            "end_date":
+                end_date.isoformat(),
+            "campaign_count":
+                len(campaigns),
+            "enabled_campaigns":
+                active,
+            "paused_campaigns":
+                paused,
+            "metrics": totals,
+        }
+
+    async def workspace_campaign_detail(
+        self,
+        *,
+        campaign_id: str,
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, Any]:
+        campaigns = await asyncio.to_thread(
+            self._workspace_campaigns_sync,
+            start_date=start_date,
+            end_date=end_date,
+            campaign_id=campaign_id,
+        )
+
+        if not campaigns:
+            raise LookupError(
+                "campaign_not_found"
+            )
+
+        ad_groups, ads, keywords, conversions = (
+            await asyncio.gather(
+                asyncio.to_thread(
+                    self._workspace_ad_groups_sync,
+                    campaign_id=campaign_id,
+                    start_date=start_date,
+                    end_date=end_date,
+                ),
+                asyncio.to_thread(
+                    self._workspace_ads_sync,
+                    campaign_id=campaign_id,
+                    start_date=start_date,
+                    end_date=end_date,
+                ),
+                asyncio.to_thread(
+                    self._workspace_keywords_sync,
+                    campaign_id=campaign_id,
+                    start_date=start_date,
+                    end_date=end_date,
+                ),
+                asyncio.to_thread(
+                    self._workspace_conversion_actions_sync,
+                ),
+            )
+        )
+
+        return {
+            "campaign": campaigns[0],
+            "ad_groups": ad_groups,
+            "ads": ads,
+            "keywords": keywords,
+            "conversion_actions":
+                conversions,
+        }
+
     async def execute_action(
         self,
         *,
