@@ -402,6 +402,120 @@ class GoogleAdsIntegration(MarketingIntegration):
             amount * Decimal("1000000")
         )
 
+    def _find_reusable_campaign_budget_sync(
+        self,
+        *,
+        budget_name: str,
+        amount_micros: int,
+    ) -> str | None:
+        """Find one exact unreferenced campaign budget.
+
+        Reuse is allowed only when:
+        - name matches exactly;
+        - amount matches exactly;
+        - reference_count is zero;
+        - budget is not removed.
+
+        Multiple matching reusable budgets fail closed.
+        """
+
+        client = self._get_client()
+
+        service = client.get_service(
+            "GoogleAdsService"
+        )
+
+        safe_name = (
+            str(budget_name)
+            .replace("\\", "\\\\")
+            .replace("'", "\\'")
+        )
+
+        query = f"""
+            SELECT
+                campaign_budget.id,
+                campaign_budget.name,
+                campaign_budget.resource_name,
+                campaign_budget.amount_micros,
+                campaign_budget.status,
+                campaign_budget.reference_count
+            FROM campaign_budget
+            WHERE campaign_budget.name = '{safe_name}'
+        """
+
+        rows = list(
+            service.search(
+                customer_id=self.customer_id,
+                query=query,
+            )
+        )
+
+        matches: list[str] = []
+
+        for row in rows:
+            budget = row.campaign_budget
+
+            if str(
+                getattr(budget, "name", "") or ""
+            ) != budget_name:
+                continue
+
+            if int(
+                getattr(
+                    budget,
+                    "amount_micros",
+                    -1,
+                )
+            ) != int(amount_micros):
+                continue
+
+            if int(
+                getattr(
+                    budget,
+                    "reference_count",
+                    -1,
+                )
+            ) != 0:
+                continue
+
+            status = getattr(
+                getattr(
+                    budget,
+                    "status",
+                    None,
+                ),
+                "name",
+                "",
+            )
+
+            if str(status).upper() == "REMOVED":
+                continue
+
+            resource_name = str(
+                getattr(
+                    budget,
+                    "resource_name",
+                    "",
+                )
+                or ""
+            )
+
+            if not resource_name:
+                continue
+
+            matches.append(resource_name)
+
+        if len(matches) > 1:
+            raise RuntimeError(
+                "multiple_reusable_campaign_budgets"
+            )
+
+        if matches:
+            return matches[0]
+
+        return None
+
+
     def _create_campaign_sync(
         self,
         *,
@@ -429,39 +543,62 @@ class GoogleAdsIntegration(MarketingIntegration):
                 "name is required for campaign.create"
             )
 
-        budget_service = client.get_service(
-            "CampaignBudgetService"
-        )
+        budget_name = f"{name} Budget"
 
-        campaign_service = client.get_service(
-            "CampaignService"
-        )
-
-        budget_operation = client.get_type(
-            "CampaignBudgetOperation"
-        )
-
-        budget = budget_operation.create
-
-        budget.name = f"{name} Budget"
-
-        budget.amount_micros = self._money_to_micros(
-            budget_amount
-        )
-
-        budget.delivery_method = (
-            client.enums.BudgetDeliveryMethodEnum.STANDARD
-        )
-
-        budget_response = (
-            budget_service.mutate_campaign_budgets(
-                customer_id=self.customer_id,
-                operations=[budget_operation],
+        budget_amount_micros = (
+            self._money_to_micros(
+                budget_amount
             )
         )
 
         budget_resource = (
-            budget_response.results[0].resource_name
+            self._find_reusable_campaign_budget_sync(
+                budget_name=budget_name,
+                amount_micros=budget_amount_micros,
+            )
+        )
+
+        budget_reused = (
+            budget_resource is not None
+        )
+
+        if budget_resource is None:
+            budget_service = client.get_service(
+                "CampaignBudgetService"
+            )
+
+            budget_operation = client.get_type(
+                "CampaignBudgetOperation"
+            )
+
+            budget = budget_operation.create
+
+            budget.name = budget_name
+            budget.amount_micros = (
+                budget_amount_micros
+            )
+
+            budget.delivery_method = (
+                client.enums
+                .BudgetDeliveryMethodEnum
+                .STANDARD
+            )
+
+            budget_response = (
+                budget_service.mutate_campaign_budgets(
+                    customer_id=self.customer_id,
+                    operations=[budget_operation],
+                )
+            )
+
+            budget_resource = (
+                budget_response
+                .results[0]
+                .resource_name
+            )
+
+        campaign_service = client.get_service(
+            "CampaignService"
         )
 
         campaign_operation = client.get_type(
@@ -481,6 +618,15 @@ class GoogleAdsIntegration(MarketingIntegration):
         # Initial live execution supports Search campaigns.
         campaign.advertising_channel_type = (
             client.enums.AdvertisingChannelTypeEnum.SEARCH
+        )
+
+        # Google Ads API v25 requires an explicit declaration
+        # when creating a campaign. NMS advertising is not
+        # EU political advertising.
+        campaign.contains_eu_political_advertising = (
+            client.enums
+            .EuPoliticalAdvertisingStatusEnum
+            .DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
         )
 
         campaign.manual_cpc.enhanced_cpc_enabled = False
@@ -513,6 +659,7 @@ class GoogleAdsIntegration(MarketingIntegration):
             "customer_id": self.customer_id,
             "campaign_resource_name": campaign_resource,
             "campaign_budget_resource_name": budget_resource,
+            "campaign_budget_reused": budget_reused,
             "status": "paused",
             "external_write_performed": True,
         }
