@@ -409,3 +409,230 @@ async def sync_seo_provider_report(
             "task_cost"
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Bounded multi-page refresh
+# ---------------------------------------------------------------------------
+
+MAX_BOUNDED_PROVIDER_PAGES = 100
+DEFAULT_REQUEST_COST_RESERVE = 0.05
+
+
+def _money(value: Any) -> float:
+    """Convert provider cost metadata into a safe non-negative float."""
+
+    if value in (None, ""):
+        return 0.0
+
+    result = float(value)
+
+    if result < 0:
+        raise ValueError("provider cost must be >= 0")
+
+    return result
+
+
+async def sync_seo_provider_report_bounded(
+    pg,
+    *,
+    site_id: str,
+    target: str,
+    adapter,
+    report: str,
+    location: str = DEFAULT_LOCATION,
+    language: str = DEFAULT_LANGUAGE,
+    device: str = DEFAULT_DEVICE,
+    limit: int = 100,
+    start_offset: int = 0,
+    captured_date: date | None = None,
+    max_pages: int = 10,
+    max_total_cost: float = 0.50,
+    request_cost_reserve: float = DEFAULT_REQUEST_COST_RESERVE,
+) -> dict[str, Any]:
+    """Run a bounded provider refresh.
+
+    Safety controls:
+
+    * ``max_pages`` limits the number of external provider requests.
+    * ``max_total_cost`` is the caller's refresh budget.
+    * ``request_cost_reserve`` is reserved BEFORE allowing each request.
+
+    Because a provider's final billed amount is only known after a request,
+    the reserve is intentionally conservative. A new request is not started
+    unless enough budget remains for the configured reserve.
+
+    This function still does NOT:
+    * create a database session
+    * begin or commit a transaction
+    * schedule itself
+    * resolve provider credentials
+    * perform any advertising write
+
+    The supplied adapter determines whether calls are real or fake.
+    """
+
+    normalized_report = str(report or "").strip().lower()
+
+    if normalized_report not in SUPPORTED_REPORTS:
+        raise ValueError(
+            f"unsupported SEO provider report: {normalized_report}"
+        )
+
+    if not isinstance(max_pages, int):
+        raise ValueError("max_pages must be an integer")
+
+    if not 1 <= max_pages <= MAX_BOUNDED_PROVIDER_PAGES:
+        raise ValueError(
+            "max_pages must be between 1 and "
+            f"{MAX_BOUNDED_PROVIDER_PAGES}"
+        )
+
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+
+    if start_offset < 0:
+        raise ValueError("start_offset must be >= 0")
+
+    budget = float(max_total_cost)
+    reserve = float(request_cost_reserve)
+
+    if budget <= 0:
+        raise ValueError("max_total_cost must be > 0")
+
+    if reserve <= 0:
+        raise ValueError("request_cost_reserve must be > 0")
+
+    if reserve > budget:
+        raise ValueError(
+            "request_cost_reserve cannot exceed max_total_cost"
+        )
+
+    # Domain overview is intentionally one request only.
+    effective_max_pages = (
+        1
+        if normalized_report == REPORT_DOMAIN_RANK_OVERVIEW
+        else max_pages
+    )
+
+    current_offset = start_offset
+    pages = 0
+    total_rows_normalized = 0
+    total_rows_persisted = 0
+    total_provider_cost = 0.0
+    total_provider_task_cost = 0.0
+    provider_total_count = None
+    complete = False
+    stop_reason = None
+    page_results: list[dict[str, Any]] = []
+
+    while pages < effective_max_pages:
+        # Do not start another paid request unless its configured reserve
+        # still fits inside the caller's budget.
+        if total_provider_cost + reserve > budget:
+            stop_reason = "cost_ceiling"
+            break
+
+        result = await sync_seo_provider_report(
+            pg,
+            site_id=site_id,
+            target=target,
+            adapter=adapter,
+            report=normalized_report,
+            location=location,
+            language=language,
+            device=device,
+            limit=limit,
+            offset=current_offset,
+            captured_date=captured_date,
+        )
+
+        pages += 1
+
+        page_cost = _money(result.get("provider_cost"))
+        page_task_cost = _money(
+            result.get("provider_task_cost")
+        )
+
+        total_provider_cost += page_cost
+        total_provider_task_cost += page_task_cost
+
+        total_rows_normalized += int(
+            result.get("rows_normalized") or 0
+        )
+        total_rows_persisted += int(
+            result.get("rows_persisted") or 0
+        )
+
+        if result.get("provider_total_count") is not None:
+            provider_total_count = result.get(
+                "provider_total_count"
+            )
+
+        page_results.append(
+            {
+                "provider_run_id": result.get(
+                    "provider_run_id"
+                ),
+                "rows_normalized": result.get(
+                    "rows_normalized"
+                ),
+                "rows_persisted": result.get(
+                    "rows_persisted"
+                ),
+                "complete": bool(result.get("complete")),
+                "next_offset": result.get("next_offset"),
+                "provider_cost": page_cost,
+                "provider_task_cost": page_task_cost,
+            }
+        )
+
+        if result.get("complete") is True:
+            complete = True
+            stop_reason = "complete"
+            break
+
+        next_offset = result.get("next_offset")
+
+        if next_offset is None:
+            stop_reason = "no_forward_progress"
+            break
+
+        next_offset = int(next_offset)
+
+        if next_offset <= current_offset:
+            stop_reason = "no_forward_progress"
+            break
+
+        current_offset = next_offset
+
+    if stop_reason is None:
+        if complete:
+            stop_reason = "complete"
+        elif pages >= effective_max_pages:
+            stop_reason = "page_ceiling"
+        else:
+            stop_reason = "stopped"
+
+    return {
+        "report": normalized_report,
+        "target": target,
+        "pages": pages,
+        "max_pages": effective_max_pages,
+        "rows_normalized": total_rows_normalized,
+        "rows_persisted": total_rows_persisted,
+        "provider_total_count": provider_total_count,
+        "provider_cost": round(total_provider_cost, 8),
+        "provider_task_cost": round(
+            total_provider_task_cost,
+            8,
+        ),
+        "max_total_cost": budget,
+        "request_cost_reserve": reserve,
+        "complete": complete,
+        "next_offset": (
+            None if complete else current_offset
+        ),
+        "stop_reason": stop_reason,
+        "page_results": page_results,
+    }

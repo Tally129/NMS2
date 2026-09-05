@@ -436,3 +436,247 @@ def test_orchestrator_has_no_autonomous_scheduler():
 
     for value in forbidden:
         assert value not in source
+
+
+# ---------------------------------------------------------------------------
+# Bounded pagination / cost-control tests
+# ---------------------------------------------------------------------------
+
+from marketing_os.search.seo_provider_sync import (
+    sync_seo_provider_report_bounded,
+)
+
+
+class PagedKeywordAdapter:
+    def __init__(self, *, total=5, cost=0.02):
+        self.total = total
+        self.cost = cost
+        self.calls = []
+
+    async def fetch_ranked_keywords(
+        self,
+        *,
+        target,
+        location_name,
+        language_name,
+        limit,
+        offset,
+    ):
+        self.calls.append(offset)
+
+        remaining = max(self.total - offset, 0)
+        count = min(limit, remaining)
+
+        rows = []
+
+        for index in range(count):
+            number = offset + index + 1
+
+            rows.append(
+                {
+                    "keyword": f"keyword {number}",
+                    "normalized_keyword": f"keyword {number}",
+                    "intent": "informational",
+                    "search_volume": 10,
+                    "keyword_difficulty": 20,
+                    "cpc": 1.0,
+                    "current_rank": number,
+                    "ranking_url":
+                        "https://natmedsol.com/",
+                    "serp_features": [],
+                    "location": location_name,
+                    "device": "desktop",
+                    "source": "dataforseo",
+                }
+            )
+
+        return {
+            "provider": "dataforseo",
+            "status_code": 20000,
+            "task_status_code": 20000,
+            "cost": self.cost,
+            "task_cost": self.cost,
+            "total_count": self.total,
+            "items_count": count,
+            "report": REPORT_RANKED_KEYWORDS,
+            "target": target,
+            "location": location_name,
+            "language": language_name,
+            "limit": limit,
+            "offset": offset,
+            "keywords": rows,
+        }
+
+
+def test_bounded_sync_fetches_until_complete():
+    pg = FakeSession()
+    adapter = PagedKeywordAdapter(total=5, cost=0.01)
+
+    result = run(
+        sync_seo_provider_report_bounded(
+            pg,
+            site_id="site-1",
+            target="natmedsol.com",
+            adapter=adapter,
+            report=REPORT_RANKED_KEYWORDS,
+            limit=2,
+            max_pages=10,
+            max_total_cost=1.00,
+            request_cost_reserve=0.05,
+            captured_date=date(2026, 9, 5),
+        )
+    )
+
+    assert adapter.calls == [0, 2, 4]
+    assert result["pages"] == 3
+    assert result["rows_normalized"] == 5
+    assert result["rows_persisted"] == 5
+    assert result["complete"] is True
+    assert result["next_offset"] is None
+    assert result["stop_reason"] == "complete"
+    assert result["provider_cost"] == 0.03
+
+
+def test_bounded_sync_stops_at_page_ceiling():
+    pg = FakeSession()
+    adapter = PagedKeywordAdapter(total=20, cost=0.01)
+
+    result = run(
+        sync_seo_provider_report_bounded(
+            pg,
+            site_id="site-1",
+            target="natmedsol.com",
+            adapter=adapter,
+            report=REPORT_RANKED_KEYWORDS,
+            limit=2,
+            max_pages=2,
+            max_total_cost=1.00,
+            request_cost_reserve=0.05,
+        )
+    )
+
+    assert adapter.calls == [0, 2]
+    assert result["pages"] == 2
+    assert result["complete"] is False
+    assert result["stop_reason"] == "page_ceiling"
+    assert result["next_offset"] == 4
+
+
+def test_bounded_sync_reserves_cost_before_next_call():
+    pg = FakeSession()
+    adapter = PagedKeywordAdapter(total=20, cost=0.02)
+
+    result = run(
+        sync_seo_provider_report_bounded(
+            pg,
+            site_id="site-1",
+            target="natmedsol.com",
+            adapter=adapter,
+            report=REPORT_RANKED_KEYWORDS,
+            limit=2,
+            max_pages=10,
+            max_total_cost=0.10,
+            request_cost_reserve=0.05,
+        )
+    )
+
+    # Request 1: accumulated actual = .02
+    # Request 2 allowed because .02 + .05 <= .10.
+    # After request 2 actual = .04.
+    # Request 3 allowed because .04 + .05 <= .10.
+    # After request 3 actual = .06.
+    # Request 4 blocked because .06 + .05 > .10.
+    assert adapter.calls == [0, 2, 4]
+    assert result["pages"] == 3
+    assert result["provider_cost"] == 0.06
+    assert result["complete"] is False
+    assert result["stop_reason"] == "cost_ceiling"
+    assert result["next_offset"] == 6
+
+
+def test_bounded_sync_rejects_impossible_budget_before_call():
+    pg = FakeSession()
+    adapter = PagedKeywordAdapter()
+
+    with pytest.raises(ValueError):
+        run(
+            sync_seo_provider_report_bounded(
+                pg,
+                site_id="site-1",
+                target="natmedsol.com",
+                adapter=adapter,
+                report=REPORT_RANKED_KEYWORDS,
+                max_total_cost=0.01,
+                request_cost_reserve=0.05,
+            )
+        )
+
+    assert adapter.calls == []
+    assert pg.calls == []
+
+
+def test_bounded_sync_rejects_invalid_page_ceiling_before_call():
+    pg = FakeSession()
+    adapter = PagedKeywordAdapter()
+
+    with pytest.raises(ValueError):
+        run(
+            sync_seo_provider_report_bounded(
+                pg,
+                site_id="site-1",
+                target="natmedsol.com",
+                adapter=adapter,
+                report=REPORT_RANKED_KEYWORDS,
+                max_pages=0,
+            )
+        )
+
+    assert adapter.calls == []
+    assert pg.calls == []
+
+
+def test_domain_overview_is_always_single_page():
+    pg = FakeSession()
+    adapter = FakeAdapter()
+
+    result = run(
+        sync_seo_provider_report_bounded(
+            pg,
+            site_id="site-1",
+            target="natmedsol.com",
+            adapter=adapter,
+            report=REPORT_DOMAIN_RANK_OVERVIEW,
+            max_pages=50,
+            max_total_cost=1.00,
+            request_cost_reserve=0.05,
+        )
+    )
+
+    assert len(adapter.calls) == 1
+    assert result["pages"] == 1
+    assert result["max_pages"] == 1
+    assert result["complete"] is True
+    assert result["stop_reason"] == "complete"
+
+
+def test_bounded_sync_has_no_session_scheduler_or_commit():
+    import marketing_os.search.seo_provider_sync as module
+
+    source = Path(module.__file__).read_text()
+
+    forbidden = (
+        "AsyncSessionLocal",
+        "postgres_db",
+        "create_async_engine",
+        "sessionmaker",
+        "pg.begin(",
+        "pg.commit(",
+        "await pg.commit",
+        "apscheduler",
+        "add_job(",
+        "CronTrigger",
+        "BackgroundScheduler",
+    )
+
+    for value in forbidden:
+        assert value not in source
