@@ -40,6 +40,17 @@ from marketing_os.search.keywords import (
     summarize_keywords,
 )
 from marketing_os.search.overview import build_search_overview
+from marketing_os.search.seo_provider_reads import (
+    DEFAULT_DEVICE as SEO_PROVIDER_DEFAULT_DEVICE,
+    DEFAULT_LANGUAGE as SEO_PROVIDER_DEFAULT_LANGUAGE,
+    DEFAULT_LOCATION as SEO_PROVIDER_DEFAULT_LOCATION,
+    DEFAULT_PROVIDER as SEO_PROVIDER_DEFAULT_PROVIDER,
+    MAX_PAGE_SIZE as SEO_PROVIDER_MAX_PAGE_SIZE,
+    latest_domain_snapshot as load_cached_seo_domain_snapshot,
+    list_competitor_snapshots as load_cached_seo_competitors,
+    list_organic_keyword_snapshots as load_cached_seo_keywords,
+    list_provider_runs as load_cached_seo_provider_runs,
+)
 from marketing_os.search.recommendations import build_search_recommendations
 from marketing_os.search.site_audit import (
     fetch_site,
@@ -541,6 +552,282 @@ async def _gsc_overview_summary(pg, site_id: str) -> dict:
         ),
         "search_queries": search_queries,
         "captured_date": cap.isoformat() if cap is not None else None,
+    }
+
+
+
+# --------------------------------------------------------------------------
+# Cached SEO provider intelligence (READ-ONLY)
+# --------------------------------------------------------------------------
+#
+# These endpoints read PostgreSQL cache only.
+#
+# They MUST NOT:
+# - call DataForSEO or any external SEO provider
+# - trigger a refresh
+# - schedule a refresh
+# - mutate provider/search data
+# --------------------------------------------------------------------------
+
+
+@api.get("/marketing-os/search/seo/domain-overview")
+async def seo_provider_domain_overview(
+    site_id: Optional[str] = Query(default=None),
+    provider: str = Query(
+        default=SEO_PROVIDER_DEFAULT_PROVIDER,
+        min_length=1,
+        max_length=64,
+    ),
+    location: str = Query(
+        default=SEO_PROVIDER_DEFAULT_LOCATION,
+        min_length=1,
+        max_length=128,
+    ),
+    language: str = Query(
+        default=SEO_PROVIDER_DEFAULT_LANGUAGE,
+        min_length=1,
+        max_length=32,
+    ),
+    device: str = Query(
+        default=SEO_PROVIDER_DEFAULT_DEVICE,
+        min_length=1,
+        max_length=32,
+    ),
+    user=Depends(require_roles(*MARKETING_ROLES)),
+):
+    async with AsyncSessionLocal() as pg:
+        site = await _resolve_site(pg, site_id)
+
+        if site is None:
+            return {
+                "connected": False,
+                "not_connected_reason":
+                    "no_marketing_site_configured",
+                "has_snapshot": False,
+                "snapshot": None,
+            }
+
+        snapshot = await load_cached_seo_domain_snapshot(
+            pg,
+            site_id=site["id"],
+            provider=provider,
+            location=location,
+            language=language,
+            device=device,
+        )
+
+    return {
+        "connected": True,
+        "site": site,
+        "provider": provider,
+        "location": location,
+        "language": language,
+        "device": device,
+        "has_snapshot": snapshot is not None,
+        "snapshot": snapshot,
+    }
+
+
+@api.get("/marketing-os/search/seo/organic-keywords")
+async def seo_provider_organic_keywords(
+    site_id: Optional[str] = Query(default=None),
+    provider: str = Query(
+        default=SEO_PROVIDER_DEFAULT_PROVIDER,
+        min_length=1,
+        max_length=64,
+    ),
+    location: str = Query(
+        default=SEO_PROVIDER_DEFAULT_LOCATION,
+        min_length=1,
+        max_length=128,
+    ),
+    language: str = Query(
+        default=SEO_PROVIDER_DEFAULT_LANGUAGE,
+        min_length=1,
+        max_length=32,
+    ),
+    device: str = Query(
+        default=SEO_PROVIDER_DEFAULT_DEVICE,
+        min_length=1,
+        max_length=32,
+    ),
+    captured_date: Optional[date] = Query(default=None),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=SEO_PROVIDER_MAX_PAGE_SIZE,
+    ),
+    offset: int = Query(default=0, ge=0),
+    user=Depends(require_roles(*MARKETING_ROLES)),
+):
+    async with AsyncSessionLocal() as pg:
+        site = await _resolve_site(pg, site_id)
+
+        if site is None:
+            return {
+                "connected": False,
+                "not_connected_reason":
+                    "no_marketing_site_configured",
+                "has_snapshot": False,
+                "captured_date": None,
+                "items": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "has_more": False,
+            }
+
+        payload = await load_cached_seo_keywords(
+            pg,
+            site_id=site["id"],
+            provider=provider,
+            location=location,
+            language=language,
+            device=device,
+            captured_date=captured_date,
+            limit=limit,
+            offset=offset,
+        )
+
+    return {
+        "connected": True,
+        "site": site,
+        "provider": provider,
+        "location": location,
+        "language": language,
+        "device": device,
+        "has_snapshot":
+            payload.get("captured_date") is not None,
+        **payload,
+    }
+
+
+@api.get("/marketing-os/search/seo/competitors")
+async def seo_provider_competitors(
+    site_id: Optional[str] = Query(default=None),
+    provider: str = Query(
+        default=SEO_PROVIDER_DEFAULT_PROVIDER,
+        min_length=1,
+        max_length=64,
+    ),
+    location: str = Query(
+        default=SEO_PROVIDER_DEFAULT_LOCATION,
+        min_length=1,
+        max_length=128,
+    ),
+    language: str = Query(
+        default=SEO_PROVIDER_DEFAULT_LANGUAGE,
+        min_length=1,
+        max_length=32,
+    ),
+    device: str = Query(
+        default=SEO_PROVIDER_DEFAULT_DEVICE,
+        min_length=1,
+        max_length=32,
+    ),
+    captured_date: Optional[date] = Query(default=None),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=SEO_PROVIDER_MAX_PAGE_SIZE,
+    ),
+    offset: int = Query(default=0, ge=0),
+    user=Depends(require_roles(*MARKETING_ROLES)),
+):
+    async with AsyncSessionLocal() as pg:
+        site = await _resolve_site(pg, site_id)
+
+        if site is None:
+            return {
+                "connected": False,
+                "not_connected_reason":
+                    "no_marketing_site_configured",
+                "has_snapshot": False,
+                "captured_date": None,
+                "items": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "has_more": False,
+            }
+
+        payload = await load_cached_seo_competitors(
+            pg,
+            site_id=site["id"],
+            provider=provider,
+            location=location,
+            language=language,
+            device=device,
+            captured_date=captured_date,
+            limit=limit,
+            offset=offset,
+        )
+
+    return {
+        "connected": True,
+        "site": site,
+        "provider": provider,
+        "location": location,
+        "language": language,
+        "device": device,
+        "has_snapshot":
+            payload.get("captured_date") is not None,
+        **payload,
+    }
+
+
+@api.get("/marketing-os/search/seo/provider-runs")
+async def seo_provider_runs(
+    site_id: Optional[str] = Query(default=None),
+    provider: str = Query(
+        default=SEO_PROVIDER_DEFAULT_PROVIDER,
+        min_length=1,
+        max_length=64,
+    ),
+    report_type: Optional[str] = Query(
+        default=None,
+        max_length=64,
+    ),
+    limit: int = Query(
+        default=50,
+        ge=1,
+        le=SEO_PROVIDER_MAX_PAGE_SIZE,
+    ),
+    offset: int = Query(default=0, ge=0),
+    user=Depends(require_roles(*MARKETING_ROLES)),
+):
+    async with AsyncSessionLocal() as pg:
+        site = await _resolve_site(pg, site_id)
+
+        if site is None:
+            return {
+                "connected": False,
+                "not_connected_reason":
+                    "no_marketing_site_configured",
+                "has_history": False,
+                "items": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "has_more": False,
+            }
+
+        payload = await load_cached_seo_provider_runs(
+            pg,
+            site_id=site["id"],
+            provider=provider,
+            report_type=report_type,
+            limit=limit,
+            offset=offset,
+        )
+
+    return {
+        "connected": True,
+        "site": site,
+        "provider": provider,
+        "report_type": report_type,
+        "has_history": bool(payload.get("total")),
+        **payload,
     }
 
 
