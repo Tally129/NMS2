@@ -1,12 +1,13 @@
-"""Deterministic, idempotent, LOCAL-ONLY paid-media provider bootstrap.
+"""Deterministic, idempotent, LOCAL-ONLY provider bootstrap.
 
-Registers read-only ad provider adapters into the integration registry.
+Registers read-only provider adapters into the integration registry.
 No network/API calls. Registration grants read-only resolution only — it
 enables NO external writes (governed by marketing_os.policy.DEFAULT_POLICY
 and the adapter contract).
 """
 from __future__ import annotations
 
+from .dataforseo import PROVIDER as DATAFORSEO_PROVIDER, DataForSEOIntegration
 from .google_ads import PROVIDER as GOOGLE_ADS_PROVIDER, GoogleAdsIntegration
 from .meta_ads import PROVIDER as META_PROVIDER, MetaAdsIntegration
 from .microsoft_ads import (
@@ -14,6 +15,7 @@ from .microsoft_ads import (
 from .registry import register_integration, registered_providers
 
 _DEFAULTS = (
+    (DATAFORSEO_PROVIDER, DataForSEOIntegration),
     (GOOGLE_ADS_PROVIDER, GoogleAdsIntegration),
     (META_PROVIDER, MetaAdsIntegration),
     (MICROSOFT_PROVIDER, MicrosoftAdsIntegration),
