@@ -11,6 +11,7 @@ import MarketingGoalsPanel from "./MarketingGoalsPanel";
 import MarketingBudgetsPanel from "./MarketingBudgetsPanel";
 import SearchIntelligencePanel from "./SearchIntelligencePanel";
 import PaidMediaPanel from "./PaidMediaPanel";
+import PaidMediaWorkspace from "./PaidMediaWorkspace";
 import GoogleAdsWorkspacePanel from "./GoogleAdsWorkspacePanel";
 import AttributionFunnelPanel from "./AttributionFunnelPanel";
 import LeadOperationsPanel from "./LeadOperationsPanel";
@@ -913,6 +914,7 @@ export default function MarketingCommandCenter() {
         <GoogleAdsWorkspacePanel />
 
         <PaidMediaPanel />
+        <PaidMediaWorkspace />
 
         <AttributionFunnelPanel />
 

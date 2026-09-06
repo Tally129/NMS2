@@ -50,15 +50,20 @@ async def test_live_adapter_resolution_blocks_missing_credentials(
 
 @pytest.mark.asyncio
 async def test_live_adapter_resolution_blocks_unsupported_provider():
+    # Meta/Microsoft are governed live providers now, but fail closed
+    # without server-side credentials.
+    with pytest.raises(RuntimeError, match="meta_ads_credentials_missing"):
+        await core._resolve_live_execution_adapter(
+            provider="meta_ads",
+            request={"provider": "meta_ads"},
+        )
     with pytest.raises(
         RuntimeError,
         match="live_provider_not_supported",
     ):
         await core._resolve_live_execution_adapter(
-            provider="meta_ads",
-            request={
-                "provider": "meta_ads",
-            },
+            provider="tiktok_ads",
+            request={"provider": "tiktok_ads"},
         )
 
 

@@ -1396,6 +1396,7 @@ from marketing_os.routers import search_console as _marketing_gsc_routes  # noqa
 # Register Phase 3 competitor/keyword-gap/backlink/local routes.
 from marketing_os.routers import search_phase3 as _marketing_phase3_routes  # noqa: F401,E402
 from marketing_os.routers import search_seo_intel as _marketing_seo_intel_routes  # noqa: F401,E402
+from marketing_os.routers import paid_media_intel as _marketing_paid_intel_routes  # noqa: F401,E402
 
 # Register Phase 4 read-only paid-media (Google/Meta/Microsoft) routes.
 from marketing_os.routers import paid_media as _marketing_paid_media_routes  # noqa: F401,E402
@@ -1509,6 +1510,35 @@ async def _resolve_live_execution_adapter(
     )
 
     provider = normalize_provider(provider)
+
+    if provider in {"meta_ads", "microsoft_ads"}:
+        # Same governance path as Google Ads; the adapter is write-enabled
+        # only when the server environment holds the provider credentials.
+        if provider == "meta_ads":
+            from marketing_os.integrations.meta_ads import (
+                MetaAdsIntegration as _Adapter,
+                credential_readiness as _readiness,
+            )
+        else:
+            from marketing_os.integrations.microsoft_ads import (
+                MicrosoftAdsIntegration as _Adapter,
+                credential_readiness as _readiness,
+            )
+        if not _readiness().get("connected"):
+            raise RuntimeError(f"{provider}_credentials_missing")
+        async with AsyncSessionLocal() as pg:
+            row = (await pg.execute(
+                text("""
+                    SELECT id, provider, external_account_id, write_enabled
+                    FROM marketing_channel_accounts
+                    WHERE lower(provider) = :provider
+                    ORDER BY created_at DESC LIMIT 1
+                """),
+                {"provider": provider},
+            )).mappings().first()
+        if row is not None and row.get("write_enabled") is False:
+            raise RuntimeError(f"{provider}_account_write_disabled")
+        return _Adapter(account=dict(row) if row else None)
 
     if provider != "google_ads":
         raise RuntimeError(

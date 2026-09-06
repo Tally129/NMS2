@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generated_at": "2026-09-06T06:18:33.453659+00:00",
+  "generated_at": "2026-09-06T07:41:16.682070+00:00",
   "source_sitemap": "https://preview.natmedsol.org/sitemap.xml",
   "source_environment": "preview",
   "documents": [
@@ -9524,112 +9524,18 @@
         "Irregular Heartbeat : Other studies have shown, 35% of people advanced ages with hyperthyroidism experienced the irregular heart rhythms or atrial fibrillation also known as irregular heartbeat, while only 2% of younger patients developed this problem.",
         "Extreme Weight Loss: A younger person with hyperthyroidism may experience some weight loss, but older people tend to lose even more weight, and may even appear malnourished. Muscle weakness can be a side effect of such severe weight loss."
       ]
-    },
-    {
-      "path": "/video-gallery/",
-      "title": "Video Gallery | Natural Medical Solutions Wellness Center",
-      "description": "Four short films with Dr. Gail Ravello, walking through the treatments patients ask about most before booking. Watching someone explain a therapy, and seeing…",
-      "canonical_url": "https://www.natmedsol.com/video-gallery/",
-      "source_url": "https://preview.natmedsol.org/video-gallery/",
-      "h1": "See Our Wellness Approach in Action",
-      "headings": [
-        "See Our Wellness Approach in Action",
-        "Explore Our Therapies",
-        "Thermography",
-        "Infrared Therapy",
-        "Hyperbaric Chamber Therapy",
-        "Colon Hydrotherapy",
-        "Go Deeper Into Each Treatment",
-        "Start Your Personalized Wellness Plan"
-      ],
-      "paragraphs": [
-        "Natural Medical Solutions",
-        "Watch Dr. Gail Ravello walk through four of the therapies patients ask about most — and get a closer look at the treatments, equipment, and experience before your visit.",
-        "Explore the Gallery",
-        "Four therapies. Four closer looks.",
-        "Press play on any video below to learn more directly from our practice.",
-        "Watch & Learn",
-        "Seeing a therapy often answers questions that written descriptions cannot. Explore each video at your own pace.",
-        "Digital Infrared Imaging",
-        "See Dr. Gail Ravello explain digital infrared imaging, what happens during a session, and how thermography fits into a broader wellness conversation.",
-        "Restorative Wellness",
-        "Take a closer look at how infrared warmth is used for comfort and circulation and how it may complement other natural wellness therapies.",
-        "Oxygen Therapy",
-        "Step inside the hyperbaric experience and learn what breathing oxygen under pressure involves and what patients can expect during a session.",
-        "Digestive Wellness",
-        "See the treatment environment, equipment, and process so you can better understand what a colon hydrotherapy session is actually like.",
-        "Prefer to Read?",
-        "Every therapy featured above has a dedicated page with more information. You can also review our New Patient Guide before scheduling your first appointment.",
-        "A Note About Your Care",
-        "These videos are educational and do not diagnose medical conditions or replace care from your own healthcare provider. If you have questions about your individual situation, speak with a qualified healthcare professional.",
-        "Thermography is not a substitute for mammography and should not replace recommended breast-cancer screening.",
-        "Ready for the Next Step?",
-        "Learn what to expect as a new patient or contact Natural Medical Solutions to discuss your care."
-      ],
-      "list_items": []
-    },
-    {
-      "path": "/wellness-center/",
-      "title": "Wellness Center in Roswell, GA | Natural Medical Solutions",
-      "description": "In short: Natural Medical Solutions Wellness Center is a single-practitioner wellness center on Upper Hembree Road in Roswell, GA. Consultations, laboratory…",
-      "canonical_url": "https://www.natmedsol.com/wellness-center/",
-      "source_url": "https://preview.natmedsol.org/wellness-center/",
-      "h1": "Our Wellness Center in Roswell, Georgia",
-      "headings": [
-        "Our Wellness Center in Roswell, Georgia",
-        "Care designed to stay connected.",
-        "What You Will Find Here",
-        "Naturopathic Medicine",
-        "Holistic & Integrative Care",
-        "Functional Medicine & Lab Testing",
-        "Detoxification",
-        "Colon Hydrotherapy",
-        "Hyperbaric Oxygen Therapy",
-        "Infrared Sauna",
-        "Therapeutic Massage",
-        "Nutrition & Weight Loss",
-        "Hormone Balancing",
-        "Thermography",
-        "Classes & Events",
-        "Your First Visit",
-        "Visit Us in Roswell",
-        "Dr. Gail Ravello",
-        "Ready to explore a more personalized approach?"
-      ],
-      "paragraphs": [
-        "Natural Medical Solutions",
-        "One location for personalized naturopathic, functional and holistic wellness care — where consultations, laboratory testing and supportive therapies come together under one roof.",
-        "One Building · One Practitioner",
-        "The person who takes your history is connected to the person reviewing your results and determining which therapies may be appropriate for your wellness plan.",
-        "It is a small practice by design. Appointments are personal, thoughtful and centered around understanding the whole person.",
-        "Explore the Center",
-        "Our services are brought together so your care can be considered as one connected wellness plan rather than a collection of unrelated treatments.",
-        "Nutrition, botanicals, homeopathy and lifestyle support focused on what may be driving the problem rather than the symptom alone.",
-        "Whole-person assessment designed to work alongside your physician and specialists rather than around them.",
-        "Food and environmental sensitivity panels, digestive analysis, hormones, thyroid, nutrients, heavy metals and more.",
-        "Supported programs built around individual needs and what testing actually shows.",
-        "Open-system colonics delivered in our wellness center by a therapist trained to I-ACT standards.",
-        "Sessions in our hyperbaric chamber offered for appropriate wellness applications.",
-        "Gentle radiant heat sessions designed for relaxation, comfort and wellness support.",
-        "Our wellness center offers therapeutic massage technology including jade-roller, infrared and full-body massage systems.",
-        "Individual plans designed around your labs, your kitchen, your lifestyle and your wellness goals.",
-        "Assessment and support for hormone-related symptoms in both men and women.",
-        "Non-contact thermal imaging offered as an adjunctive wellness assessment tool.",
-        "Educational wellness programming, including Mental Health First Aid courses for adults and youth.",
-        "Preparing for Care",
-        "Allow more time than a standard appointment. Your first consultation focuses heavily on your history and the factors surrounding your current wellness concerns.",
-        "Bring recent lab work, a list of medications and supplements, and information about your normal eating patterns. A symptom diary can also be especially helpful.",
-        "Bring With You",
-        "Hours & Location",
-        "1130 Upper Hembree Rd Roswell, GA 30076",
-        "Parking is available on site and is free. Natural Medical Solutions serves patients throughout Roswell and surrounding North Atlanta communities.",
-        "Who Looks After You",
-        "Dr. Gail Ravello, IMD, ND, PhD, MH, CNC has practiced for more than 36 years with a whole-person approach to wellness.",
-        "Come and See",
-        "If you are not sure which service fits, contact the wellness center and tell us what you are looking for."
-      ],
-      "list_items": []
     }
   ],
-  "failures": []
+  "failures": [
+    {
+      "canonical_url": "https://www.natmedsol.com/video-gallery/",
+      "source_url": "https://preview.natmedsol.org/video-gallery/",
+      "error": "<urlopen error timed out>"
+    },
+    {
+      "canonical_url": "https://www.natmedsol.com/wellness-center/",
+      "source_url": "https://preview.natmedsol.org/wellness-center/",
+      "error": "<urlopen error timed out>"
+    }
+  ]
 }

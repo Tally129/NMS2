@@ -9,9 +9,12 @@ now live in PostgreSQL via `repositories.scheduling`.
 from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy import func, select, text
 from fastapi import Depends, HTTPException, Query, Request

@@ -993,6 +993,24 @@ async def _start_campaign_scheduler():
     except Exception:
         logger.exception("Failed to register SEO provider refresh tick")
 
+    # Paid-media provider sync tick (Google/Meta/Microsoft): opt-in via
+    # PAID_MEDIA_SYNC_ENABLED, daily cadence per provider, advisory-locked.
+    try:
+        from marketing_os.services.paid_sync import run_due_paid_syncs
+
+        async def _paid_sync_tick():
+            try:
+                summary = await run_due_paid_syncs()
+                if summary.get("ran"):
+                    logger.info("Paid media sync tick: %s", summary)
+            except Exception:
+                logger.exception("Paid media sync tick failed")
+
+        scheduler.add_job(_paid_sync_tick, "interval", minutes=60, id="paid_media_sync_tick",
+                          replace_existing=True, max_instances=1, coalesce=True)
+    except Exception:
+        logger.exception("Failed to register paid media sync tick")
+
     scheduler.start()
     _campaign_scheduler = scheduler
     logger.info("Campaign scheduler started (interval=5min, mode=internal)")
