@@ -1049,7 +1049,7 @@ agent_communication:
       No recipient data (email/phone) is exposed on the held action. Safety controls are correctly enforced.
     -agent: "main"
     message: |
-      Phase 1 Search Intelligence frontend ready for testing. URL: https://nms-nurture-phase8.preview.emergentagent.com/portal/marketing
+      Phase 1 Search Intelligence frontend ready for testing. URL: https://seo-command-center-24.preview.emergentagent.com/portal/marketing
       Login as admin@natmedsol.local / Admin!2345 (role: admin) via /staff-login.
       
       Verify:
@@ -1125,7 +1125,7 @@ agent_communication:
       PHASE 2 GSC BACKEND: PRODUCTION-READY.
     -agent: "main"
     message: |
-      Phase 2 GSC frontend ready for testing. URL: https://nms-nurture-phase8.preview.emergentagent.com/portal/marketing
+      Phase 2 GSC frontend ready for testing. URL: https://seo-command-center-24.preview.emergentagent.com/portal/marketing
       Login as admin@natmedsol.local / Admin!2345 via /staff-login.
       
       CRITICAL: GSC section is INSIDE the existing Search Intelligence panel (NOT a separate dashboard).
@@ -1321,7 +1321,7 @@ agent_communication:
       PHASE 3 BACKEND: PRODUCTION-READY.
     -agent: "main"
     message: |
-      Phase 3 frontend ready for testing. URL: https://nms-nurture-phase8.preview.emergentagent.com/portal/marketing
+      Phase 3 frontend ready for testing. URL: https://seo-command-center-24.preview.emergentagent.com/portal/marketing
       Login as admin@natmedsol.local / Admin!2345 via /staff-login.
       
       CRITICAL: Phase 3 section is INSIDE the existing Search Intelligence panel (NOT a separate dashboard).
@@ -1761,7 +1761,7 @@ test_plan:
 agent_communication:
     -agent: "main"
     message: |
-      Phase 8A+8B Nurture & Appointment Recovery ready for testing. URL: https://nms-nurture-phase8.preview.emergentagent.com/portal/marketing
+      Phase 8A+8B Nurture & Appointment Recovery ready for testing. URL: https://seo-command-center-24.preview.emergentagent.com/portal/marketing
       Login as admin@natmedsol.local / Admin!2345 via /staff-login (MFA bypassed).
       
       Test all 13 flows as specified in review request:

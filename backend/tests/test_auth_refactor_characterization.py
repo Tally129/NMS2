@@ -14,7 +14,7 @@ import requests
 
 BASE_URL = os.environ.get(
     "REACT_APP_BACKEND_URL",
-    "https://nms-nurture-phase8.preview.emergentagent.com",
+    "https://seo-command-center-24.preview.emergentagent.com",
 ).rstrip("/")
 API = f"{BASE_URL}/api"
 PRACTITIONER_EMAIL = "ravello@natmedsol.local"
