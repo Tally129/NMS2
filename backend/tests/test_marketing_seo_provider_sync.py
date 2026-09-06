@@ -223,6 +223,51 @@ def test_page_state_uses_total_count():
     assert next_offset is None
 
 
+
+def test_page_state_uses_provider_items_after_normalization_filter():
+    complete, next_offset = _page_state(
+        {
+            "offset": 0,
+            "limit": 100,
+            "total_count": 11562,
+            "items_count": 100,
+        },
+        row_count=99,
+    )
+
+    assert complete is False
+    assert next_offset == 100
+
+
+def test_page_state_can_progress_when_all_provider_items_filtered():
+    complete, next_offset = _page_state(
+        {
+            "offset": 200,
+            "limit": 100,
+            "total_count": 11562,
+            "items_count": 100,
+        },
+        row_count=0,
+    )
+
+    assert complete is False
+    assert next_offset == 300
+
+
+def test_page_state_falls_back_to_normalized_rows_without_items_count():
+    complete, next_offset = _page_state(
+        {
+            "offset": 0,
+            "limit": 100,
+            "total_count": 932,
+        },
+        row_count=100,
+    )
+
+    assert complete is False
+    assert next_offset == 100
+
+
 def test_page_state_zero_rows_stops_progress():
     assert _page_state(
         {

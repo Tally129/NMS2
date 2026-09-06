@@ -73,7 +73,13 @@ def _page_state(
     *,
     row_count: int,
 ) -> tuple[bool, int | None]:
-    """Determine whether a paged provider response is complete."""
+    """Determine whether a paged provider response is complete.
+
+    Pagination must advance by provider items consumed, not by the
+    number of normalized rows retained locally. Provider normalization
+    may intentionally filter rows, such as removing the target domain
+    from competitor results.
+    """
 
     offset = _coerce_nonnegative_int(
         payload.get("offset"),
@@ -96,26 +102,33 @@ def _page_state(
         else None
     )
 
-    # No rows means there is no safe forward progress.
-    if row_count == 0:
+    provider_items = _coerce_nonnegative_int(
+        payload.get("items_count"),
+        default=row_count,
+    )
+
+    # If the provider consumed no items, there is no safe forward
+    # progress. A zero normalized-row count alone is not sufficient to
+    # stop because normalization may have filtered provider items.
+    if provider_items == 0:
         return True, None
 
     if total is not None:
-        complete = offset + row_count >= total
+        complete = offset + provider_items >= total
 
         return (
             complete,
-            None if complete else offset + row_count,
+            None if complete else offset + provider_items,
         )
 
     if limit is None:
         return True, None
 
-    complete = row_count < limit
+    complete = provider_items < limit
 
     return (
         complete,
-        None if complete else offset + row_count,
+        None if complete else offset + provider_items,
     )
 
 
