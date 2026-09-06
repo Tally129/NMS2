@@ -1867,3 +1867,9 @@ FKs only to auth_users, marketing_search_sites, and self tables (no PHI/EMR/pati
 - Tests: 15 unit + 4 HTTP focused Phase 10 (green).
 
 _Last updated: Jul 2025 (Marketing OS Phase 10 · Reputation + Local Growth)_
+
+## 2026-09-06 — SEO Command Center phase 2 (sandbox-complete; production ops pending on EC2)
+- Overview wired to cached DataForSEO snapshot + completeness (provider_dataset), competitor/backlink/rank-tracking KPI groups, source badges on every metric.
+- New cached layers: keyword gap (Labs domain_intersection), backlinks (summary + rows), SERP rank tracking (tracked keywords + observations), governed POST /seo/refresh (dry-run default, admin, audited), opt-in scheduler (SEO_PROVIDER_REFRESH_ENABLED, hourly tick, conservative cadences, advisory lock), GSC sync-run completeness persisted (complete/pagination/pages_consumed/safety_ceiling_reached).
+- Migration a7c9e1f3b5d7 (additive). Tabbed Semrush-style workspace in SearchIntelligencePanel (frontend/src/pages/portal/seo/*).
+- Production steps (migration, final ranked_keywords offset-1000 request, GSC sync, pipeline proofs, Ads reversible mutation) documented in memory/SEO_PHASE2_PRODUCTION_RUNBOOK.md — not executable from sandbox (no prod access/credentials).

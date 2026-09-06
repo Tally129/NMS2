@@ -1395,6 +1395,7 @@ from marketing_os.routers import search_console as _marketing_gsc_routes  # noqa
 
 # Register Phase 3 competitor/keyword-gap/backlink/local routes.
 from marketing_os.routers import search_phase3 as _marketing_phase3_routes  # noqa: F401,E402
+from marketing_os.routers import search_seo_intel as _marketing_seo_intel_routes  # noqa: F401,E402
 
 # Register Phase 4 read-only paid-media (Google/Meta/Microsoft) routes.
 from marketing_os.routers import paid_media as _marketing_paid_media_routes  # noqa: F401,E402

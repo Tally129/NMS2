@@ -492,12 +492,101 @@ async def search_overview(
         )
         latest = await _latest_audit(pg, site["id"])
         gsc_summary = await _gsc_overview_summary(pg, site["id"])
+        seo_provider = await _seo_provider_overview_state(pg, site["id"])
     return build_search_overview(
         site=site,
         keywords=keywords,
         latest_audit=latest,
         gsc_summary=gsc_summary,
+        seo_provider=seo_provider,
+        backlink_summary=seo_provider.get("backlink_summary"),
     )
+
+
+async def _seo_provider_overview_state(pg, site_id: str) -> dict:
+    """Read CACHED rank-provider state for the overview.
+
+    PostgreSQL only — never calls DataForSEO, never triggers or schedules
+    a refresh. Returns the newest domain snapshot, the newest
+    ranked-keyword provider runs (for completeness) and the stored
+    keyword-row count of the newest organic keyword snapshot.
+    """
+    snapshot = await load_cached_seo_domain_snapshot(
+        pg,
+        site_id=site_id,
+        provider=SEO_PROVIDER_DEFAULT_PROVIDER,
+        location=SEO_PROVIDER_DEFAULT_LOCATION,
+        language=SEO_PROVIDER_DEFAULT_LANGUAGE,
+        device=SEO_PROVIDER_DEFAULT_DEVICE,
+    )
+    runs = await load_cached_seo_provider_runs(
+        pg,
+        site_id=site_id,
+        provider=SEO_PROVIDER_DEFAULT_PROVIDER,
+        report_type="ranked_keywords",
+        limit=10,
+        offset=0,
+    )
+    keyword_page = await load_cached_seo_keywords(
+        pg,
+        site_id=site_id,
+        provider=SEO_PROVIDER_DEFAULT_PROVIDER,
+        location=SEO_PROVIDER_DEFAULT_LOCATION,
+        language=SEO_PROVIDER_DEFAULT_LANGUAGE,
+        device=SEO_PROVIDER_DEFAULT_DEVICE,
+        limit=1,
+        offset=0,
+    )
+    # Competitor intelligence + keyword opportunities (cached only).
+    comp_row = (await pg.execute(text("""
+        WITH latest AS (
+            SELECT MAX(captured_date) AS d FROM marketing_seo_competitor_snapshots
+            WHERE site_id = :site_id AND provider = :provider)
+        SELECT COUNT(*) AS count, COALESCE(SUM(intersections), 0) AS common_keywords,
+               (SELECT d FROM latest) AS captured_date
+        FROM marketing_seo_competitor_snapshots
+        WHERE site_id = :site_id AND provider = :provider
+          AND captured_date = (SELECT d FROM latest)
+    """), {"site_id": site_id, "provider": SEO_PROVIDER_DEFAULT_PROVIDER})).mappings().first()
+    opportunities = (await pg.execute(text("""
+        SELECT COUNT(DISTINCT normalized_keyword) FROM marketing_seo_keyword_gap_snapshots g
+        WHERE g.site_id = :site_id AND g.gap_type IN ('missing', 'weak')
+          AND g.captured_date = (SELECT MAX(captured_date) FROM marketing_seo_keyword_gap_snapshots
+                                 WHERE site_id = :site_id)
+    """), {"site_id": site_id})).scalar() or 0
+    competitors = {
+        "connected": bool(comp_row and comp_row["captured_date"]),
+        "count": int(comp_row["count"]) if comp_row else 0,
+        "common_keywords": int(comp_row["common_keywords"]) if comp_row else 0,
+        "keyword_opportunities": int(opportunities),
+        "captured_date": comp_row["captured_date"].isoformat() if comp_row and comp_row["captured_date"] else None,
+    }
+    from marketing_os.search.seo_intel_store import latest_backlink_summary, rank_tracking_summary
+
+    bl = await latest_backlink_summary(pg, site_id=site_id)
+    backlink_summary = None
+    if bl:
+        sampled = bl.get("sampled") or {}
+        backlink_summary = {
+            "connected": True, "provider": bl.get("provider"),
+            "backlink_count": bl.get("backlinks"),
+            "referring_domain_count": bl.get("referring_domains"),
+            "new_links_sampled": sampled.get("new_sampled"),
+            "lost_links_sampled": sampled.get("lost_sampled"),
+            "captured_date": bl.get("captured_date"),
+        }
+    rt = await rank_tracking_summary(pg, site_id=site_id)
+    rank_tracking = {**rt, "connected": bool(rt and (rt.get("tracked") or 0) > 0)}
+    return {
+        "provider": SEO_PROVIDER_DEFAULT_PROVIDER,
+        "snapshot": snapshot,
+        "runs": (runs or {}).get("items") or [],
+        "keyword_rows_stored": (keyword_page or {}).get("total") or 0,
+        "keyword_captured_date": (keyword_page or {}).get("captured_date"),
+        "competitors": competitors,
+        "backlink_summary": backlink_summary,
+        "rank_tracking": rank_tracking,
+    }
 
 
 async def _gsc_overview_summary(pg, site_id: str) -> dict:

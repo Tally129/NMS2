@@ -7,6 +7,7 @@ upsert), so re-running a sync for the same window does not duplicate rows.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import date, datetime, timezone
 from typing import Any, Optional
@@ -277,6 +278,32 @@ async def sync_search_console(
 
     finished = datetime.now(timezone.utc)
 
+    # Completeness is derived ONLY from what the provider pagination loop
+    # actually observed. It is None (unknown) when the run errored before
+    # any dimension set finished paginating.
+    complete: bool | None
+    if status == "completed" and pagination:
+        complete = all(
+            item.get("complete") is True for item in pagination.values()
+        )
+    elif status == "error" and pagination and all(
+        item.get("complete") is True for item in pagination.values()
+    ):
+        # Provider reads finished but persistence failed.
+        complete = None
+    else:
+        complete = False if pagination else None
+    pages_consumed = sum(
+        int(item.get("pages") or 0) for item in pagination.values()
+    ) or None
+    safety_ceiling_reached = any(
+        item.get("complete") is not True
+        and item.get("pages") is not None
+        and item.get("max_pages") is not None
+        and int(item.get("pages") or 0) >= int(item.get("max_pages") or 0)
+        for item in pagination.values()
+    ) if pagination else None
+
     async with pg.begin():
         await pg.execute(
             text(
@@ -284,11 +311,14 @@ async def sync_search_console(
                 INSERT INTO marketing_gsc_sync_runs
                     (id, site_id, status, start_date, end_date,
                      rows_synced, source, error, started_at, finished_at,
-                     created_by)
+                     created_by, complete, pagination, pages_consumed,
+                     safety_ceiling_reached)
                 VALUES
                     (:id, :site_id, :status, :start_date, :end_date,
                      :rows_synced, :source, :error, :started_at,
-                     :finished_at, :created_by)
+                     :finished_at, :created_by, :complete,
+                     CAST(:pagination AS JSONB), :pages_consumed,
+                     :safety_ceiling_reached)
                 """
             ),
             {
@@ -303,6 +333,10 @@ async def sync_search_console(
                 "started_at": started,
                 "finished_at": finished,
                 "created_by": created_by,
+                "complete": complete,
+                "pagination": json.dumps(pagination) if pagination else None,
+                "pages_consumed": pages_consumed,
+                "safety_ceiling_reached": safety_ceiling_reached,
             },
         )
 
@@ -316,13 +350,13 @@ async def sync_search_console(
         "end_date": end_date,
         "source": PROVIDER,
         "pagination": pagination,
-        "complete": (
-            status == "completed"
-            and bool(pagination)
-            and all(
-                item.get("complete") is True
-                for item in pagination.values()
-            )
+        "pages_consumed": pages_consumed,
+        "safety_ceiling_reached": safety_ceiling_reached,
+        "complete": bool(complete),
+        "completeness": (
+            "complete" if complete is True
+            else "incomplete" if complete is False
+            else "unknown"
         ),
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),

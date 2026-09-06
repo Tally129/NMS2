@@ -2,12 +2,12 @@
   "version": 2,
   "status": "unchanged",
   "trigger": "scheduler",
-  "started_at": "2026-09-03T09:07:30.844458+00:00",
-  "completed_at": "2026-09-03T09:07:40.753179+00:00",
-  "sitemap_fingerprint": "538b180d60af50b578c40a9eb169079c60827978eef657cea72d31c57621b7ae",
-  "content_fingerprint": "7134c603160c6984db56ac12541659c2a8904778933348bd9dd168dc7399c47f",
-  "knowledge_fingerprint": "7e7e7e510e9ff861350bbcdfc199f528c36c025bafd2f3e15cacf5123fafc9d3",
-  "documents": 116,
+  "started_at": "2026-09-06T07:25:19.054456+00:00",
+  "completed_at": "2026-09-06T07:25:46.921239+00:00",
+  "sitemap_fingerprint": "1e00a3a1870fd65e1406e542ff202177f4571a7e2629baa4407265ca7471f31b",
+  "content_fingerprint": "39210b3842ebc7f26b859d26a7e7d5e013810d6d6a0aa89722380698f2fd847a",
+  "knowledge_fingerprint": "b7f96a6c7ec246dbcb76d4622cb155af072d34237fa8fbc142e5ab51d7d004e9",
+  "documents": 119,
   "failures": 0,
-  "last_success_at": "2026-08-30T22:21:15.745015+00:00"
+  "last_success_at": "2026-09-06T06:18:33.505556+00:00"
 }

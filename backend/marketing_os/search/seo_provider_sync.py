@@ -28,9 +28,13 @@ from datetime import date
 from typing import Any
 
 from marketing_os.integrations.dataforseo import (
+    REPORT_BACKLINKS,
+    REPORT_BACKLINKS_SUMMARY,
     REPORT_COMPETITORS_DOMAIN,
     REPORT_DOMAIN_RANK_OVERVIEW,
+    REPORT_KEYWORD_GAP,
     REPORT_RANKED_KEYWORDS,
+    REPORT_SERP_RANK,
 )
 
 from .seo_provider_persistence import (
@@ -45,11 +49,23 @@ from .seo_provider_persistence import (
 )
 
 
+# Phase 2 reports handled by seo_intel_sync (same bounded paginator).
+EXTENDED_REPORTS = frozenset(
+    {
+        REPORT_KEYWORD_GAP,
+        REPORT_BACKLINKS_SUMMARY,
+        REPORT_BACKLINKS,
+        REPORT_SERP_RANK,
+    }
+)
+SINGLE_REQUEST_REPORTS = frozenset(
+    {REPORT_DOMAIN_RANK_OVERVIEW, REPORT_BACKLINKS_SUMMARY, REPORT_SERP_RANK}
+)
 SUPPORTED_REPORTS = {
     REPORT_RANKED_KEYWORDS,
     REPORT_DOMAIN_RANK_OVERVIEW,
     REPORT_COMPETITORS_DOMAIN,
-}
+} | set(EXTENDED_REPORTS)
 
 
 def _coerce_nonnegative_int(
@@ -162,6 +178,7 @@ async def sync_seo_provider_report(
     limit: int = 100,
     offset: int = 0,
     captured_date: date | None = None,
+    options: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fetch and persist exactly one provider report/page.
 
@@ -185,6 +202,24 @@ async def sync_seo_provider_report(
 
     if limit < 1:
         raise ValueError("limit must be >= 1")
+
+    if normalized_report in EXTENDED_REPORTS:
+        from .seo_intel_sync import sync_extended_report
+
+        return await sync_extended_report(
+            pg,
+            site_id=site_id,
+            target=target,
+            adapter=adapter,
+            report=normalized_report,
+            location=location,
+            language=language,
+            device=device,
+            limit=limit,
+            offset=offset,
+            captured_date=captured_date,
+            options=options,
+        )
 
     common = {
         "target": target,
@@ -462,6 +497,7 @@ async def sync_seo_provider_report_bounded(
     max_pages: int = 10,
     max_total_cost: float = 0.50,
     request_cost_reserve: float = DEFAULT_REQUEST_COST_RESERVE,
+    options: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run a bounded provider refresh.
 
@@ -521,10 +557,10 @@ async def sync_seo_provider_report_bounded(
             "request_cost_reserve cannot exceed max_total_cost"
         )
 
-    # Domain overview is intentionally one request only.
+    # Single-request reports are intentionally one request only.
     effective_max_pages = (
         1
-        if normalized_report == REPORT_DOMAIN_RANK_OVERVIEW
+        if normalized_report in SINGLE_REQUEST_REPORTS
         else max_pages
     )
 
@@ -558,6 +594,7 @@ async def sync_seo_provider_report_bounded(
             limit=limit,
             offset=current_offset,
             captured_date=captured_date,
+            options=options,
         )
 
         pages += 1

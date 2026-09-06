@@ -397,8 +397,8 @@ async def list_provider_runs(
             WHERE site_id = :site_id
               AND provider = :provider
               AND (
-                    :report_type IS NULL
-                    OR report_type = :report_type
+                    CAST(:report_type AS TEXT) IS NULL
+                    OR report_type = CAST(:report_type AS TEXT)
               )
             ORDER BY created_at DESC, id DESC
             LIMIT :limit
@@ -418,8 +418,8 @@ async def list_provider_runs(
             WHERE site_id = :site_id
               AND provider = :provider
               AND (
-                    :report_type IS NULL
-                    OR report_type = :report_type
+                    CAST(:report_type AS TEXT) IS NULL
+                    OR report_type = CAST(:report_type AS TEXT)
               )
             """
         ),

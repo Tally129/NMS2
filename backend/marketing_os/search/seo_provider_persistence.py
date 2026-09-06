@@ -364,6 +364,9 @@ async def persist_organic_keyword_snapshots(
             "keyword_difficulty": item.get("keyword_difficulty"),
             "cpc": item.get("cpc"),
             "current_rank": item.get("current_rank"),
+            "previous_rank": item.get("previous_rank"),
+            "rank_change": item.get("rank_change"),
+            "estimated_traffic": item.get("estimated_traffic"),
             "ranking_url": item.get("ranking_url"),
             "serp_features": _json_array(
                 item.get("serp_features")
@@ -391,6 +394,7 @@ async def persist_organic_keyword_snapshots(
                     intent, search_volume,
                     keyword_difficulty, cpc,
                     current_rank, ranking_url,
+                    previous_rank, rank_change, estimated_traffic,
                     serp_features,
                     location, language, device,
                     provider, captured_date
@@ -401,6 +405,7 @@ async def persist_organic_keyword_snapshots(
                     :intent, :search_volume,
                     :keyword_difficulty, :cpc,
                     :current_rank, :ranking_url,
+                    :previous_rank, :rank_change, :estimated_traffic,
                     CAST(:serp_features AS jsonb),
                     :location, :language, :device,
                     :provider, :captured_date
@@ -419,6 +424,18 @@ async def persist_organic_keyword_snapshots(
                         EXCLUDED.keyword_difficulty,
                     cpc = EXCLUDED.cpc,
                     current_rank = EXCLUDED.current_rank,
+                    previous_rank = COALESCE(
+                        EXCLUDED.previous_rank,
+                        marketing_seo_organic_keyword_snapshots.previous_rank
+                    ),
+                    rank_change = COALESCE(
+                        EXCLUDED.rank_change,
+                        marketing_seo_organic_keyword_snapshots.rank_change
+                    ),
+                    estimated_traffic = COALESCE(
+                        EXCLUDED.estimated_traffic,
+                        marketing_seo_organic_keyword_snapshots.estimated_traffic
+                    ),
                     ranking_url = EXCLUDED.ranking_url,
                     serp_features = EXCLUDED.serp_features,
                     updated_at = now()

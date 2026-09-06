@@ -970,6 +970,29 @@ async def _start_campaign_scheduler():
             "Failed to register Concierge knowledge sync"
         )
 
+    # SEO provider refresh tick: hourly check of governed schedules. It is
+    # a no-op unless SEO_PROVIDER_REFRESH_ENABLED=true AND an admin has
+    # enabled a schedule row AND DataForSEO credentials are configured.
+    # Never calls the provider on dashboard loads.
+    try:
+        from marketing_os.search.seo_refresh import run_due_seo_refreshes
+
+        async def _seo_refresh_tick():
+            try:
+                summary = await run_due_seo_refreshes()
+                if summary.get("ran"):
+                    logger.info("SEO provider refresh tick: %s", summary)
+            except Exception:
+                logger.exception("SEO provider refresh tick failed")
+
+        scheduler.add_job(
+            _seo_refresh_tick, "interval", minutes=60, id="seo_provider_refresh_tick",
+            replace_existing=True, max_instances=1, coalesce=True,
+        )
+        logger.info("SEO provider refresh tick scheduled (interval=60min, opt-in)")
+    except Exception:
+        logger.exception("Failed to register SEO provider refresh tick")
+
     scheduler.start()
     _campaign_scheduler = scheduler
     logger.info("Campaign scheduler started (interval=5min, mode=internal)")

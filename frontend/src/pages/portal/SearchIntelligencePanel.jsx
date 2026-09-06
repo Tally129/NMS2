@@ -5,7 +5,24 @@ import api from "../../lib/api";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import SearchConsoleSection from "./SearchConsoleSection";
-import Phase3Section from "./Phase3Section";
+import OrganicResearchSection from "./OrganicResearchSection";
+import CompetitorsSection from "./seo/CompetitorsSection";
+import KeywordGapSection from "./seo/KeywordGapSection";
+import PositionTrackingSection from "./seo/PositionTrackingSection";
+import BacklinksSection from "./seo/BacklinksSection";
+import ProviderStatusSection from "./seo/ProviderStatusSection";
+import { useAuth } from "../../lib/auth";
+
+const SEO_TABS = [
+  ["overview", "Overview"],
+  ["organic", "Organic Research"],
+  ["competitors", "Competitors"],
+  ["gap", "Keyword Gap"],
+  ["tracking", "Position Tracking"],
+  ["backlinks", "Backlinks"],
+  ["gsc", "Search Console"],
+  ["provider", "Provider / Sync"],
+];
 
 import {
   AlertTriangle,
@@ -31,19 +48,56 @@ function asArray(value, keys = []) {
 }
 
 
-function metricValue(overview, name) {
+function metricValue(overview, name, format) {
   const metric = overview?.metrics?.[name];
-  if (!metric) return { text: "—", connected: false };
-  if (!metric.connected) return { text: "Not connected", connected: false };
-  if (metric.value === null || metric.value === undefined) {
-    return { text: "—", connected: true };
+  if (!metric) return { text: "—", connected: false, source: null };
+  if (!metric.connected) {
+    return { text: "Not connected", connected: false, source: metric.source };
   }
-  return { text: String(metric.value), connected: true };
+  if (metric.value === null || metric.value === undefined) {
+    return { text: "—", connected: true, source: metric.source };
+  }
+  const value = metric.value;
+  let text;
+  if (typeof format === "function") text = format(value);
+  else if (typeof value === "number") {
+    text = Number.isInteger(value)
+      ? value.toLocaleString()
+      : value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  } else text = String(value);
+  return { text, connected: true, source: metric.source };
 }
 
 
-function MetricCard({ label, name, overview, icon: Icon }) {
-  const { text, connected } = metricValue(overview, name);
+// Human labels for the `source` reported by the backend on every metric so
+// the card always tells the reader what the number actually represents.
+const SOURCE_LABELS = {
+  google_search_console: "Google Search Console",
+  dataforseo: "DataForSEO Labs (cached)",
+  dataforseo_serp: "DataForSEO SERP (cached)",
+  rank_tracking: "Rank tracking",
+  rank_provider: "Rank provider",
+  site_audit: "Site audit",
+  marketing_search_keywords: "Tracked keywords",
+  backlink_provider: "Backlink provider",
+  not_connected: "Not connected",
+};
+
+const SOURCE_STYLES = {
+  google_search_console: "bg-blue-50 text-blue-800",
+  dataforseo: "bg-emerald-50 text-emerald-800",
+  dataforseo_serp: "bg-teal-50 text-teal-800",
+  rank_provider: "bg-gray-100 text-gray-600",
+  site_audit: "bg-amber-50 text-amber-800",
+  marketing_search_keywords: "bg-[#faf6ec] text-[#8a6a3c]",
+  backlink_provider: "bg-gray-100 text-gray-600",
+  not_connected: "bg-gray-100 text-gray-500",
+};
+
+
+function MetricCard({ label, name, overview, icon: Icon, format }) {
+  const { text, connected, source } = metricValue(overview, name, format);
+  const sourceLabel = source ? SOURCE_LABELS[source] || source : null;
   return (
     <div
       className={
@@ -66,6 +120,108 @@ function MetricCard({ label, name, overview, icon: Icon }) {
       >
         {text}
       </div>
+      {sourceLabel ? (
+        <span
+          className={
+            "mt-1 inline-block w-fit rounded-full px-2 py-0.5 text-[10px] " +
+            "font-medium " +
+            (SOURCE_STYLES[source] || "bg-gray-100 text-gray-600")
+          }
+          data-testid={`si-metric-${name}-source`}
+        >
+          {sourceLabel}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+
+const DATASET_STYLES = {
+  complete: "border-emerald-200 bg-emerald-50 text-emerald-900",
+  incomplete: "border-amber-200 bg-amber-50 text-amber-900",
+  unknown: "border-gray-200 bg-gray-50 text-gray-700",
+  not_connected: "border-dashed border-[#d8cba9] bg-[#fdfbf5] text-[#6b5836]",
+};
+
+const DATASET_TITLES = {
+  complete: "Provider dataset complete",
+  incomplete: "Provider dataset incomplete",
+  unknown: "Provider completeness unknown",
+  not_connected: "Rank provider not synced",
+};
+
+
+function fmtNum(value) {
+  if (value === null || value === undefined) return "—";
+  const n = Number(value);
+  return Number.isNaN(n) ? String(value) : n.toLocaleString();
+}
+
+
+/*
+ * Completeness indicator for the CACHED rank-provider keyword dataset.
+ * Derived by the backend from the persisted provider-run ledger
+ * (complete / next_offset / provider_total_count). Nothing here is
+ * computed from Search Console, and nothing here triggers a provider call.
+ */
+function ProviderDatasetStatus({ dataset }) {
+  if (!dataset) return null;
+  const status = dataset.status || "unknown";
+  const showCounts =
+    dataset.keyword_rows_stored !== null &&
+    dataset.keyword_rows_stored !== undefined;
+  return (
+    <div
+      className={
+        "rounded-xl border p-3 text-sm " +
+        (DATASET_STYLES[status] || DATASET_STYLES.unknown)
+      }
+      data-testid="si-provider-dataset"
+      data-status={status}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="font-medium" data-testid="si-provider-dataset-title">
+          {DATASET_TITLES[status] || DATASET_TITLES.unknown}
+        </div>
+        {showCounts && status !== "not_connected" ? (
+          <div className="text-xs" data-testid="si-provider-dataset-counts">
+            {fmtNum(dataset.keyword_rows_stored)} keyword rows cached
+            {dataset.provider_total_count !== null &&
+            dataset.provider_total_count !== undefined
+              ? ` · provider reports ${fmtNum(dataset.provider_total_count)}`
+              : ""}
+            {dataset.percent_complete !== null &&
+            dataset.percent_complete !== undefined
+              ? ` · ${dataset.percent_complete}% synced`
+              : ""}
+            {dataset.next_offset !== null && dataset.next_offset !== undefined
+              ? ` · next offset ${fmtNum(dataset.next_offset)}`
+              : ""}
+          </div>
+        ) : null}
+      </div>
+      <p className="mt-1 text-xs" data-testid="si-provider-dataset-message">
+        {dataset.message}
+      </p>
+      {dataset.last_error ? (
+        <p className="mt-1 text-xs text-red-700" data-testid="si-provider-dataset-error">
+          Last provider run reported: {dataset.last_error}
+        </p>
+      ) : null}
+      {dataset.snapshot_captured_date || dataset.keyword_captured_date ? (
+        <p className="mt-1 text-[11px] opacity-80">
+          Snapshot date:{" "}
+          {String(
+            dataset.snapshot_captured_date || dataset.keyword_captured_date
+          ).slice(0, 10)}
+          {dataset.latest_completed_run?.finished_at
+            ? ` · last completed run ${String(
+                dataset.latest_completed_run.finished_at
+              ).slice(0, 19).replace("T", " ")}`
+            : ""}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -149,6 +305,14 @@ export default function SearchIntelligencePanel() {
 
   const [siteUrl, setSiteUrl] = React.useState("");
   const [keywordInput, setKeywordInput] = React.useState("");
+  const [tab, setTab] = React.useState("overview");
+  const [gapCompetitor, setGapCompetitor] = React.useState("");
+  const auth = useAuth();
+  const isAdmin = (auth?.user?.role || "") === "admin";
+  const openGap = (domain) => {
+    setGapCompetitor(domain);
+    setTab("gap");
+  };
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -309,6 +473,31 @@ export default function SearchIntelligencePanel() {
             </Button>
           </div>
 
+          {/* Workspace navigation */}
+          <nav
+            className="mb-5 flex flex-wrap gap-1 border-b border-[#e7dcc2]"
+            data-testid="seo-tabs"
+          >
+            {SEO_TABS.map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setTab(key)}
+                className={
+                  "-mb-px rounded-t-lg border-b-2 px-3 py-2 text-sm " +
+                  (tab === key
+                    ? "border-[#c19a4b] font-semibold text-[#3f3320]"
+                    : "border-transparent text-[#8a6a3c] hover:text-[#3f3320]")
+                }
+                data-testid={`seo-tab-${key}`}
+                aria-current={tab === key ? "page" : undefined}
+              >
+                {label}
+              </button>
+            ))}
+          </nav>
+
+          {tab === "overview" ? (<>
           {/* SEO overview cards */}
           <div
             className={
@@ -334,10 +523,33 @@ export default function SearchIntelligencePanel() {
               icon={TrendingUp}
             />
             <MetricCard
+              label="GSC Impressions"
+              name="organic_impressions"
+              overview={overview}
+            />
+            <MetricCard
+              label="GSC CTR"
+              name="organic_ctr"
+              overview={overview}
+              format={(v) => `${(Number(v) * 100).toFixed(2)}%`}
+            />
+            <MetricCard
+              label="GSC Avg. Position"
+              name="average_organic_position"
+              overview={overview}
+              icon={Gauge}
+            />
+            <MetricCard
               label="Organic Ranking Keywords"
               name="organic_keywords"
               overview={overview}
               icon={Search}
+            />
+            <MetricCard
+              label="Est. Organic Traffic"
+              name="estimated_organic_traffic"
+              overview={overview}
+              icon={TrendingUp}
             />
             <MetricCard
               label="Tracked Keywords"
@@ -346,7 +558,7 @@ export default function SearchIntelligencePanel() {
               icon={Search}
             />
             <MetricCard
-              label="Avg. Position"
+              label="Avg. Tracked Position"
               name="average_tracked_position"
               overview={overview}
               icon={Gauge}
@@ -396,6 +608,103 @@ export default function SearchIntelligencePanel() {
             />
           </div>
 
+          {/* Rank-provider (DataForSEO Labs) keyword-universe movement.
+              Cached snapshot only — distinct from Search Console above. */}
+          <div
+            className="mb-6 rounded-xl border border-[#d8cba9] bg-white p-4"
+            data-testid="si-provider-block"
+          >
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h4 className="font-semibold text-[#3f3320]">
+                  Organic Ranking Intelligence
+                </h4>
+                <p className="text-xs text-[#8a6a3c]">
+                  Third-party keyword-universe estimates from the cached{" "}
+                  {overview?.provider_snapshot?.provider || "rank provider"}{" "}
+                  domain snapshot
+                  {overview?.provider_snapshot?.captured_date
+                    ? ` (captured ${String(
+                        overview.provider_snapshot.captured_date
+                      ).slice(0, 10)}, ${
+                        overview.provider_snapshot.location || ""
+                      } · ${overview.provider_snapshot.device || ""})`
+                    : ""}
+                  . These are not Google Search Console metrics.
+                </p>
+              </div>
+            </div>
+            <div className="mb-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <MetricCard
+                label="New Keywords"
+                name="provider_new_keywords"
+                overview={overview}
+                icon={Plus}
+              />
+              <MetricCard
+                label="Improved Keywords"
+                name="provider_up_keywords"
+                overview={overview}
+                icon={TrendingUp}
+              />
+              <MetricCard
+                label="Declined Keywords"
+                name="provider_down_keywords"
+                overview={overview}
+                icon={TrendingDown}
+              />
+              <MetricCard
+                label="Lost Keywords"
+                name="provider_lost_keywords"
+                overview={overview}
+                icon={AlertTriangle}
+              />
+            </div>
+            <ProviderDatasetStatus dataset={overview?.provider_dataset} />
+          </div>
+
+          {/* Competitor intelligence / Backlinks / Rank tracking KPI groups */}
+          <div className="mb-6 grid gap-4 lg:grid-cols-3" data-testid="si-intel-groups">
+            <div className="rounded-xl border border-[#d8cba9] bg-white p-4" data-testid="si-competitor-group">
+              <h4 className="mb-2 font-semibold text-[#3f3320]">Competitor Intelligence</h4>
+              <div className="grid grid-cols-3 gap-2">
+                <MetricCard label="Organic Competitors" name="organic_competitors" overview={overview} />
+                <MetricCard label="Common Keywords" name="competitor_common_keywords" overview={overview} />
+                <MetricCard label="Keyword Opportunities" name="keyword_opportunities" overview={overview} />
+              </div>
+              <p className="mt-2 text-[11px] text-[#a99b7d]">Common keywords = sum of provider intersections across cached competitors. Opportunities = distinct missing/weak gap keywords in the latest gap snapshot.</p>
+            </div>
+            <div className="rounded-xl border border-[#d8cba9] bg-white p-4" data-testid="si-backlink-group">
+              <h4 className="mb-2 font-semibold text-[#3f3320]">Backlinks</h4>
+              <div className="grid grid-cols-2 gap-2">
+                <MetricCard label="Backlinks" name="backlink_count" overview={overview} />
+                <MetricCard label="Referring Domains" name="referring_domain_count" overview={overview} />
+                <MetricCard label="New Links (sampled)" name="backlink_new_links_sampled" overview={overview} />
+                <MetricCard label="Lost Links (sampled)" name="backlink_lost_links_sampled" overview={overview} />
+              </div>
+            </div>
+            <div className="rounded-xl border border-[#d8cba9] bg-white p-4" data-testid="si-tracking-group">
+              <h4 className="mb-2 font-semibold text-[#3f3320]">Rank Tracking</h4>
+              <div className="grid grid-cols-3 gap-2">
+                <MetricCard label="Tracked" name="rt_tracked_keywords" overview={overview} />
+                <MetricCard label="Top 3" name="rt_top_3" overview={overview} />
+                <MetricCard label="Top 10" name="rt_top_10" overview={overview} />
+                <MetricCard label="Top 20" name="rt_top_20" overview={overview} />
+                <MetricCard label="Improved" name="rt_improved" overview={overview} />
+                <MetricCard label="Declined" name="rt_declined" overview={overview} />
+              </div>
+            </div>
+          </div>
+          </>) : null}
+
+          {tab === "organic" ? <OrganicResearchSection overview={overview} /> : null}
+          {tab === "competitors" ? <CompetitorsSection onOpenGap={openGap} /> : null}
+          {tab === "gap" ? <KeywordGapSection initialCompetitor={gapCompetitor} /> : null}
+          {tab === "tracking" ? <PositionTrackingSection isAdmin={isAdmin} /> : null}
+          {tab === "backlinks" ? <BacklinksSection /> : null}
+          {tab === "provider" ? <ProviderStatusSection isAdmin={isAdmin} /> : null}
+
+          {tab === "overview" ? (<>
           {/* Technical audit summary */}
           <div className="mb-6 rounded-xl border border-[#d8cba9] bg-white p-4">
             <div className="mb-3 flex items-center justify-between">
@@ -578,8 +887,9 @@ export default function SearchIntelligencePanel() {
             </div>
           ) : null}
 
-          <SearchConsoleSection />
-          <Phase3Section />
+          </>) : null}
+
+          {tab === "gsc" ? <SearchConsoleSection /> : null}
         </>
       )}
     </SectionCard>
