@@ -36,7 +36,7 @@ from marketing_os.search.rank_tracking import (
 
 VALID_SA = json.dumps({
     "client_email": "svc@example.iam.gserviceaccount.com",
-    "private_key": "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----",
+    "private_key": "TEST_PRIVATE_KEY",
     "token_uri": "https://oauth2.googleapis.com/token",
 })
 
