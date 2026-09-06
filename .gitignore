@@ -3,7 +3,6 @@
 # IDE and editors
 .idea/
 .vscode/
-
 # Dependencies
 node_modules/
 /node_modules
@@ -15,55 +14,43 @@ node_modules/
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
-
 # Testing
 /coverage
-
 # Next.js
 /.next/
 /out/
 next-env.d.ts
 *.tsbuildinfo
-
 # Production builds
 /build
 dist/
 dist
-
 # Environment files (comprehensive coverage)
-
 *token.json*
 *credentials.json*
-
 # Logs and debug files
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 dump.rdb
-
 # System files
 .DS_Store
 *.pem
-
 # Python
 __pycache__/
 *pyc*
 venv/
 .venv/
-
 # Development tools
 chainlit.md
 .chainlit
 .ipynb_checkpoints/
 .ac
-
 # Deployment
 .vercel
-
 # Data and databases
 agenthub/agents/youtube/db
-
 # Archive files and large assets
 **/*.zip
 **/*.tar.gz
@@ -72,18 +59,14 @@ agenthub/agents/youtube/db
 *.pack
 *.deb
 *.dylib
-
 # Build caches
 .cache/
-
 memory/test_credentials.md
-
 # Mobile development
 android-sdk/frontend/node_modules/.cache/default-development/10.pack
 frontend/node_modules/.cache/default-development/10.pack
 frontend/node_modules/.cache/default-development/18.pack
 frontend/node_modules/.cache/default-development/7.pack
-frontend/node_modules/.cache/default-development/1.pack
 frontend/node_modules/.cache/default-development/1.pack
 frontend/node_modules/.cache/default-development/2.pack
 frontend/node_modules/.cache/default-development/4.pack
@@ -97,7 +80,6 @@ frontend/node_modules/.cache/default-development/14.pack
 frontend/node_modules/.cache/default-development/16.pack
 frontend/node_modules/.cache/default-development/15.pack
 frontend/node_modules/.cache/default-development/8.pack
-
 # Sprint 1 gate item #3 — never commit real secrets
 backend/.env
 frontend/.env
@@ -117,7 +99,6 @@ frontend/node_modules/.cache/default-development/26.pack
 frontend/node_modules/.cache/default-development/28.pack
 frontend/node_modules/.cache/default-development/31.pack
 frontend/node_modules/.cache/default-development/35.pack
-
 # Test artifacts (generated per-run, may embed credentials/tokens)
 /test_reports/
 /backend/backend/tests/pytest/
@@ -125,7 +106,6 @@ frontend/node_modules/.cache/default-development/35.pack
 /tmp/gridfs_pre_drop_snapshot.json
 frontend/node_modules/.cache/default-development/21.pack
 frontend/node_modules/.cache/default-development/22.pack
-
 # Local code-edit backups
 **/*.before-*
 **/*.bootstrap-backup
@@ -134,3 +114,17 @@ frontend/node_modules/.cache/default-development/22.pack
 **/*.pre-aggregate-fix
 **/*.pre-*
 frontend/src.before-patient-wording/
+# Google / OAuth secrets
+client_secret*.json
+client-secret*.json
+credentials*.json
+google_credentials*.json
+google-credentials*.json
+google_token*.json
+google-token*.json
+service_account*.json
+service-account*.json
+oauth_token*.json
+oauth-token*.json
+refresh_token*.json
+refresh-token*.json
